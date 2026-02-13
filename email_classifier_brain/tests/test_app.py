@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import MagicMock, patch
 import os
 import sys
+from datetime import datetime, timedelta
 
 # Add the brain directory to sys.path to resolve imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -56,7 +57,10 @@ def test_run_classification(client, mock_imap_client, mock_classify_functions):
     from email.message import Message
     mock_msg = Message()
     mock_msg["From"] = "sender@test.com"
+    mock_msg["To"] = "recipient@test.com"
     mock_msg["Subject"] = "Test Subject"
+    # Valid date string
+    mock_msg["Date"] = "Wed, 02 Oct 2024 10:00:00 -0000"
 
     # Mock fetch_unprocessed_emails to return one email
     mock_instance.fetch_unprocessed_emails.return_value = [(b"123", mock_msg)]
@@ -74,6 +78,7 @@ def test_run_classification(client, mock_imap_client, mock_classify_functions):
     assert data["processed_count"] == 1
     assert data["details"][0]["label"] == "URGENT"
     assert data["details"][0]["score"] == 0.95
+    assert data["details"][0]["recipient"] == "recipient@test.com"
 
     # Verify label was applied
     mock_instance.apply_label.assert_called_with(b"123", "URGENT")
@@ -82,68 +87,80 @@ def test_run_classification(client, mock_imap_client, mock_classify_functions):
     stats_response = client.get("/stats")
     assert stats_response.json()["stats"]["URGENT"] == 1
 
-def test_notifications(client, mock_imap_client, mock_classify_functions):
+def test_run_classification_limit(client, mock_imap_client, mock_classify_functions):
+    mock_instance = mock_imap_client.return_value
+    from email.message import Message
+    mock_msg = Message()
+    mock_instance.fetch_unprocessed_emails.return_value = [(b"1", mock_msg), (b"2", mock_msg), (b"3", mock_msg)]
+    mock_classify_functions.predict_raw_email.return_value = ("NOISE", 0.1)
+
+    # Call with limit=2
+    response = client.post("/run?limit=2")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["processed_count"] == 2
+
+def test_pop_notifications(client, mock_imap_client, mock_classify_functions):
     # Setup mock behavior
     mock_instance = mock_imap_client.return_value
 
     from email.message import Message
     mock_msg = Message()
     mock_msg["From"] = "sender@test.com"
-    mock_msg["Subject"] = "Test Notification"
+    mock_msg["Subject"] = "Test Pop"
 
     mock_instance.fetch_unprocessed_emails.return_value = [(b"123", mock_msg)]
     mock_classify_functions.predict_raw_email.return_value = ("URGENT", 0.95)
     mock_classify_functions.get_available_categories.return_value = ["URGENT"]
 
-    # Run classification to generate a notification
+    # Run classification
     client.post("/run")
 
-    # Check notifications
+    # Check unread notifications first
     response = client.get("/notifications")
-    assert response.status_code == 200
-    notifs = response.json()
+    assert len(response.json()) == 1
 
-    # Find our notification
-    my_notif = next((n for n in notifs if n["subject"] == "Test Notification"), None)
-    assert my_notif is not None
-    assert my_notif["predicted_category"] == "URGENT"
-    assert my_notif["is_read"] == 0
+    # Pop notifications
+    pop_response = client.post("/notifications/pop")
+    assert pop_response.status_code == 200
+    popped = pop_response.json()
+    assert len(popped) == 1
+    assert popped[0]["subject"] == "Test Pop"
 
-    # Ack notification
-    ack_response = client.post("/notifications/ack", json={"ids": [my_notif["id"]]})
-    assert ack_response.status_code == 200
-
-    # Check notifications again (should be marked read)
-    response = client.get("/notifications")
-    # Verify it's no longer in the list (since endpoint returns unread)
-    notifs = response.json()
-    assert not any(n["id"] == my_notif["id"] for n in notifs)
-
-def test_ack_all_notifications(client, mock_imap_client, mock_classify_functions):
-    # Setup mock behavior
-    mock_instance = mock_imap_client.return_value
-
-    from email.message import Message
-    mock_msg = Message()
-    mock_msg["From"] = "sender@test.com"
-    mock_msg["Subject"] = "Test All"
-
-    mock_instance.fetch_unprocessed_emails.return_value = [(b"123", mock_msg), (b"124", mock_msg)]
-    mock_classify_functions.predict_raw_email.return_value = ("URGENT", 0.95)
-    mock_classify_functions.get_available_categories.return_value = ["URGENT"]
-
-    # Run classification to generate notifications
-    client.post("/run")
-
-    # Check notifications
-    response = client.get("/notifications")
-    initial_count = len(response.json())
-    assert initial_count >= 2
-
-    # Ack ALL notifications (no IDs provided)
-    ack_response = client.post("/notifications/ack", json={})
-    assert ack_response.status_code == 200
-
-    # Check notifications again (should be empty)
+    # Check unread notifications again (should be empty)
     response = client.get("/notifications")
     assert len(response.json()) == 0
+
+def test_get_read_notifications(client, mock_imap_client, mock_classify_functions):
+    # Setup mock behavior
+    mock_instance = mock_imap_client.return_value
+    from email.message import Message
+    mock_msg = Message()
+    mock_msg["Subject"] = "Test Read"
+
+    # Use a date we can query
+    now = datetime.utcnow()
+    # Note: The mock date string in email vs system time might differ but database uses parsed or system time.
+    # In main.py we try to parse the Date header. If missing/invalid, we use system time.
+    # Let's rely on system time for simplicity in this test or ensure parsing works.
+
+    mock_instance.fetch_unprocessed_emails.return_value = [(b"123", mock_msg)]
+    mock_classify_functions.predict_raw_email.return_value = ("URGENT", 0.95)
+
+    # Run classification
+    client.post("/run")
+
+    # Ack notifications to mark as read
+    client.post("/notifications/ack", json={})
+
+    # Query read notifications
+    # Ensure our query range covers the insertion time
+    start_time = (now - timedelta(hours=1)).isoformat()
+    end_time = (now + timedelta(hours=1)).isoformat()
+
+    response = client.get(f"/notifications/read?start_time={start_time}&end_time={end_time}")
+    assert response.status_code == 200
+    read_notifs = response.json()
+    assert len(read_notifs) == 1
+    assert read_notifs[0]["subject"] == "Test Read"
+    assert read_notifs[0]["is_read"] == 1

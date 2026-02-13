@@ -113,7 +113,9 @@ def predict_email(
         return_score: If True, returns a tuple (label, confidence_score).
 
     Returns:
-        A category string (e.g. "URGENT") or a tuple (category, score).
+        A category string (e.g. "URGENT", "FOCUS", "REFERENCE", "NOISE"),
+        or any custom category discovered during training.
+        If return_score is True, returns a tuple (category, score).
     """
     model_input = format_model_input(
         subject=subject,

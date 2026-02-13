@@ -17,11 +17,21 @@ def init_db() -> None:
     """Initialize the database tables if they do not exist."""
     conn = get_db_connection()
     c = conn.cursor()
+
+    # Check if recipient column exists (for migration of existing DB)
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='logs'")
+    if c.fetchone():
+        c.execute("PRAGMA table_info(logs)")
+        columns = [row['name'] for row in c.fetchall()]
+        if 'recipient' not in columns:
+            c.execute("ALTER TABLE logs ADD COLUMN recipient TEXT")
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
             sender TEXT,
+            recipient TEXT,
             subject TEXT,
             predicted_category TEXT,
             confidence_score REAL,
@@ -31,15 +41,17 @@ def init_db() -> None:
     conn.commit()
     conn.close()
 
-def add_log(sender: str, subject: str, predicted_category: str, confidence_score: float) -> None:
+def add_log(sender: str, recipient: str, subject: str, predicted_category: str, confidence_score: float, timestamp: Optional[datetime.datetime] = None) -> None:
     """Add a new classification log entry."""
     conn = get_db_connection()
     c = conn.cursor()
-    timestamp = datetime.datetime.now().isoformat()
+    # Use provided timestamp or current time
+    ts_str = timestamp.isoformat() if timestamp else datetime.datetime.now().isoformat()
+
     c.execute('''
-        INSERT INTO logs (timestamp, sender, subject, predicted_category, confidence_score, is_read)
-        VALUES (?, ?, ?, ?, ?, 0)
-    ''', (timestamp, sender, subject, predicted_category, confidence_score))
+        INSERT INTO logs (timestamp, sender, recipient, subject, predicted_category, confidence_score, is_read)
+        VALUES (?, ?, ?, ?, ?, ?, 0)
+    ''', (ts_str, sender, recipient, subject, predicted_category, confidence_score))
     conn.commit()
     conn.close()
 
@@ -97,3 +109,37 @@ def ack_notifications(log_ids: Optional[List[int]] = None) -> None:
         c.execute("UPDATE logs SET is_read = 1 WHERE is_read = 0")
     conn.commit()
     conn.close()
+
+def pop_unread_notifications() -> List[Dict[str, Any]]:
+    """Get all unread notifications and mark them as read immediately."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    # Fetch first
+    c.execute("SELECT * FROM logs WHERE is_read = 0 ORDER BY timestamp DESC")
+    rows = c.fetchall()
+
+    if rows:
+        ids = [row['id'] for row in rows]
+        placeholders = ','.join('?' for _ in ids)
+        c.execute(f"UPDATE logs SET is_read = 1 WHERE id IN ({placeholders})", ids)
+        conn.commit()
+
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_read_notifications(start_time: datetime.datetime, end_time: datetime.datetime) -> List[Dict[str, Any]]:
+    """Get read notifications within a time range."""
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    c.execute('''
+        SELECT * FROM logs
+        WHERE is_read = 1
+        AND timestamp >= ?
+        AND timestamp <= ?
+        ORDER BY timestamp DESC
+    ''', (start_time.isoformat(), end_time.isoformat()))
+
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
