@@ -56,6 +56,8 @@ import json
 import os
 from dataclasses import dataclass, field
 
+import torch
+
 from datasets import Dataset
 from setfit import SetFitModel, Trainer, TrainingArguments
 
@@ -198,14 +200,24 @@ def train() -> None:
     samples = load_training_data(TRAINING_DATA_DIR)
     dataset, label_mapping = build_dataset(samples)
 
+    # Auto-detect Apple Silicon GPU (MPS) for faster training
+    if torch.backends.mps.is_available():
+        device = "mps"
+    elif torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+    print(f"Training on device: {device}")
+
     # Load the base model
-    model = SetFitModel.from_pretrained(BASE_MODEL)
+    model = SetFitModel.from_pretrained(BASE_MODEL, device=device)
 
     # Configure training arguments
     args = TrainingArguments(
         batch_size=16,
         num_epochs=1,
         num_iterations=20,  # Number of text pairs for contrastive learning
+        save_strategy="no",  # We save the final model ourselves below
     )
 
     # Create trainer and train

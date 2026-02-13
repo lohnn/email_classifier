@@ -25,3 +25,4 @@ model/
 
 # Environment / secrets
 .env
+checkpoints/
