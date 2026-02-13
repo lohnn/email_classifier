@@ -91,14 +91,21 @@ def test_run_classification_limit(client, mock_imap_client, mock_classify_functi
     mock_instance = mock_imap_client.return_value
     from email.message import Message
     mock_msg = Message()
-    mock_instance.fetch_unprocessed_emails.return_value = [(b"1", mock_msg), (b"2", mock_msg), (b"3", mock_msg)]
+    # Create 25 mock messages
+    mock_instance.fetch_unprocessed_emails.return_value = [(str(i).encode(), mock_msg) for i in range(25)]
     mock_classify_functions.predict_raw_email.return_value = ("NOISE", 0.1)
 
-    # Call with limit=2
-    response = client.post("/run?limit=2")
+    # Call with default limit (should be 20)
+    response = client.post("/run")
     assert response.status_code == 200
     data = response.json()
-    assert data["processed_count"] == 2
+    assert data["processed_count"] == 20
+
+    # Call with explicit limit=5
+    response = client.post("/run?limit=5")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["processed_count"] == 5
 
 def test_pop_notifications(client, mock_imap_client, mock_classify_functions):
     # Setup mock behavior

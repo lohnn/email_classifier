@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Email Classifier Microservice", lifespan=lifespan)
 
 # Job
-def classification_job(limit: Optional[int] = None):
+def classification_job(limit: int = 20):
     logger.info("Starting classification job...")
     results = []
     client = None
@@ -66,8 +66,8 @@ def classification_job(limit: Optional[int] = None):
         emails = client.fetch_unprocessed_emails(known_labels)
         logger.info(f"Found {len(emails)} unprocessed emails.")
 
-        # Simple limiting if requested (though fetch still gets all headers)
-        if limit and len(emails) > limit:
+        # Simple limiting (though fetch still gets all headers)
+        if len(emails) > limit:
             logger.info(f"Limiting processing to first {limit} emails.")
             emails = emails[:limit]
 
@@ -143,10 +143,10 @@ class RunResponse(BaseModel):
 
 # Endpoints
 @app.post("/run", response_model=RunResponse)
-def run_classification(background_tasks: BackgroundTasks, limit: Optional[int] = Query(None, description="Limit the number of emails to process")):
+def run_classification(background_tasks: BackgroundTasks, limit: int = Query(20, description="Limit the number of emails to process")):
     """
     Manually trigger the classification job immediately.
-    Optionally limit the number of emails processed.
+    Optionally limit the number of emails processed (default: 20).
     """
     results = classification_job(limit=limit)
     return {
