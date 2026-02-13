@@ -33,10 +33,12 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
 
 ## Configuration
 
-Edit `config.py` to set your email address:
+Copy `.env.example` to `.env` and set your email address(es):
 
-```python
-MY_EMAIL = "me@company.com"
+```bash
+cp .env.example .env
+# Then edit .env:
+MY_EMAIL=me@company.com,my.alias@company.com
 ```
 
 This is used to determine your **role** in each email:
