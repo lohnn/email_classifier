@@ -5,17 +5,31 @@ config.py — Shared Configuration & Input Formatting
 Central module used by both train.py and classify.py to ensure
 the model input format is always consistent between training and
 inference.
+
+Configuration is loaded from a `.env` file in the project root.
+Copy `.env.example` to `.env` and fill in your values.
 """
 
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # ---------------------------------------------------------------------------
-# User Configuration
+# User Configuration (from .env)
 # ---------------------------------------------------------------------------
 
-# Set this to your email address. Used to determine your role in an email:
-#   - "Direct" if MY_EMAIL is in the "To" field
-#   - "CC" if MY_EMAIL is in the "CC" field
+# Comma-separated list of your email addresses.
+# Used to determine your role in an email:
+#   - "Direct" if any of your addresses is in the "To" field
+#   - "CC" if any is in the "CC" field
 #   - "Hidden" otherwise (BCC, mailing list, etc.)
-MY_EMAIL = "me@company.com"
+MY_EMAILS: list[str] = [
+    addr.strip().lower()
+    for addr in os.getenv("MY_EMAIL", "me@company.com").split(",")
+    if addr.strip()
+]
 
 # ---------------------------------------------------------------------------
 # Model & Paths
@@ -35,18 +49,26 @@ def determine_role(to: str, cc: str) -> str:
     """
     Determine the user's role in an email based on To/CC fields.
 
+    Checks all addresses in MY_EMAILS against the To and CC headers.
+
     Args:
         to: The "To" header value (may contain multiple addresses).
         cc: The "CC" header value (may contain multiple addresses).
 
     Returns:
-        "Direct" if MY_EMAIL is in To, "CC" if in CC, else "Hidden".
+        "Direct" if any of MY_EMAILS is in To, "CC" if in CC, else "Hidden".
     """
-    my_email_lower = MY_EMAIL.lower()
-    if my_email_lower in to.lower():
-        return "Direct"
-    if my_email_lower in cc.lower():
-        return "CC"
+    to_lower = to.lower()
+    cc_lower = cc.lower()
+
+    for addr in MY_EMAILS:
+        if addr in to_lower:
+            return "Direct"
+
+    for addr in MY_EMAILS:
+        if addr in cc_lower:
+            return "CC"
+
     return "Hidden"
 
 
