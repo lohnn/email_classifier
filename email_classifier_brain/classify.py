@@ -40,7 +40,7 @@ import os
 
 from setfit import SetFitModel
 
-from config import MODEL_OUTPUT_DIR, format_model_input
+from classifier_brain.config import MODEL_OUTPUT_DIR, format_model_input
 
 
 # ---------------------------------------------------------------------------
