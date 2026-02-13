@@ -40,7 +40,10 @@ import os
 
 from setfit import SetFitModel
 
-from classifier_brain.config import MODEL_OUTPUT_DIR, format_model_input
+try:
+    from config import MODEL_OUTPUT_DIR, format_model_input
+except ImportError:
+    from classifier_brain.config import MODEL_OUTPUT_DIR, format_model_input
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +93,8 @@ def predict_email(
     cc: str = "",
     mass_mail: bool = False,
     attachment_types: list[str] | None = None,
-) -> str:
+    return_score: bool = False,
+) -> str | tuple[str, float]:
     """
     Classify an email and return the predicted category label.
 
@@ -106,10 +110,10 @@ def predict_email(
         mass_mail: Whether the email has a List-Unsubscribe header.
         attachment_types: List of file extensions (e.g. ["PDF", "ICS"]).
                           None or [] means no attachments.
+        return_score: If True, returns a tuple (label, confidence_score).
 
     Returns:
-        A category string, e.g. "URGENT", "FOCUS", "REFERENCE", "NOISE",
-        or any custom category discovered during training.
+        A category string (e.g. "URGENT") or a tuple (category, score).
     """
     model_input = format_model_input(
         subject=subject,
@@ -121,6 +125,16 @@ def predict_email(
         attachment_types=attachment_types,
     )
 
+    if return_score:
+        # Get probabilities for all classes
+        probs = _model.predict_proba([model_input])[0]
+        # Find the index of the highest probability
+        predicted_index = int(probs.argmax())
+        score = float(probs[predicted_index])
+
+        label = _label_mapping.get(predicted_index, f"UNKNOWN({predicted_index})")
+        return label, score
+
     prediction = _model.predict([model_input])
 
     # SetFit returns a tensor or array; extract the integer label
@@ -129,7 +143,7 @@ def predict_email(
     return label
 
 
-def predict_raw_email(msg: email.message.Message) -> str:
+def predict_raw_email(msg: email.message.Message, return_score: bool = False) -> str | tuple[str, float]:
     """
     Classify a raw email.message.Message by auto-extracting headers.
 
@@ -138,9 +152,10 @@ def predict_raw_email(msg: email.message.Message) -> str:
 
     Args:
         msg: A Python email.message.Message (e.g. from email.message_from_file).
+        return_score: If True, returns a tuple (label, confidence_score).
 
     Returns:
-        A category string.
+        A category string or tuple (category, score).
     """
     sender = msg.get("From", "")
     to = msg.get("To", "")
@@ -201,6 +216,7 @@ def predict_raw_email(msg: email.message.Message) -> str:
         cc=cc,
         mass_mail=mass_mail,
         attachment_types=unique_types,
+        return_score=return_score,
     )
 
 
