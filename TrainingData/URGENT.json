@@ -1,0 +1,47 @@
+[
+  {
+    "subject": "Server is down",
+    "body": "Server is down, all services are offline! Engineers have been paged but no one has responded yet. Multiple customers are reporting issues.",
+    "from": "ops-alert@company.com",
+    "to": "me@company.com",
+    "cc": "",
+    "mass_mail": false,
+    "attachment_types": []
+  },
+  {
+    "subject": "Critical security vulnerability detected",
+    "body": "A critical security vulnerability has been detected in production. We need to patch this immediately before it can be exploited.",
+    "from": "security@company.com",
+    "to": "me@company.com",
+    "cc": "cto@company.com",
+    "mass_mail": false,
+    "attachment_types": ["PDF"]
+  },
+  {
+    "subject": "Customer data breach reported",
+    "body": "Customer data breach reported. Immediate action needed to contain the breach and notify affected users per GDPR requirements.",
+    "from": "legal@company.com",
+    "to": "me@company.com, security@company.com",
+    "cc": "",
+    "mass_mail": false,
+    "attachment_types": ["PDF", "DOCX"]
+  },
+  {
+    "subject": "Payment system failure",
+    "body": "The payment system has failed and all transactions are currently blocked. Finance team has been alerted.",
+    "from": "payments-monitor@company.com",
+    "to": "me@company.com",
+    "cc": "finance@company.com",
+    "mass_mail": false,
+    "attachment_types": []
+  },
+  {
+    "subject": "Emergency meeting about the outage",
+    "body": "Join emergency meeting in 10 minutes to discuss the ongoing production outage. Bridge line details attached.",
+    "from": "manager@company.com",
+    "to": "me@company.com, team@company.com",
+    "cc": "",
+    "mass_mail": false,
+    "attachment_types": ["ICS"]
+  }
+]
