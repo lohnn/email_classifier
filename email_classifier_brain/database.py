@@ -45,8 +45,11 @@ def add_log(sender: str, recipient: str, subject: str, predicted_category: str, 
     """Add a new classification log entry."""
     conn = get_db_connection()
     c = conn.cursor()
-    # Use provided timestamp or current time
-    ts_str = timestamp.isoformat() if timestamp else datetime.datetime.now().isoformat()
+    # Use provided timestamp or current time (UTC)
+    if timestamp:
+        ts_str = timestamp.isoformat()
+    else:
+        ts_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     c.execute('''
         INSERT INTO logs (timestamp, sender, recipient, subject, predicted_category, confidence_score, is_read)

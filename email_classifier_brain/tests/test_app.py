@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import MagicMock, patch
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Add the brain directory to sys.path to resolve imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -176,7 +176,7 @@ def test_get_read_notifications(client, mock_imap_client, mock_classify_function
     mock_msg["Subject"] = "Test Read"
 
     # Use a date we can query
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     # Note: The mock date string in email vs system time might differ but database uses parsed or system time.
     # In main.py we try to parse the Date header. If missing/invalid, we use system time.
     # Let's rely on system time for simplicity in this test or ensure parsing works.
@@ -195,7 +195,10 @@ def test_get_read_notifications(client, mock_imap_client, mock_classify_function
     start_time = (now - timedelta(hours=1)).isoformat()
     end_time = (now + timedelta(hours=1)).isoformat()
 
-    response = client.get(f"/notifications/read?start_time={start_time}&end_time={end_time}")
+    # URL encode the timestamps because they might contain '+' which is special in URLs
+    from urllib.parse import quote
+
+    response = client.get(f"/notifications/read?start_time={quote(start_time)}&end_time={quote(end_time)}")
     assert response.status_code == 200
     read_notifs = response.json()
     assert len(read_notifs) == 1
