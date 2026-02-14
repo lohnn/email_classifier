@@ -112,20 +112,12 @@ def ack_notifications(log_ids: Optional[List[int]] = None) -> None:
 
 def pop_unread_notifications() -> List[Dict[str, Any]]:
     """Get all unread notifications and mark them as read immediately."""
-    conn = get_db_connection()
-    c = conn.cursor()
-    # Fetch first
-    c.execute("SELECT * FROM logs WHERE is_read = 0 ORDER BY timestamp DESC")
-    rows = c.fetchall()
-
-    if rows:
-        ids = [row['id'] for row in rows]
-        placeholders = ','.join('?' for _ in ids)
-        c.execute(f"UPDATE logs SET is_read = 1 WHERE id IN ({placeholders})", ids)
-        conn.commit()
-
-    conn.close()
-    return [dict(row) for row in rows]
+    # Reuse existing functions to avoid duplication
+    unread = get_unread_notifications()
+    if unread:
+        ids = [row['id'] for row in unread]
+        ack_notifications(ids)
+    return unread
 
 def get_read_notifications(start_time: datetime.datetime, end_time: datetime.datetime) -> List[Dict[str, Any]]:
     """Get read notifications within a time range."""
