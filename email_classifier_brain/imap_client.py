@@ -67,31 +67,41 @@ class GmailClient:
         email_ids = data[0].split()
         results = []
 
-        for e_id in email_ids:
-            # Fetch BODY.PEEK[] (full content) and X-GM-LABELS
-            # PEEK prevents marking as \Seen implicitly by the fetch of body.
-            typ, msg_data = self.connection.fetch(e_id, '(BODY.PEEK[] X-GM-LABELS)')
-            if typ != 'OK':
-                continue
+        if not email_ids:
+            return results
 
-            raw_email = None
-            labels_str = ""
+        # Construct a comma-separated list of IDs for batch fetching
+        ids_str = b','.join(email_ids)
 
-            for response_part in msg_data:
-                if isinstance(response_part, tuple):
-                    # response_part[0] is bytes, header line
-                    # Example: b'1 (X-GM-LABELS (\\Inbox \\Important) BODY.PEEK[] {1234}'
-                    metadata = response_part[0].decode('utf-8', errors='ignore')
+        # Fetch BODY.PEEK[] (full content) and X-GM-LABELS for all IDs
+        # PEEK prevents marking as \Seen implicitly by the fetch of body.
+        typ, msg_data = self.connection.fetch(ids_str, '(BODY.PEEK[] X-GM-LABELS)')
 
-                    # Extract content inside X-GM-LABELS (...)
-                    match = re.search(r'X-GM-LABELS \((.*?)\)', metadata)
-                    if match:
-                        labels_str = match.group(1)
+        if typ != 'OK':
+            return []
 
-                    # The second element is the body content
-                    raw_email = response_part[1]
+        for response_part in msg_data:
+            if isinstance(response_part, tuple):
+                # response_part[0] is bytes, header line
+                # Example: b'1 (X-GM-LABELS (\\Inbox \\Important) BODY.PEEK[] {1234}'
+                metadata = response_part[0].decode('utf-8', errors='ignore')
 
-            if raw_email:
+                # Extract sequence number (ID) from the beginning of metadata
+                # Format is: SEQ (ITEMS...)
+                seq_match = re.match(r'^(\d+)', metadata)
+                if not seq_match:
+                    continue
+                e_id = seq_match.group(1).encode('utf-8')
+
+                # Extract content inside X-GM-LABELS (...)
+                labels_str = ""
+                match = re.search(r'X-GM-LABELS \((.*?)\)', metadata)
+                if match:
+                    labels_str = match.group(1)
+
+                # The second element is the body content
+                raw_email = response_part[1]
+
                 skip = False
                 for label in known_labels:
                     # Robust check for label presence
