@@ -3,6 +3,7 @@ import email
 import os
 import ssl
 import re
+import logging
 from email.message import Message
 from typing import List, Tuple
 from dotenv import load_dotenv
@@ -10,6 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 IMAP_SERVER = "imap.gmail.com"
+logger = logging.getLogger(__name__)
 
 class GmailClient:
     def __init__(self):
@@ -134,6 +136,6 @@ class GmailClient:
         try:
             typ, data = self.connection.store(email_id, '+X-GM-LABELS', f'({label_to_send})')
             if typ != 'OK':
-                print(f"Failed to apply label {label} to {email_id}: {data}")
+                logger.error(f"Failed to apply label {label} to {email_id}: {data}")
         except Exception as e:
-            print(f"Error applying label {label} to {email_id}: {e}")
+            logger.error(f"Error applying label {label} to {email_id}: {e}")
