@@ -21,6 +21,11 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Global lock for the classification job to prevent concurrent execution
+# Since we are running in a sync endpoint, a threading.Lock is appropriate.
+import threading
+job_lock = threading.Lock()
+
 scheduler = BackgroundScheduler()
 
 @asynccontextmanager
@@ -51,6 +56,15 @@ app = FastAPI(title="Email Classifier Microservice", lifespan=lifespan)
 
 # Job
 def classification_job(limit: int = 20):
+    if not job_lock.acquire(blocking=False):
+        logger.warning("Classification job already running. Skipping this execution.")
+        return {
+            "status": "skipped",
+            "reason": "Job already running",
+            "processed_count": 0,
+            "details": []
+        }
+
     logger.info("Starting classification job...")
     results = []
     client = None
@@ -117,6 +131,7 @@ def classification_job(limit: int = 20):
     finally:
         if client:
             client.disconnect()
+        job_lock.release()
 
 
 # Models
@@ -147,12 +162,25 @@ def run_classification(background_tasks: BackgroundTasks, limit: int = Query(20,
     """
     Manually trigger the classification job immediately.
     Optionally limit the number of emails processed (default: 20).
+    Returns 'skipped' status if a job is already in progress.
     """
-    results = classification_job(limit=limit)
+    # classification_job returns a list if successful, or a dict if skipped/error structure logic changes
+    # We need to adapt the return type handling since classification_job now might return a dict for 'skipped'
+
+    output = classification_job(limit=limit)
+
+    if isinstance(output, dict) and output.get("status") == "skipped":
+        return {
+            "status": "skipped",
+            "processed_count": 0,
+            "details": []
+        }
+
+    # If output is list (results), it was successful
     return {
         "status": "success",
-        "processed_count": len(results),
-        "details": results
+        "processed_count": len(output),
+        "details": output
     }
 
 @app.get("/stats", response_model=StatsResponse)

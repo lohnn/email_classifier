@@ -16,7 +16,7 @@ sys.modules["classify"] = mock_classify_module
 # Also mock classifier_brain.classify just in case
 sys.modules["classifier_brain.classify"] = mock_classify_module
 
-from main import app
+from main import app, job_lock
 from database import init_db
 
 @pytest.fixture
@@ -50,6 +50,10 @@ def test_get_stats_empty(client):
     assert response.json() == {"stats": {}}
 
 def test_run_classification(client, mock_imap_client, mock_classify_functions):
+    # Ensure lock is free
+    if job_lock.locked():
+        job_lock.release()
+
     # Setup mock behavior
     mock_instance = mock_imap_client.return_value
 
@@ -88,6 +92,9 @@ def test_run_classification(client, mock_imap_client, mock_classify_functions):
     assert stats_response.json()["stats"]["URGENT"] == 1
 
 def test_run_classification_limit(client, mock_imap_client, mock_classify_functions):
+    if job_lock.locked():
+        job_lock.release()
+
     mock_instance = mock_imap_client.return_value
     from email.message import Message
     mock_msg = Message()
@@ -107,7 +114,27 @@ def test_run_classification_limit(client, mock_imap_client, mock_classify_functi
     data = response.json()
     assert data["processed_count"] == 5
 
+def test_run_concurrently(client):
+    """Test that if the job is running (locked), subsequent calls are skipped."""
+    if job_lock.locked():
+        job_lock.release()
+
+    # Manually acquire the lock to simulate a running job
+    job_lock.acquire()
+
+    try:
+        response = client.post("/run")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "skipped"
+        assert data["processed_count"] == 0
+    finally:
+        job_lock.release()
+
 def test_pop_notifications(client, mock_imap_client, mock_classify_functions):
+    if job_lock.locked():
+        job_lock.release()
+
     # Setup mock behavior
     mock_instance = mock_imap_client.return_value
 
@@ -139,6 +166,9 @@ def test_pop_notifications(client, mock_imap_client, mock_classify_functions):
     assert len(response.json()) == 0
 
 def test_get_read_notifications(client, mock_imap_client, mock_classify_functions):
+    if job_lock.locked():
+        job_lock.release()
+
     # Setup mock behavior
     mock_instance = mock_imap_client.return_value
     from email.message import Message
