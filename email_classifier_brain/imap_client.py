@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-IMAP_SERVER = "imap.gmail.com"
+IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 
 class GmailClient:
     def __init__(self):
