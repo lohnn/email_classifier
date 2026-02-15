@@ -1,7 +1,11 @@
 import logging
 import os
+import signal
+import json
+import time
 from datetime import datetime
 from typing import List, Optional, Any
+from pathlib import Path
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
@@ -41,6 +45,13 @@ async def lifespan(app: FastAPI):
         classification_job,
         trigger=IntervalTrigger(minutes=5),
         id="classification_job",
+        replace_existing=True
+    )
+    # Run auto-update every day
+    scheduler.add_job(
+        scheduled_update_job,
+        trigger=IntervalTrigger(days=1),
+        id="auto_update_job",
         replace_existing=True
     )
     scheduler.start()
@@ -132,6 +143,25 @@ def classification_job(limit: int = 20):
         if client:
             client.disconnect()
         job_lock.release()
+
+def shutdown_server():
+    """
+    Shuts down the server gracefully to allow for updates/restarts.
+    """
+    logger.info("Shutting down server for update/restart in 2 seconds...")
+    time.sleep(2)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+def scheduled_update_job():
+    """
+    Scheduled job to trigger the daily update.
+    """
+    logger.info("Scheduled update job triggering...")
+    try:
+        Path(".update_request").touch()
+        shutdown_server()
+    except Exception as e:
+        logger.error(f"Error in scheduled update job: {e}")
 
 
 # Models
@@ -233,6 +263,52 @@ def get_read_notifications(
     """
     notifs = database.get_read_notifications(start_time, end_time)
     return notifs
+
+@app.get("/health")
+def health_check():
+    """
+    Simple health check endpoint.
+    """
+    return {"status": "ok"}
+
+@app.post("/admin/trigger-update")
+def trigger_update(background_tasks: BackgroundTasks):
+    """
+    Manually trigger the update process.
+    """
+    try:
+        Path(".update_request").touch()
+        logger.info("Update requested via API. Server will restart.")
+        background_tasks.add_task(shutdown_server)
+        return {"status": "update_initiated", "message": "Server will shut down and update in a few seconds."}
+    except Exception as e:
+        logger.error(f"Failed to initiate update: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/admin/update-errors")
+def get_update_errors():
+    """
+    Get the history of update attempts and errors.
+    """
+    history_file = Path("update_history.json")
+    if not history_file.exists():
+        return []
+
+    logs = []
+    try:
+        with open(history_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        logs.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+    except Exception as e:
+        logger.error(f"Error reading update history: {e}")
+        raise HTTPException(status_code=500, detail="Could not read update history")
+
+    return logs
 
 if __name__ == "__main__":
     import uvicorn
