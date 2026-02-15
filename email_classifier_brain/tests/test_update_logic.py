@@ -26,25 +26,23 @@ def test_health_check():
 @patch("main.os.getenv")
 @patch("main.Path")
 @patch("main.shutdown_server")
-def test_trigger_update(mock_shutdown, mock_path, mock_getenv):
+def test_trigger_update_missing_config(mock_shutdown, mock_path, mock_getenv):
     # Setup mock Path
     mock_file = MagicMock()
     mock_path.return_value = mock_file
 
-    # Mock getenv to return None for API key, simulating no auth required
+    # Mock getenv to return None for API key, simulating misconfiguration
     def getenv_side_effect(key, default=None):
         if key == "ADMIN_API_KEY":
             return None
         return default
     mock_getenv.side_effect = getenv_side_effect
 
-    # We want to verify that .touch() is called on ".update_request"
-    # And shutdown_server is added to background tasks
+    # Should fail with 500 because ADMIN_API_KEY is not set
+    response = client.post("/admin/trigger-update", headers={"X-API-Key": "any"})
 
-    response = client.post("/admin/trigger-update")
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "update_initiated"
+    assert response.status_code == 500
+    assert "ADMIN_API_KEY not set" in response.json()["detail"]
 
 @patch("main.os.getenv")
 @patch("main.Path")
@@ -82,19 +80,35 @@ def test_trigger_update_with_auth(mock_shutdown, mock_path, mock_getenv):
     # TestClient runs background tasks automatically.
     mock_shutdown.assert_called_once()
 
+@patch("main.os.getenv")
 @patch("main.Path")
-def test_get_update_errors_no_file(mock_path):
+def test_get_update_errors_no_file(mock_path, mock_getenv):
+    # Setup mock for env var
+    def getenv_side_effect(key, default=None):
+        if key == "ADMIN_API_KEY":
+            return "secret-key"
+        return default
+    mock_getenv.side_effect = getenv_side_effect
+
     mock_file = MagicMock()
     mock_path.return_value = mock_file
     mock_file.exists.return_value = False
 
-    response = client.get("/admin/update-errors")
+    response = client.get("/admin/update-errors", headers={"X-API-Key": "secret-key"})
     assert response.status_code == 200
     assert response.json() == []
 
+@patch("main.os.getenv")
 @patch("builtins.open", new_callable=MagicMock)
 @patch("main.Path")
-def test_get_update_errors_with_content(mock_path, mock_open):
+def test_get_update_errors_with_content(mock_path, mock_open, mock_getenv):
+    # Setup mock for env var
+    def getenv_side_effect(key, default=None):
+        if key == "ADMIN_API_KEY":
+            return "secret-key"
+        return default
+    mock_getenv.side_effect = getenv_side_effect
+
     mock_file = MagicMock()
     mock_path.return_value = mock_file
     mock_file.exists.return_value = True
@@ -105,7 +119,7 @@ def test_get_update_errors_with_content(mock_path, mock_open):
     file_handle = mock_open.return_value.__enter__.return_value
     file_handle.__iter__.return_value = [json.dumps(log_entry) + "\n"]
 
-    response = client.get("/admin/update-errors")
+    response = client.get("/admin/update-errors", headers={"X-API-Key": "secret-key"})
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
