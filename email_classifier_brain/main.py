@@ -8,7 +8,8 @@ from typing import List, Optional, Any
 from pathlib import Path
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Depends, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -64,6 +65,22 @@ async def lifespan(app: FastAPI):
     logger.info("Scheduler shutdown.")
 
 app = FastAPI(title="Email Classifier Microservice", lifespan=lifespan)
+
+# Security
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def get_api_key(api_key_header: str = Security(api_key_header)):
+    """
+    Validates the API key if ADMIN_API_KEY is set in the environment.
+    """
+    expected_key = os.getenv("ADMIN_API_KEY")
+    if expected_key:
+        if api_key_header != expected_key:
+            raise HTTPException(
+                status_code=403,
+                detail="Could not validate credentials"
+            )
+    return api_key_header
 
 # Job
 def classification_job(limit: int = 20):
@@ -271,10 +288,11 @@ def health_check():
     """
     return {"status": "ok"}
 
-@app.post("/admin/trigger-update")
+@app.post("/admin/trigger-update", dependencies=[Depends(get_api_key)])
 def trigger_update(background_tasks: BackgroundTasks):
     """
     Manually trigger the update process.
+    Requires X-API-Key header if ADMIN_API_KEY is set in .env.
     """
     try:
         Path(".update_request").touch()
@@ -285,10 +303,11 @@ def trigger_update(background_tasks: BackgroundTasks):
         logger.error(f"Failed to initiate update: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/admin/update-errors")
+@app.get("/admin/update-errors", dependencies=[Depends(get_api_key)])
 def get_update_errors():
     """
     Get the history of update attempts and errors.
+    Requires X-API-Key header if ADMIN_API_KEY is set in .env.
     """
     history_file = Path("update_history.json")
     if not history_file.exists():

@@ -23,18 +23,54 @@ def test_health_check():
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
+@patch("main.os.getenv")
 @patch("main.Path")
 @patch("main.shutdown_server")
-def test_trigger_update(mock_shutdown, mock_path):
+def test_trigger_update(mock_shutdown, mock_path, mock_getenv):
     # Setup mock Path
     mock_file = MagicMock()
     mock_path.return_value = mock_file
+
+    # Mock getenv to return None for API key, simulating no auth required
+    def getenv_side_effect(key, default=None):
+        if key == "ADMIN_API_KEY":
+            return None
+        return default
+    mock_getenv.side_effect = getenv_side_effect
 
     # We want to verify that .touch() is called on ".update_request"
     # And shutdown_server is added to background tasks
 
     response = client.post("/admin/trigger-update")
 
+    assert response.status_code == 200
+    assert response.json()["status"] == "update_initiated"
+
+@patch("main.os.getenv")
+@patch("main.Path")
+@patch("main.shutdown_server")
+def test_trigger_update_with_auth(mock_shutdown, mock_path, mock_getenv):
+    # Setup mock for env var
+    def getenv_side_effect(key, default=None):
+        if key == "ADMIN_API_KEY":
+            return "secret-key"
+        return default
+    mock_getenv.side_effect = getenv_side_effect
+
+    # Setup mock Path
+    mock_file = MagicMock()
+    mock_path.return_value = mock_file
+
+    # Call without header - should fail
+    response = client.post("/admin/trigger-update")
+    assert response.status_code == 403
+
+    # Call with wrong header - should fail
+    response = client.post("/admin/trigger-update", headers={"X-API-Key": "wrong"})
+    assert response.status_code == 403
+
+    # Call with correct header - should succeed
+    response = client.post("/admin/trigger-update", headers={"X-API-Key": "secret-key"})
     assert response.status_code == 200
     assert response.json()["status"] == "update_initiated"
 
