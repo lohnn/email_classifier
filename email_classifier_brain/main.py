@@ -67,9 +67,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Email Classifier Microservice", lifespan=lifespan)
 
 # Security
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+api_key_scheme = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-def get_api_key(api_key_header: str = Security(api_key_header)):
+def get_api_key(api_key: str = Security(api_key_scheme)):
     """
     Validates the API key against ADMIN_API_KEY in the environment.
     If ADMIN_API_KEY is not set, access is denied (500).
@@ -83,12 +83,12 @@ def get_api_key(api_key_header: str = Security(api_key_header)):
             detail="Server configuration error: ADMIN_API_KEY not set"
         )
 
-    if api_key_header != expected_key:
+    if api_key != expected_key:
         raise HTTPException(
             status_code=403,
             detail="Could not validate credentials"
         )
-    return api_key_header
+    return api_key
 
 # Job
 def classification_job(limit: int = 20):

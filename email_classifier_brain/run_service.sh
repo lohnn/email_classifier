@@ -30,7 +30,7 @@ log_event() {
 
     # Use python to generate safe JSON
     # We use python3 from system as json is standard library
-    $PYTHON_CMD -c "import json, sys; print(json.dumps({'timestamp': '$timestamp', 'status': '$status', 'message': sys.argv[1]}))" "$message" >> "$HISTORY_FILE"
+    "$PYTHON_CMD" -c "import json, sys; print(json.dumps({'timestamp': '$timestamp', 'status': '$status', 'message': sys.argv[1]}))" "$message" >> "$HISTORY_FILE"
 
     # Rotate log: Keep last 50 lines
     if [ -f "$HISTORY_FILE" ]; then
