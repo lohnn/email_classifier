@@ -6,6 +6,7 @@ HISTORY_FILE="update_history.json"
 VENV_BIN="./venv/bin"
 UVICORN_CMD="$VENV_BIN/uvicorn"
 PIP_CMD="$VENV_BIN/pip"
+PYTHON_CMD="$VENV_BIN/python"
 
 # Fallback to system commands if venv not found (useful for dev/testing)
 if [ ! -f "$UVICORN_CMD" ]; then
@@ -13,6 +14,9 @@ if [ ! -f "$UVICORN_CMD" ]; then
 fi
 if [ ! -f "$PIP_CMD" ]; then
     PIP_CMD="pip"
+fi
+if [ ! -f "$PYTHON_CMD" ]; then
+    PYTHON_CMD="python3"
 fi
 
 # Ensure we are in the script's directory
@@ -26,7 +30,7 @@ log_event() {
 
     # Use python to generate safe JSON
     # We use python3 from system as json is standard library
-    python3 -c "import json, sys; print(json.dumps({'timestamp': '$timestamp', 'status': '$status', 'message': sys.argv[1]}))" "$message" >> "$HISTORY_FILE"
+    $PYTHON_CMD -c "import json, sys; print(json.dumps({'timestamp': '$timestamp', 'status': '$status', 'message': sys.argv[1]}))" "$message" >> "$HISTORY_FILE"
 
     # Rotate log: Keep last 50 lines
     if [ -f "$HISTORY_FILE" ]; then
