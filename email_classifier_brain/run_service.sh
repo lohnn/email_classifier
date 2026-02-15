@@ -65,23 +65,43 @@ if [ -f "$UPDATE_MARKER" ]; then
             $UVICORN_CMD main:app --host 0.0.0.0 --port 8000 > startup.log 2>&1 &
             PID=$!
 
-            # Wait 15 seconds to catch immediate crashes
-            sleep 15
+            # Wait up to 30 seconds for the health check to pass
+            echo "Waiting for health check..."
+            HEALTH_CHECK_PASSED=false
+            for i in {1..30}; do
+                # Check if process is still alive
+                if ! kill -0 $PID 2>/dev/null; then
+                    echo "Process died unexpectedly."
+                    break
+                fi
 
-            if kill -0 $PID 2>/dev/null; then
-                # It's still running! Success.
-                echo "Update verified."
+                # Check health endpoint
+                # We use curl to check if the status is 200
+                if curl -s -f http://localhost:8000/health >/dev/null; then
+                    HEALTH_CHECK_PASSED=true
+                    break
+                fi
+                sleep 1
+            done
+
+            if [ "$HEALTH_CHECK_PASSED" = true ]; then
+                # It's running and healthy! Success.
+                echo "Update verified (Health check passed)."
                 kill $PID
                 wait $PID 2>/dev/null
                 rm "$UPDATE_MARKER"
                 NEW_COMMIT=$(git rev-parse HEAD)
                 log_event "success" "Update to $NEW_COMMIT successful"
             else
-                # It died.
-                echo "Update failed. Rolling back."
+                # It died or timed out.
+                echo "Update failed (Health check failed)."
                 # Capture last few lines of log
+                if kill -0 $PID 2>/dev/null; then
+                    kill $PID
+                    wait $PID 2>/dev/null
+                fi
                 ERROR_MSG=$(tail -n 10 startup.log | tr '\n' ' ')
-                log_event "error" "Server crashed after update: $ERROR_MSG"
+                log_event "error" "Server failed verification after update: $ERROR_MSG"
 
                 # Rollback
                 git reset --hard "$CURRENT_COMMIT"
