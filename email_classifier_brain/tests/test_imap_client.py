@@ -69,6 +69,22 @@ def test_fetch_unprocessed_emails_multiple(client, mock_imap_conn):
     assert eid2 == b'3'
     assert msg2['Subject'] == 'Three'
 
+def test_fetch_unprocessed_emails_parentheses(client, mock_imap_conn):
+    # Test for labels containing parentheses, which caused issues with simple regex
+    mock_imap_conn.search.return_value = ('OK', [b'1'])
+
+    # Label "My (Label)" which broke the old regex
+    header = b'1 (X-GM-LABELS ("My (Label)") BODY.PEEK[] {10}'
+    body = b'Subject: Parens\r\n\r\nBody'
+
+    mock_imap_conn.fetch.return_value = ('OK', [(header, body), b')'])
+
+    # We want to skip emails with "My (Label)"
+    results = client.fetch_unprocessed_emails(known_labels=["My (Label)"])
+
+    # Should be skipped
+    assert len(results) == 0
+
 def test_fetch_unprocessed_emails_empty(client, mock_imap_conn):
     # Setup search response: empty
     mock_imap_conn.search.return_value = ('OK', [b''])

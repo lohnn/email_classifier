@@ -11,6 +11,12 @@ load_dotenv()
 
 IMAP_SERVER = "imap.gmail.com"
 
+# Regex to match X-GM-LABELS content.
+# Handles atoms (no quotes/parens) and quoted strings (with escaped quotes/backslashes).
+# Group 1 captures the content inside the parentheses.
+X_GM_LABELS_PATTERN = re.compile(r'X-GM-LABELS \(((?:[^()"]+|"(\\.|[^"\\])*")*)\)')
+SEQ_PATTERN = re.compile(r'^(\d+)')
+
 class GmailClient:
     def __init__(self):
         # Prefer IMAP_USER, fallback to first email in MY_EMAIL
@@ -88,14 +94,14 @@ class GmailClient:
 
                 # Extract sequence number (ID) from the beginning of metadata
                 # Format is: SEQ (ITEMS...)
-                seq_match = re.match(r'^(\d+)', metadata)
+                seq_match = SEQ_PATTERN.match(metadata)
                 if not seq_match:
                     continue
                 e_id = seq_match.group(1).encode('utf-8')
 
                 # Extract content inside X-GM-LABELS (...)
                 labels_str = ""
-                match = re.search(r'X-GM-LABELS \((.*?)\)', metadata)
+                match = X_GM_LABELS_PATTERN.search(metadata)
                 if match:
                     labels_str = match.group(1)
 
