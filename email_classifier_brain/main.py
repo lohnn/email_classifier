@@ -1,10 +1,15 @@
 import logging
 import os
+import signal
+import json
+import time
 from datetime import datetime
 from typing import List, Optional, Any
+from pathlib import Path
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Depends, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -43,6 +48,13 @@ async def lifespan(app: FastAPI):
         id="classification_job",
         replace_existing=True
     )
+    # Run auto-update every day
+    scheduler.add_job(
+        scheduled_update_job,
+        trigger=IntervalTrigger(days=1),
+        id="auto_update_job",
+        replace_existing=True
+    )
     scheduler.start()
     logger.info("Scheduler started.")
 
@@ -53,6 +65,30 @@ async def lifespan(app: FastAPI):
     logger.info("Scheduler shutdown.")
 
 app = FastAPI(title="Email Classifier Microservice", lifespan=lifespan)
+
+# Security
+api_key_scheme = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def get_api_key(api_key: str = Security(api_key_scheme)):
+    """
+    Validates the API key against ADMIN_API_KEY in the environment.
+    If ADMIN_API_KEY is not set, access is denied (500).
+    """
+    expected_key = os.getenv("ADMIN_API_KEY")
+    if not expected_key:
+        # Fail safe: if no key is configured, no one can access
+        logger.error("ADMIN_API_KEY not set in environment. Blocking admin access.")
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: ADMIN_API_KEY not set"
+        )
+
+    if api_key != expected_key:
+        raise HTTPException(
+            status_code=403,
+            detail="Could not validate credentials"
+        )
+    return api_key
 
 # Job
 def classification_job(limit: int = 20):
@@ -132,6 +168,25 @@ def classification_job(limit: int = 20):
         if client:
             client.disconnect()
         job_lock.release()
+
+def shutdown_server():
+    """
+    Shuts down the server gracefully to allow for updates/restarts.
+    """
+    logger.info("Shutting down server for update/restart in 2 seconds...")
+    time.sleep(2)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+def scheduled_update_job():
+    """
+    Scheduled job to trigger the daily update.
+    """
+    logger.info("Scheduled update job triggering...")
+    try:
+        Path(".update_request").touch()
+        shutdown_server()
+    except Exception as e:
+        logger.error(f"Error in scheduled update job: {e}")
 
 
 # Models
@@ -233,6 +288,54 @@ def get_read_notifications(
     """
     notifs = database.get_read_notifications(start_time, end_time)
     return notifs
+
+@app.get("/health")
+def health_check():
+    """
+    Simple health check endpoint.
+    """
+    return {"status": "ok"}
+
+@app.post("/admin/trigger-update", dependencies=[Depends(get_api_key)])
+def trigger_update(background_tasks: BackgroundTasks):
+    """
+    Manually trigger the update process.
+    Requires X-API-Key header if ADMIN_API_KEY is set in .env.
+    """
+    try:
+        Path(".update_request").touch()
+        logger.info("Update requested via API. Server will restart.")
+        background_tasks.add_task(shutdown_server)
+        return {"status": "update_initiated", "message": "Server will shut down and update in a few seconds."}
+    except Exception as e:
+        logger.error(f"Failed to initiate update: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/admin/update-errors", dependencies=[Depends(get_api_key)])
+def get_update_errors():
+    """
+    Get the history of update attempts and errors.
+    Requires X-API-Key header if ADMIN_API_KEY is set in .env.
+    """
+    history_file = Path("update_history.json")
+    if not history_file.exists():
+        return []
+
+    logs = []
+    try:
+        with open(history_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        logs.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+    except Exception as e:
+        logger.error(f"Error reading update history: {e}")
+        raise HTTPException(status_code=500, detail="Could not read update history")
+
+    return logs
 
 if __name__ == "__main__":
     import uvicorn
