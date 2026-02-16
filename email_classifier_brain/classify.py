@@ -283,6 +283,7 @@ if __name__ == "__main__":
             cc=ex["cc"],
             mass_mail=ex["mass_mail"],
             attachment_types=ex["attachment_types"],
+            return_score=True,
         )
         print(f"Subject : {ex['subject']}")
         print(f"From    : {ex['sender']}")
