@@ -88,7 +88,7 @@ if [ ! -d "$DATA_REPO_DIR/.git" ]; then
             echo ""
             read -p "Enter git repository URL (e.g., git@github.com:user/repo.git): " REPO_URL
             echo "→ Cloning $REPO_URL into $DATA_REPO_DIR..."
-            git clone "$REPO_URL" "$DATA_REPO_DIR"
+            git clone -- "$REPO_URL" "$DATA_REPO_DIR"
         else
             echo "Please clone your private data repo manually or update .env."
             exit 1
