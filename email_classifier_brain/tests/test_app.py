@@ -201,3 +201,13 @@ def test_get_read_notifications(client, mock_imap_client, mock_classify_function
     assert len(read_notifs) == 1
     assert read_notifs[0]["subject"] == "Test Read"
     assert read_notifs[0]["is_read"] == 1
+
+def test_get_labels(client, mock_classify_functions):
+    """Test the /labels endpoint."""
+    expected_labels = ["FOCUS", "NOISE", "REFERENCE", "URGENT"]
+    mock_classify_functions.get_available_categories.return_value = expected_labels
+
+    response = client.get("/labels")
+    assert response.status_code == 200
+    assert response.json() == expected_labels
+    mock_classify_functions.get_available_categories.assert_called_once()

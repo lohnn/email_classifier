@@ -289,6 +289,13 @@ def get_read_notifications(
     notifs = database.get_read_notifications(start_time, end_time)
     return notifs
 
+@app.get("/labels", response_model=List[str])
+def get_labels():
+    """
+    Get all supported labels (categories) for email classification.
+    """
+    return classify.get_available_categories()
+
 @app.get("/health")
 def health_check():
     """
