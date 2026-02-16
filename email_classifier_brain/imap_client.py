@@ -76,7 +76,11 @@ class GmailClient:
         if not email_ids:
             return results
 
-        BATCH_SIZE = 50
+        try:
+            BATCH_SIZE = int(os.getenv("IMAP_BATCH_SIZE", "50"))
+        except ValueError:
+            BATCH_SIZE = 50
+
         for i in range(0, len(email_ids), BATCH_SIZE):
             batch_ids = email_ids[i:i + BATCH_SIZE]
 
