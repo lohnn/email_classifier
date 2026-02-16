@@ -26,3 +26,6 @@ model/
 # Environment / secrets
 .env
 checkpoints/
+
+# Default (private) training data folder
+email-classifier-data/
