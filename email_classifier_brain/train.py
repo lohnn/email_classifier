@@ -7,10 +7,12 @@ few-shot email classification with rich metadata features.
 
 Training data is loaded from JSON files in `TrainingData/`:
     TrainingData/
-    ├── URGENT.json
-    ├── FOCUS.json
-    ├── REFERENCE.json
-    └── NOISE.json
+    ├── NOISE.json                     ← flat label "NOISE"
+    ├── WORK/
+    │   ├── URGENT.json                ← nested label "WORK/URGENT"
+    │   └── FOCUS.json                 ← nested label "WORK/FOCUS"
+    └── PERSONAL/
+        └── FINANCE.json               ← nested label "PERSONAL/FINANCE"
 
 Each JSON file is an array of objects with these fields:
     {
@@ -23,8 +25,9 @@ Each JSON file is an array of objects with these fields:
       "attachment_types": ["PDF", "DOCX"]
     }
 
-Categories are auto-discovered from the .json filenames.
-To add a new category, create a new JSON file (e.g. BILLING.json).
+Categories are auto-discovered from the .json file paths (relative to
+TrainingData/). Subdirectories create hierarchical labels separated by '/'.
+To add a new category, create a new JSON file or subdirectory.
 
 Usage:
     python train.py
@@ -93,13 +96,19 @@ class EmailSample:
 
 def load_training_data(data_dir: str) -> list[EmailSample]:
     """
-    Load training data from JSON files.
+    Load training data from JSON files, with support for nested labels.
 
-    Each file {data_dir}/{LABEL_NAME}.json contains an array of objects.
-    The label is the filename without the .json extension.
+    Recursively walks {data_dir} for .json files. The label is derived
+    from the path relative to {data_dir}, with the .json extension
+    stripped. Subdirectories become label hierarchy separated by '/'.
+
+    Examples:
+        TrainingData/URGENT.json          → label "URGENT"
+        TrainingData/WORK/FOCUS.json      → label "WORK/FOCUS"
+        TrainingData/WORK/REVIEW/CODE.json → label "WORK/REVIEW/CODE"
 
     Args:
-        data_dir: Path to the directory containing .json files.
+        data_dir: Path to the root training data directory.
 
     Returns:
         List of EmailSample instances.
@@ -112,27 +121,32 @@ def load_training_data(data_dir: str) -> list[EmailSample]:
             f"Create it with one .json file per category."
         )
 
-    for filename in sorted(os.listdir(data_dir)):
-        if not filename.endswith(".json"):
-            continue
+    for dirpath, _, filenames in os.walk(data_dir):
+        for filename in sorted(filenames):
+            if not filename.endswith(".json"):
+                continue
 
-        label_name = os.path.splitext(filename)[0]  # "URGENT.json" → "URGENT"
-        filepath = os.path.join(data_dir, filename)
+            # Build hierarchical label from relative path
+            rel_dir = os.path.relpath(dirpath, data_dir)
+            base = os.path.splitext(filename)[0]
+            label_name = base if rel_dir == "." else f"{rel_dir}/{base}"
 
-        with open(filepath, "r", encoding="utf-8") as f:
-            entries = json.load(f)
+            filepath = os.path.join(dirpath, filename)
 
-        for entry in entries:
-            samples.append(EmailSample(
-                subject=entry.get("subject", ""),
-                body=entry.get("body", ""),
-                label=label_name,
-                sender=entry.get("from", ""),
-                to=entry.get("to", ""),
-                cc=entry.get("cc", ""),
-                mass_mail=entry.get("mass_mail", False),
-                attachment_types=entry.get("attachment_types", []),
-            ))
+            with open(filepath, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+
+            for entry in entries:
+                samples.append(EmailSample(
+                    subject=entry.get("subject", ""),
+                    body=entry.get("body", ""),
+                    label=label_name,
+                    sender=entry.get("from", ""),
+                    to=entry.get("to", ""),
+                    cc=entry.get("cc", ""),
+                    mass_mail=entry.get("mass_mail", False),
+                    attachment_types=entry.get("attachment_types", []),
+                ))
 
     if not samples:
         raise ValueError(
