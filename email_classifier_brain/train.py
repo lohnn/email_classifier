@@ -121,7 +121,7 @@ def load_training_data(data_dir: str) -> list[EmailSample]:
             f"Create it with one .json file per category."
         )
 
-    for dirpath, _, filenames in os.walk(data_dir):
+    for dirpath, _, filenames in sorted(os.walk(data_dir)):
         for filename in sorted(filenames):
             if not filename.endswith(".json"):
                 continue
