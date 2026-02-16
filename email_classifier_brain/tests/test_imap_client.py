@@ -107,3 +107,39 @@ def test_fetch_unprocessed_emails_single(client, mock_imap_conn):
     assert len(results) == 1
     assert results[0][0] == b'10'
     mock_imap_conn.fetch.assert_called_with(b'10', '(BODY.PEEK[] X-GM-LABELS)')
+
+def test_fetch_unprocessed_emails_batching(client, mock_imap_conn):
+    # Test batching behavior when more than 50 emails are present
+    # Create 60 IDs
+    ids = [str(i).encode() for i in range(1, 61)]
+    ids_str = b' '.join(ids)
+    mock_imap_conn.search.return_value = ('OK', [ids_str])
+
+    # Mock fetch side effect to handle calls
+    # We expect 2 calls: one for 1-50, one for 51-60
+
+    def fetch_side_effect(ids_bytes, query):
+        requested = ids_bytes.split(b',')
+        resp = []
+        for rid in requested:
+            header = f'{rid.decode()} (X-GM-LABELS (\\Inbox) BODY.PEEK[] {{10}}'.encode()
+            body = b'Subject: Batch\r\n\r\nBody'
+            resp.append((header, body))
+            resp.append(b')')
+        return ('OK', resp)
+
+    mock_imap_conn.fetch.side_effect = fetch_side_effect
+
+    results = client.fetch_unprocessed_emails(known_labels=[])
+
+    assert len(results) == 60
+    assert mock_imap_conn.fetch.call_count == 2
+
+    # Verify the arguments of the calls
+    call1_args = mock_imap_conn.fetch.call_args_list[0][0][0]
+    call2_args = mock_imap_conn.fetch.call_args_list[1][0][0]
+
+    # First batch should have 50 items
+    assert len(call1_args.split(b',')) == 50
+    # Second batch should have 10 items
+    assert len(call2_args.split(b',')) == 10

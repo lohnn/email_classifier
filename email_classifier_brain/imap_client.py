@@ -76,65 +76,69 @@ class GmailClient:
         if not email_ids:
             return results
 
-        # Construct a comma-separated list of IDs for batch fetching
-        ids_str = b','.join(email_ids)
+        BATCH_SIZE = 50
+        for i in range(0, len(email_ids), BATCH_SIZE):
+            batch_ids = email_ids[i:i + BATCH_SIZE]
 
-        # Fetch BODY.PEEK[] (full content) and X-GM-LABELS for all IDs
-        # PEEK prevents marking as \Seen implicitly by the fetch of body.
-        typ, msg_data = self.connection.fetch(ids_str, '(BODY.PEEK[] X-GM-LABELS)')
+            # Construct a comma-separated list of IDs for batch fetching
+            ids_str = b','.join(batch_ids)
 
-        if typ != 'OK':
-            return []
+            # Fetch BODY.PEEK[] (full content) and X-GM-LABELS for all IDs in batch
+            # PEEK prevents marking as \Seen implicitly by the fetch of body.
+            typ, msg_data = self.connection.fetch(ids_str, '(BODY.PEEK[] X-GM-LABELS)')
 
-        for response_part in msg_data:
-            if isinstance(response_part, tuple):
-                # response_part[0] is bytes, header line
-                # Example: b'1 (X-GM-LABELS (\\Inbox \\Important) BODY.PEEK[] {1234}'
-                metadata = response_part[0].decode('utf-8', errors='ignore')
+            if typ != 'OK':
+                continue
 
-                # Extract sequence number (ID) from the beginning of metadata
-                # Format is: SEQ (ITEMS...)
-                seq_match = SEQ_PATTERN.match(metadata)
-                if not seq_match:
-                    continue
-                e_id = seq_match.group(1).encode('utf-8')
+            for response_part in msg_data:
+                if isinstance(response_part, tuple):
+                    # response_part[0] is bytes, header line
+                    # Example: b'1 (X-GM-LABELS (\\Inbox \\Important) BODY.PEEK[] {1234}'
+                    metadata = response_part[0].decode('utf-8', errors='ignore')
 
-                # Extract content inside X-GM-LABELS (...)
-                labels_str = ""
-                match = X_GM_LABELS_PATTERN.search(metadata)
-                if match:
-                    labels_str = match.group(1)
+                    # Extract sequence number (ID) from the beginning of metadata
+                    # Format is: SEQ (ITEMS...)
+                    seq_match = SEQ_PATTERN.match(metadata)
+                    if not seq_match:
+                        continue
+                    e_id = seq_match.group(1).encode('utf-8')
 
-                # The second element is the body content
-                raw_email = response_part[1]
+                    # Extract content inside X-GM-LABELS (...)
+                    labels_str = ""
+                    match = X_GM_LABELS_PATTERN.search(metadata)
+                    if match:
+                        labels_str = match.group(1)
 
-                skip = False
-                for label in known_labels:
-                    # Robust check for label presence
-                    # Gmail labels in the list are separated by spaces.
-                    # Labels with spaces are quoted.
+                    # The second element is the body content
+                    raw_email = response_part[1]
 
-                    escaped_label = re.escape(label)
-                    # We check if the label exists as a standalone token or quoted token
-                    # This regex checks for:
-                    # Start of string or space or open paren
-                    # Optional quote
-                    # The label
-                    # Optional quote
-                    # End of string or space or close paren
+                    skip = False
+                    for label in known_labels:
+                        # Robust check for label presence
+                        # Gmail labels in the list are separated by spaces.
+                        # Labels with spaces are quoted.
 
-                    # Note: This is an approximation. A true parser would be better but this covers most cases.
-                    pattern = fr'(?:^|\s|\()"??{escaped_label}"??(?:$|\s|\))'
+                        escaped_label = re.escape(label)
+                        # We check if the label exists as a standalone token or quoted token
+                        # This regex checks for:
+                        # Start of string or space or open paren
+                        # Optional quote
+                        # The label
+                        # Optional quote
+                        # End of string or space or close paren
 
-                    if re.search(pattern, labels_str):
-                        skip = True
-                        break
+                        # Note: This is an approximation. A true parser would be better but this covers most cases.
+                        pattern = fr'(?:^|\s|\()"??{escaped_label}"??(?:$|\s|\))'
 
-                if skip:
-                    continue
+                        if re.search(pattern, labels_str):
+                            skip = True
+                            break
 
-                msg = email.message_from_bytes(raw_email)
-                results.append((e_id, msg))
+                    if skip:
+                        continue
+
+                    msg = email.message_from_bytes(raw_email)
+                    results.append((e_id, msg))
 
         return results
 
