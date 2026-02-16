@@ -7,6 +7,7 @@
 # Prerequisites:
 #   - rclone configured with a Google Drive remote (see .env.example)
 #   - Private training data repo cloned as sibling directory
+#   - TRAINING_DATA_DIR set in .env to point at the private repo
 #
 # Usage:
 #     ./retrain.sh
@@ -31,8 +32,24 @@ GDRIVE_REMOTE="${GDRIVE_REMOTE:-gdrive}"
 GDRIVE_MODEL_PATH="${GDRIVE_MODEL_PATH:-email-classifier-model}"
 MODEL_DIR="${MODEL_DIR:-../email_classifier_data/model}"
 
+# Python executable (prefer venv if available)
+VENV_PYTHON="./venv/bin/python"
+if [ -f "$VENV_PYTHON" ]; then
+    PYTHON_CMD="$VENV_PYTHON"
+else
+    PYTHON_CMD="python3"
+fi
+
 # Resolve training data repo root (parent of TrainingData/)
 DATA_REPO_DIR="$(cd "$TRAINING_DATA_DIR/.." && pwd)"
+
+# Safety check: ensure DATA_REPO_DIR is not the code repo
+if [ "$DATA_REPO_DIR" = "$SCRIPT_DIR" ]; then
+    echo "ERROR: TRAINING_DATA_DIR resolves to the code repo directory."
+    echo "Set TRAINING_DATA_DIR in .env to point at your private data repo."
+    echo "Example: TRAINING_DATA_DIR=../email_classifier_data/TrainingData"
+    exit 1
+fi
 
 echo "============================================"
 echo "  Email Classifier — Retrain & Upload"
@@ -46,7 +63,7 @@ git -C "$DATA_REPO_DIR" pull
 # 2. Train the model
 echo ""
 echo "→ Training model..."
-python train.py
+$PYTHON_CMD train.py
 
 # 3. Upload model to Google Drive
 echo ""
@@ -58,7 +75,7 @@ echo "  ✓ Model uploaded successfully."
 echo ""
 echo "→ Checking for training data changes..."
 cd "$DATA_REPO_DIR"
-git add -A
+git add "$TRAINING_DATA_DIR"
 if git diff --cached --quiet; then
     echo "  No training data changes to commit."
 else
