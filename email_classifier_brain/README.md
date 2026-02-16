@@ -8,7 +8,8 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
 
 - **Rich metadata** — Model sees role, sender, mass-mail flag, and attachment
   types, not just text
-- **Dynamic categories** — Auto-discovered from `TrainingData/*.json` filenames
+- **Dynamic categories** — Auto-discovered from `TrainingData/` file paths
+- **Nested labels** — Use subdirectories for hierarchical categories (any depth)
 - **E5 prefix** — `"passage: "` handled automatically everywhere
 - **Raw email parsing** — `predict_raw_email()` extracts headers from
   `email.message.Message` objects
@@ -21,11 +22,13 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
 ├── train.py               # Training script
 ├── classify.py            # Inference script (RPi optimized)
 ├── requirements.txt       # Python dependencies
-├── TrainingData/           # One .json per category
-│   ├── URGENT.json
-│   ├── FOCUS.json
-│   ├── REFERENCE.json
-│   └── NOISE.json
+├── TrainingData/           # One .json per category (subdirs = nested labels)
+│   ├── NOISE.json         # → label "NOISE"
+│   ├── WORK/
+│   │   ├── URGENT.json    # → label "WORK/URGENT"
+│   │   └── FOCUS.json     # → label "WORK/FOCUS"
+│   └── PERSONAL/
+│       └── REFERENCE.json # → label "PERSONAL/REFERENCE"
 └── model/                  # Output after training
     ├── model.safetensors
     └── label_mapping.json
@@ -49,8 +52,14 @@ This is used to determine your **role** in each email:
 
 ## Training Data Format
 
-Each category has one JSON file in `TrainingData/`. The filename becomes the
-label.
+Each category has one JSON file in `TrainingData/`. The label is derived from
+the file's path relative to `TrainingData/`, with `.json` stripped:
+
+- `TrainingData/NOISE.json` → label **NOISE**
+- `TrainingData/WORK/URGENT.json` → label **WORK/URGENT**
+- `TrainingData/A/B/C.json` → label **A/B/C** (arbitrary depth)
+
+Subdirectories create hierarchical labels separated by `/`.
 
 ```json
 [
@@ -130,9 +139,17 @@ label = predict_raw_email(msg)
 
 ## Adding a New Category
 
+**Flat label:**
+
 1. Create `TrainingData/BILLING.json` with examples
-2. Run `python train.py`
-3. Done — `classify.py` picks up the new label automatically
+2. Run `python train.py` → label `BILLING`
+
+**Nested label:**
+
+1. Create `TrainingData/WORK/BILLING.json` with examples
+2. Run `python train.py` → label `WORK/BILLING`
+
+`classify.py` picks up new labels automatically from `model/label_mapping.json`.
 
 ## Git LFS — Model Version Control
 
