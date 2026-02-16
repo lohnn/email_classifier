@@ -34,30 +34,22 @@ Usage:
 
 After training, the model and label mapping are saved to `model/`.
 
-Git LFS Instructions
---------------------
-The trained model contains large binary files (.bin / .safetensors).
-Use Git LFS to version-control the `model/` directory:
+Model Storage
+-------------
+The trained model (~490 MB) is stored in Google Drive and synced
+via rclone. After training, run `retrain.sh` to upload:
 
-    1. Install Git LFS (system package):
-           sudo apt-get install git-lfs   # Debian / Raspberry Pi OS
-           brew install git-lfs            # macOS
+    ./retrain.sh   # pull data → train → upload → push
 
-    2. Initialize Git LFS in the repo:
-           git lfs install
-
-    3. Track model files:
-           git lfs track "model/**"
-
-    4. Commit and push:
-           git add .gitattributes model/
-           git commit -m "Add trained email classification model"
-           git push
+A MODEL_INFO.json provenance file is saved alongside the model,
+linking it back to the exact training data commit.
 """
 
 import json
 import os
+import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import torch
 
@@ -205,7 +197,66 @@ def build_dataset(
 
 
 # ---------------------------------------------------------------------------
-# 4. Train
+# 4. Model Provenance
+# ---------------------------------------------------------------------------
+
+def _git_info(repo_dir: str) -> dict[str, str]:
+    """
+    Capture git remote URL and HEAD commit from a directory.
+
+    Returns a dict with 'repo' and 'commit' keys. Values are empty
+    strings if the directory is not a git repo.
+    """
+    info: dict[str, str] = {"repo": "", "commit": ""}
+    try:
+        info["repo"] = subprocess.check_output(
+            ["git", "-C", repo_dir, "remote", "get-url", "origin"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    try:
+        info["commit"] = subprocess.check_output(
+            ["git", "-C", repo_dir, "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    return info
+
+
+def _write_model_info(
+    label_mapping: dict[int, str],
+    sample_count: int,
+) -> None:
+    """
+    Write MODEL_INFO.json alongside the saved model.
+
+    This file links the model snapshot back to the training data
+    repo and commit, so you can always trace which data produced
+    a given model — even when the model lives outside Git
+    (e.g. in Google Drive).
+    """
+    git = _git_info(TRAINING_DATA_DIR)
+    info = {
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "training_data_repo": git["repo"],
+        "training_data_commit": git["commit"],
+        "base_model": BASE_MODEL,
+        "framework": "setfit",
+        "categories": sorted(label_mapping.values()),
+        "sample_count": sample_count,
+    }
+    info_path = os.path.join(MODEL_OUTPUT_DIR, "MODEL_INFO.json")
+    with open(info_path, "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2, ensure_ascii=False)
+    print(f"Model provenance saved to '{info_path}'")
+
+
+# ---------------------------------------------------------------------------
+# 5. Train
 # ---------------------------------------------------------------------------
 
 def train() -> None:
@@ -256,9 +307,12 @@ def train() -> None:
     print(f"Label mapping saved to '{label_mapping_path}'")
     print(f"Labels: {label_mapping}")
 
+    # Save model provenance info (links model snapshot to training data)
+    _write_model_info(label_mapping, len(samples))
+
 
 # ---------------------------------------------------------------------------
-# 5. Entry point
+# 6. Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

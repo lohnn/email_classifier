@@ -36,8 +36,8 @@ MY_EMAILS: list[str] = [
 # ---------------------------------------------------------------------------
 
 BASE_MODEL = "intfloat/multilingual-e5-small"
-MODEL_OUTPUT_DIR = "model"
-TRAINING_DATA_DIR = "TrainingData"
+MODEL_OUTPUT_DIR = os.getenv("MODEL_DIR") or "../email_classifier_data/model"
+TRAINING_DATA_DIR = os.getenv("TRAINING_DATA_DIR") or "TrainingData"
 E5_PREFIX = "passage: "
 
 

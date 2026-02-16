@@ -21,17 +21,21 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
 ├── config.py              # Shared config (MY_EMAIL, input formatting)
 ├── train.py               # Training script
 ├── classify.py            # Inference script (RPi optimized)
+├── retrain.sh             # Trainer workflow (pull → train → upload)
+├── run_service.sh         # Service wrapper with auto-upgrade
 ├── requirements.txt       # Python dependencies
-├── TrainingData/           # One .json per category (subdirs = nested labels)
+├── TrainingData/ ←─────── # Symlink/path to private email-classifier-data repo
 │   ├── NOISE.json         # → label "NOISE"
 │   ├── WORK/
 │   │   ├── URGENT.json    # → label "WORK/URGENT"
 │   │   └── FOCUS.json     # → label "WORK/FOCUS"
 │   └── PERSONAL/
 │       └── REFERENCE.json # → label "PERSONAL/REFERENCE"
-└── model/                  # Output after training
+└── model/ ←───────────────# Synced from Google Drive via rclone
     ├── model.safetensors
-    └── label_mapping.json
+    ├── model_head.pkl
+    ├── label_mapping.json
+    └── MODEL_INFO.json    # Provenance: links model to training data commit
 ```
 
 ## Configuration
@@ -151,29 +155,61 @@ label = predict_raw_email(msg)
 
 `classify.py` picks up new labels automatically from `model/label_mapping.json`.
 
-## Git LFS — Model Version Control
+## Google Drive — Model Storage
+
+The trained model (~490 MB) is stored in Google Drive instead of Git. Use
+[rclone](https://rclone.org/) to sync:
 
 ```bash
-git lfs track "model/**"
-git add .gitattributes model/
-git commit -m "Add trained model"
-git push
+# Install rclone
+sudo apt install rclone    # Debian / RPi
+brew install rclone         # macOS
+
+# Configure Google Drive remote (one-time)
+rclone config  # → New remote → name it "gdrive" → Google Drive → authenticate
 ```
+
+After training, `retrain.sh` handles the upload automatically.
+
+## Retraining Workflow
+
+On the trainer machine (workstation with GPU/MPS):
+
+```bash
+./retrain.sh
+```
+
+This single command:
+
+1. Pulls the latest training data from the private Git repo
+2. Trains the model
+3. Uploads the model to Google Drive
+4. Commits and pushes any training data changes
 
 ## Deploying on Raspberry Pi
 
 ```bash
 # Initial setup
-git clone <your-repo-url> && cd <repo-name>
-git lfs install && git lfs pull
+git clone <code-repo-url> && cd email_classifier_brain
 pip install -r requirements.txt
 
-# Update after retraining
-git pull
+# Install and configure rclone for model sync
+sudo apt install rclone
+rclone config  # Set up "gdrive" remote
+
+# Pull the model
+rclone sync gdrive:email-classifier-model/ model/
+
+# Start the service
+./run_service.sh
 ```
 
-## E5 Prefix Note
+The service auto-upgrades when a `.update_request` marker is created:
 
-The `intfloat/multilingual-e5-small` model requires a `"passage: "` prefix. Both
-`train.py` and `classify.py` handle this via the shared
-`config.format_model_input()` — you never need to add it manually.
+```bash
+touch .update_request
+sudo systemctl restart email-classifier
+```
+
+This triggers: model sync from Drive → code pull → dependency update → health
+check → serve.

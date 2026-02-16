@@ -12,7 +12,7 @@ build/
 venv/
 env/
 
-# Trained model output (use Git LFS if you want to version the model)
+# Trained model output (synced via Google Drive, not Git)
 model/
 
 # IDE / Editor
@@ -26,3 +26,6 @@ model/
 # Environment / secrets
 .env
 checkpoints/
+
+# Default (private) training data folder
+email-classifier-data/
