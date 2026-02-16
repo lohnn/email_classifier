@@ -62,13 +62,20 @@ else
     DATA_REPO_DIR="$SCRIPT_DIR"
 fi
 
-# Check if data repo exists, prompt to clone if missing
-if [ ! -d "$DATA_REPO_DIR" ]; then
-    echo "⚠️  Training data repo not found at: $DATA_REPO_DIR"
+# Check if data repo exists AND is a git repo
+if [ ! -d "$DATA_REPO_DIR/.git" ]; then
+    echo "⚠️  Training data repo not found (or not a git repo) at: $DATA_REPO_DIR"
     echo ""
     read -p "Would you like to clone it now? [y/N] " -n 1 -r
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
+        # If directory exists but isn't a git repo, back it up first
+        if [ -d "$DATA_REPO_DIR" ]; then
+            BACKUP_DIR="${DATA_REPO_DIR}_backup_$(date +%s)"
+            echo "→ Backing up existing folder to $BACKUP_DIR..."
+            mv "$DATA_REPO_DIR" "$BACKUP_DIR"
+        fi
+
         echo ""
         read -p "Enter git repository URL (e.g., git@github.com:user/repo.git): " REPO_URL
         echo "→ Cloning $REPO_URL into $DATA_REPO_DIR..."
