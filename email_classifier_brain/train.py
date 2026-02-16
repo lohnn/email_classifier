@@ -127,9 +127,8 @@ def load_training_data(data_dir: str) -> list[EmailSample]:
                 continue
 
             # Build hierarchical label from relative path
-            rel_dir = os.path.relpath(dirpath, data_dir)
-            base = os.path.splitext(filename)[0]
-            label_name = base if rel_dir == "." else f"{rel_dir}/{base}"
+            rel_path = os.path.relpath(os.path.join(dirpath, filename), data_dir)
+            label_name = os.path.splitext(rel_path)[0].replace(os.sep, '/')
 
             filepath = os.path.join(dirpath, filename)
 
