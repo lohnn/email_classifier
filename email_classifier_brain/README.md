@@ -40,12 +40,22 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
 
 ## Configuration
 
-Copy `.env.example` to `.env` and set your email address(es):
+The easiest way to configure the system is to use the interactive setup script:
+
+```bash
+./setup.sh
+```
+
+This will:
+1. Create a Python virtual environment.
+2. Install all necessary dependencies.
+3. Guide you through a setup wizard to configure your `.env` file, training data repository, and model syncing.
+
+Alternatively, you can copy `.env.example` to `.env` manually and set your values:
 
 ```bash
 cp .env.example .env
-# Then edit .env:
-MY_EMAIL=me@company.com,my.alias@company.com
+# Then edit .env
 ```
 
 This is used to determine your **role** in each email:
@@ -99,7 +109,19 @@ passage: Role: Direct | Mass Mail: No | Attachment Types: [PDF] | From: ops@comp
 
 ## Quick Start
 
-### 1. Install Dependencies
+The quickest way to get started on any machine (Training or Server) is:
+
+```bash
+./setup.sh
+```
+
+Follow the prompts to configure your environment. Once finished, you can start training or run the service as described below.
+
+### Manual Setup (Alternative)
+
+If you prefer to set up manually:
+
+#### 1. Install Dependencies
 
 ```bash
 # System dependency (for model versioning)
@@ -111,10 +133,10 @@ git lfs install
 pip install -r requirements.txt
 ```
 
-### 2. Configure & Train
+#### 2. Configure & Train
 
 ```bash
-# 1. Set MY_EMAIL in config.py
+# 1. Create .env from .env.example and configure it
 # 2. Edit/add JSON files in TrainingData/
 python train.py
 ```
