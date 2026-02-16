@@ -7,6 +7,7 @@ VENV_BIN="./venv/bin"
 UVICORN_CMD="$VENV_BIN/uvicorn"
 PIP_CMD="$VENV_BIN/pip"
 PYTHON_CMD="$VENV_BIN/python"
+RCLONE_CMD="rclone"
 
 # Fallback to system commands if venv not found (useful for dev/testing)
 if [ ! -f "$UVICORN_CMD" ]; then
@@ -21,6 +22,19 @@ fi
 
 # Ensure we are in the script's directory
 cd "$(dirname "$0")"
+
+# Load .env if present (for GDRIVE_REMOTE, GDRIVE_MODEL_PATH, MODEL_DIR)
+if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . .env
+    set +a
+fi
+
+# Google Drive sync defaults
+GDRIVE_REMOTE="${GDRIVE_REMOTE:-gdrive}"
+GDRIVE_MODEL_PATH="${GDRIVE_MODEL_PATH:-email-classifier-model}"
+MODEL_DIR="${MODEL_DIR:-model}"
 
 # Function to log to history file (JSON format)
 log_event() {
@@ -45,19 +59,27 @@ if [ -f "$UPDATE_MARKER" ]; then
     CURRENT_COMMIT=$(git rev-parse HEAD)
     log_event "info" "Starting update from commit $CURRENT_COMMIT"
 
-    # 2. Update code
+    # 2. Sync latest model from Google Drive (non-fatal)
+    echo "Syncing model from Google Drive..."
+    if $RCLONE_CMD sync "$GDRIVE_REMOTE:$GDRIVE_MODEL_PATH/" "$MODEL_DIR/"; then
+        log_event "info" "Model synced from Google Drive"
+    else
+        log_event "warning" "Google Drive model sync failed, using existing model"
+    fi
+
+    # 3. Update code
     if ! git pull; then
         log_event "error" "git pull failed"
         # Remove marker so we don't loop forever on a git error
         rm "$UPDATE_MARKER"
     else
-        # 3. Update dependencies
+        # 4. Update dependencies
         if ! $PIP_CMD install -r requirements.txt; then
              log_event "error" "pip install failed"
              git reset --hard "$CURRENT_COMMIT"
              rm "$UPDATE_MARKER"
         else
-            # 4. Verify startup
+            # 5. Verify startup
             echo "Verifying new version..."
             # Start in background, capturing output
             # We use a different port for verification if needed?
