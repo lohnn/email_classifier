@@ -127,14 +127,9 @@ def main():
     # 1. Dependency Checks
     print("Checking system dependencies...")
     has_git = check_dependency("git", "Required for cloning training data.")
-    has_git_lfs = check_dependency("git-lfs", "Required for model versioning. Install with 'sudo apt install git-lfs' or 'brew install git-lfs'.")
     has_rclone = check_dependency("rclone", "Required for model syncing. Install with 'sudo apt install rclone' or 'brew install rclone'.")
 
-    if has_git_lfs:
-        print("  → Initializing Git LFS...")
-        run_command(["git", "lfs", "install"])
-
-    if not has_git or not has_git_lfs or not has_rclone:
+    if not has_git or not has_rclone:
         print("\n⚠️  Some system dependencies are missing. You may need to install them before proceeding.")
         input("Press Enter to continue anyway...")
 

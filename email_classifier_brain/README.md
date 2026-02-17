@@ -124,11 +124,6 @@ If you prefer to set up manually:
 #### 1. Install Dependencies
 
 ```bash
-# System dependency (for model versioning)
-sudo apt-get install git-lfs  # Debian/RPi
-brew install git-lfs           # macOS
-git lfs install
-
 # Python
 pip install -r requirements.txt
 ```
