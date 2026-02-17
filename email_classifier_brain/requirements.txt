@@ -2,13 +2,6 @@
 # Email Classification System — Python Dependencies
 # =============================================================================
 # Install with:  pip install -r requirements.txt
-#
-# SYSTEM DEPENDENCY (not a pip package):
-#   git-lfs — required for versioning the trained model via Git.
-#   Install on Debian/Ubuntu/Raspberry Pi OS:
-#       sudo apt-get install git-lfs && git lfs install
-#   Install on macOS:
-#       brew install git-lfs && git lfs install
 # =============================================================================
 
 setfit>=1.0.0
