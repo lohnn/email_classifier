@@ -20,6 +20,7 @@ try:
     import classify
     import database
     import imap_client
+    import config
     from config import TRAINING_DATA_DIR
 except ImportError:
     from classifier_brain import classify, database, imap_client, config
