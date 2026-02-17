@@ -74,40 +74,28 @@ def add_log(
 
     att_types_str = json.dumps(attachment_types or [])
 
-    try:
-        c.execute('''
-            INSERT INTO logs (
-                id, timestamp, sender, recipient, cc, subject, body,
-                mass_mail, attachment_types, predicted_category, confidence_score, is_read
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-        ''', (
-            id, ts_str, sender, recipient, cc, subject, body,
-            int(mass_mail), att_types_str, predicted_category, confidence_score
-        ))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        # If ID exists, we could update it, or just ignore. 
-        # For now, let's update the prediction if it's a re-run? 
-        # But add_log roughly implies new entry. Let's just print/pass for now or update?
-        # User wants "re-classify", so we probably update.
-        # Let's do an UPSERT via REPLACE or explicitly UPDATE.
-        # But this function is "add_log".
-        # Let's keep it as INSERT and fail (or ignore) if exists, enforcing uniqueness.
-        # The reclassify logic handles updates via a different function usually, 
-        # but let's allow "add_log" to overwrite if we re-process an email.
-        print(f"Log with ID {id} already exists. Updating...")
-        c.execute('''
-            UPDATE logs SET
-                timestamp=?, sender=?, recipient=?, cc=?, subject=?, body=?,
-                mass_mail=?, attachment_types=?, predicted_category=?, confidence_score=?
-            WHERE id=?
-        ''', (
-            ts_str, sender, recipient, cc, subject, body,
-            int(mass_mail), att_types_str, predicted_category, confidence_score,
-            id
-        ))
-        conn.commit()
+    c.execute('''
+        INSERT INTO logs (
+            id, timestamp, sender, recipient, cc, subject, body,
+            mass_mail, attachment_types, predicted_category, confidence_score, is_read
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        ON CONFLICT(id) DO UPDATE SET
+            timestamp=excluded.timestamp,
+            sender=excluded.sender,
+            recipient=excluded.recipient,
+            cc=excluded.cc,
+            subject=excluded.subject,
+            body=excluded.body,
+            mass_mail=excluded.mass_mail,
+            attachment_types=excluded.attachment_types,
+            predicted_category=excluded.predicted_category,
+            confidence_score=excluded.confidence_score
+    ''', (
+        id, ts_str, sender, recipient, cc, subject, body,
+        int(mass_mail), att_types_str, predicted_category, confidence_score
+    ))
+    conn.commit()
 
     conn.close()
 
