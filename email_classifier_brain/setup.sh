@@ -24,10 +24,9 @@ fi
 
 # 2. Activate venv and install requirements
 echo "Installing/Updating dependencies..."
-# Use '.' instead of 'source' for better shell compatibility
 . venv/bin/activate
-python3 -m pip install --upgrade pip
-python3 -m pip install -r requirements.txt
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
 
 # 3. Run the setup wizard
-python3 setup_wizard.py
+python setup_wizard.py

@@ -254,7 +254,7 @@ def main():
     if is_training:
         print("To start training:")
         print("  ./retrain.sh")
-        print("  (or use 'python3 train.py' for local training only)")
+        print("  (or use 'python train.py' for local training only)")
         print("")
     if is_server:
         print("To start the server:")
