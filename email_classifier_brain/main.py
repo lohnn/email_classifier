@@ -565,7 +565,7 @@ def trigger_push_training_data():
         logger.error(f"Failed to push training data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/reclassify")
+@app.post("/reclassify", dependencies=[Depends(get_api_key)])
 def trigger_reclassify(background_tasks: BackgroundTasks, limit: int = Query(100, description="Limit emails to re-check")):
     """
     Trigger the re-classification process for existing logs.
