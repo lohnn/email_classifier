@@ -145,19 +145,12 @@ def predict_email(
     return label
 
 
-def predict_raw_email(msg: email.message.Message, return_score: bool = False) -> str | tuple[str, float]:
+def extract_email_info(msg: email.message.Message) -> dict:
     """
-    Classify a raw email.message.Message by auto-extracting headers.
+    Extract relevant metadata and content from a raw email message.
 
-    Extracts From, To, CC, List-Unsubscribe, Subject, body text, and
-    attachment types from the email message object.
-
-    Args:
-        msg: A Python email.message.Message (e.g. from email.message_from_file).
-        return_score: If True, returns a tuple (label, confidence_score).
-
-    Returns:
-        A category string or tuple (category, score).
+    Returns a dictionary with keys: sender, to, cc, subject, body,
+    mass_mail, and attachment_types.
     """
     sender = msg.get("From", "")
     to = msg.get("To", "")
@@ -210,14 +203,41 @@ def predict_raw_email(msg: email.message.Message, return_score: bool = False) ->
             seen.add(t)
             unique_types.append(t)
 
+    return {
+        "sender": sender,
+        "to": to,
+        "cc": cc,
+        "subject": subject,
+        "body": body,
+        "mass_mail": mass_mail,
+        "attachment_types": unique_types,
+    }
+
+
+def predict_raw_email(msg: email.message.Message, return_score: bool = False) -> str | tuple[str, float]:
+    """
+    Classify a raw email.message.Message by auto-extracting headers.
+
+    Extracts From, To, CC, List-Unsubscribe, Subject, body text, and
+    attachment types from the email message object.
+
+    Args:
+        msg: A Python email.message.Message (e.g. from email.message_from_file).
+        return_score: If True, returns a tuple (label, confidence_score).
+
+    Returns:
+        A category string or tuple (category, score).
+    """
+    info = extract_email_info(msg)
+
     return predict_email(
-        subject=subject,
-        body=body,
-        sender=sender,
-        to=to,
-        cc=cc,
-        mass_mail=mass_mail,
-        attachment_types=unique_types,
+        subject=info["subject"],
+        body=info["body"],
+        sender=info["sender"],
+        to=info["to"],
+        cc=info["cc"],
+        mass_mail=info["mass_mail"],
+        attachment_types=info["attachment_types"],
         return_score=return_score,
     )
 

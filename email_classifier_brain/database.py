@@ -1,6 +1,7 @@
 import sqlite3
 import datetime
 import os
+import json
 from typing import Optional, List, Dict, Any
 
 # Ensure the database file is in the same directory as this script or appropriately located.
@@ -18,13 +19,25 @@ def init_db() -> None:
     conn = get_db_connection()
     c = conn.cursor()
 
-    # Check if recipient column exists (for migration of existing DB)
+    # Check for existing table to handle migrations
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='logs'")
     if c.fetchone():
         c.execute("PRAGMA table_info(logs)")
         columns = [row['name'] for row in c.fetchall()]
-        if 'recipient' not in columns:
-            c.execute("ALTER TABLE logs ADD COLUMN recipient TEXT")
+
+        # Migration: Add missing columns
+        migrations = {
+            'recipient': 'TEXT',
+            'body': 'TEXT',
+            'cc': 'TEXT',
+            'mass_mail': 'BOOLEAN',
+            'attachment_types': 'TEXT',
+            'corrected_category': 'TEXT'
+        }
+
+        for col_name, col_type in migrations.items():
+            if col_name not in columns:
+                c.execute(f"ALTER TABLE logs ADD COLUMN {col_name} {col_type}")
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS logs (
@@ -32,26 +45,71 @@ def init_db() -> None:
             timestamp TEXT NOT NULL,
             sender TEXT,
             recipient TEXT,
+            cc TEXT,
             subject TEXT,
+            body TEXT,
+            mass_mail BOOLEAN,
+            attachment_types TEXT,
             predicted_category TEXT,
             confidence_score REAL,
+            corrected_category TEXT,
             is_read BOOLEAN DEFAULT 0
         )
     ''')
     conn.commit()
     conn.close()
 
-def add_log(sender: str, recipient: str, subject: str, predicted_category: str, confidence_score: float, timestamp: Optional[datetime.datetime] = None) -> None:
+def add_log(
+    sender: str,
+    recipient: str,
+    subject: str,
+    predicted_category: str,
+    confidence_score: float,
+    timestamp: Optional[datetime.datetime] = None,
+    body: str = "",
+    cc: str = "",
+    mass_mail: bool = False,
+    attachment_types: Optional[List[str]] = None
+) -> None:
     """Add a new classification log entry."""
     conn = get_db_connection()
     c = conn.cursor()
     # Use provided timestamp or current time
     ts_str = timestamp.isoformat() if timestamp else datetime.datetime.now().isoformat()
 
+    att_types_str = json.dumps(attachment_types or [])
+
     c.execute('''
-        INSERT INTO logs (timestamp, sender, recipient, subject, predicted_category, confidence_score, is_read)
-        VALUES (?, ?, ?, ?, ?, ?, 0)
-    ''', (ts_str, sender, recipient, subject, predicted_category, confidence_score))
+        INSERT INTO logs (
+            timestamp, sender, recipient, cc, subject, body,
+            mass_mail, attachment_types, predicted_category, confidence_score, is_read
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    ''', (
+        ts_str, sender, recipient, cc, subject, body,
+        int(mass_mail), att_types_str, predicted_category, confidence_score
+    ))
+    conn.commit()
+    conn.close()
+
+def get_log_by_id(log_id: int) -> Optional[Dict[str, Any]]:
+    """Retrieve a specific log entry by its ID."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM logs WHERE id = ?", (log_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def update_log_correction(log_id: int, corrected_category: str) -> None:
+    """Update a log entry with the corrected category."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        UPDATE logs
+        SET corrected_category = ?
+        WHERE id = ?
+    ''', (corrected_category, log_id))
     conn.commit()
     conn.close()
 
