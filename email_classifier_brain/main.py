@@ -22,7 +22,7 @@ try:
     import imap_client
     from config import TRAINING_DATA_DIR
 except ImportError:
-    from classifier_brain import classify, database, imap_client
+    from classifier_brain import classify, database, imap_client, config
     from classifier_brain.config import TRAINING_DATA_DIR
 
 # Setup logging
@@ -44,13 +44,17 @@ async def lifespan(app: FastAPI):
 
     # Start scheduler
     logger.info("Starting scheduler...")
-    # Run every 5 minutes
-    scheduler.add_job(
-        classification_job,
-        trigger=IntervalTrigger(minutes=5),
-        id="classification_job",
-        replace_existing=True
-    )
+    # Run every 5 minutes if auto-classification is enabled
+    if config.ENABLE_AUTO_CLASSIFICATION:
+        scheduler.add_job(
+            classification_job,
+            trigger=IntervalTrigger(minutes=5),
+            id="classification_job",
+            replace_existing=True
+        )
+    else:
+        logger.info("Automatic classification is disabled via ENABLE_AUTO_CLASSIFICATION.")
+
     # Run auto-update every day
     scheduler.add_job(
         scheduled_update_job,
