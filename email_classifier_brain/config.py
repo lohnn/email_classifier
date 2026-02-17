@@ -22,7 +22,7 @@ load_dotenv()
 
 # Automatic classification toggle.
 # If "false", the background job won't be scheduled.
-ENABLE_AUTO_CLASSIFICATION = os.getenv("ENABLE_AUTO_CLASSIFICATION", "true").lower() == "true"
+ENABLE_AUTO_CLASSIFICATION = (os.getenv("ENABLE_AUTO_CLASSIFICATION") or "true").lower() == "true"
 
 # Comma-separated list of your email addresses.
 # Used to determine your role in an email:
