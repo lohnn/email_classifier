@@ -61,8 +61,12 @@ def test_correction_endpoint(client):
     logs = database.get_unread_notifications()
     log_id = logs[0]["id"]
 
-    # 2. Call correction endpoint
-    response = client.post(f"/logs/{log_id}/correction", json={"corrected_category": "FOCUS"})
+    # 2. Call correction endpoint (requires API key)
+    response = client.post(
+        f"/logs/{log_id}/correction",
+        json={"corrected_category": "FOCUS"},
+        headers={"X-API-Key": "testkey"}
+    )
 
     assert response.status_code == 200
     assert response.json()["status"] == "success"
@@ -71,22 +75,31 @@ def test_correction_endpoint(client):
     updated_log = database.get_log_by_id(log_id)
     assert updated_log["corrected_category"] == "FOCUS"
 
-    # 4. Verify training data file
-    focus_json_path = os.path.join(temp_data_dir, "FOCUS.json")
-    assert os.path.exists(focus_json_path)
+    # 4. Verify training data file (.jsonl)
+    focus_jsonl_path = os.path.join(temp_data_dir, "FOCUS.jsonl")
+    assert os.path.exists(focus_jsonl_path)
 
-    with open(focus_json_path, "r") as f:
-        data = json.load(f)
-        assert len(data) == 1
+    with open(focus_jsonl_path, "r") as f:
+        lines = f.readlines()
+        assert len(lines) == 1
+        data = [json.loads(line) for line in lines]
         assert data[0]["subject"] == "Test subject"
         assert data[0]["body"] == "Test body"
         assert data[0]["from"] == "test@example.com"
         assert data[0]["attachment_types"] == ["PDF"]
 
 def test_correction_nonexistent_log(client):
-    response = client.post("/logs/999/correction", json={"corrected_category": "FOCUS"})
+    response = client.post(
+        "/logs/999/correction",
+        json={"corrected_category": "FOCUS"},
+        headers={"X-API-Key": "testkey"}
+    )
     assert response.status_code == 404
-    assert response.json()["detail"] == "Log entry not found"
+
+def test_correction_unauthorized(client):
+    response = client.post("/logs/1/correction", json={"corrected_category": "FOCUS"})
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Could not validate credentials"
 
 @patch("subprocess.run")
 def test_push_training_data_admin(mock_run, client):

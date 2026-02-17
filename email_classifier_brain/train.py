@@ -5,16 +5,16 @@ train.py — SetFit Email Classification Training Script
 Fine-tunes `intfloat/multilingual-e5-small` using the SetFit framework for
 few-shot email classification with rich metadata features.
 
-Training data is loaded from JSON files in `TrainingData/`:
+Training data is loaded from JSONL files in `TrainingData/`:
     TrainingData/
-    ├── NOISE.json                     ← flat label "NOISE"
+    ├── NOISE.jsonl                    ← flat label "NOISE"
     ├── WORK/
-    │   ├── URGENT.json                ← nested label "WORK/URGENT"
-    │   └── FOCUS.json                 ← nested label "WORK/FOCUS"
+    │   ├── URGENT.jsonl               ← nested label "WORK/URGENT"
+    │   └── FOCUS.jsonl                ← nested label "WORK/FOCUS"
     └── PERSONAL/
-        └── FINANCE.json               ← nested label "PERSONAL/FINANCE"
+        └── FINANCE.jsonl              ← nested label "PERSONAL/FINANCE"
 
-Each JSON file is an array of objects with these fields:
+Each JSONL file contains one JSON object per line with these fields:
     {
       "subject": "...",
       "body": "...",
@@ -88,16 +88,16 @@ class EmailSample:
 
 def load_training_data(data_dir: str) -> list[EmailSample]:
     """
-    Load training data from JSON files, with support for nested labels.
+    Load training data from JSONL files, with support for nested labels.
 
-    Recursively walks {data_dir} for .json files. The label is derived
-    from the path relative to {data_dir}, with the .json extension
+    Recursively walks {data_dir} for .jsonl files. The label is derived
+    from the path relative to {data_dir}, with the .jsonl extension
     stripped. Subdirectories become label hierarchy separated by '/'.
 
     Examples:
-        TrainingData/URGENT.json          → label "URGENT"
-        TrainingData/WORK/FOCUS.json      → label "WORK/FOCUS"
-        TrainingData/WORK/REVIEW/CODE.json → label "WORK/REVIEW/CODE"
+        TrainingData/URGENT.jsonl          → label "URGENT"
+        TrainingData/WORK/FOCUS.jsonl      → label "WORK/FOCUS"
+        TrainingData/WORK/REVIEW/CODE.jsonl → label "WORK/REVIEW/CODE"
 
     Args:
         data_dir: Path to the root training data directory.
@@ -110,12 +110,12 @@ def load_training_data(data_dir: str) -> list[EmailSample]:
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(
             f"Training data directory not found: '{data_dir}'. "
-            f"Create it with one .json file per category."
+            f"Create it with one .jsonl file per category."
         )
 
     for dirpath, _, filenames in sorted(os.walk(data_dir)):
         for filename in sorted(filenames):
-            if not filename.endswith(".json"):
+            if not filename.endswith(".jsonl"):
                 continue
 
             # Build hierarchical label from relative path
@@ -125,24 +125,29 @@ def load_training_data(data_dir: str) -> list[EmailSample]:
             filepath = os.path.join(dirpath, filename)
 
             with open(filepath, "r", encoding="utf-8") as f:
-                entries = json.load(f)
-
-            for entry in entries:
-                samples.append(EmailSample(
-                    subject=entry.get("subject", ""),
-                    body=entry.get("body", ""),
-                    label=label_name,
-                    sender=entry.get("from", ""),
-                    to=entry.get("to", ""),
-                    cc=entry.get("cc", ""),
-                    mass_mail=entry.get("mass_mail", False),
-                    attachment_types=entry.get("attachment_types", []),
-                ))
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        samples.append(EmailSample(
+                            subject=entry.get("subject", ""),
+                            body=entry.get("body", ""),
+                            label=label_name,
+                            sender=entry.get("from", ""),
+                            to=entry.get("to", ""),
+                            cc=entry.get("cc", ""),
+                            mass_mail=entry.get("mass_mail", False),
+                            attachment_types=entry.get("attachment_types", []),
+                        ))
+                    except json.JSONDecodeError as e:
+                        print(f"Warning: Skipping invalid JSON line in {filepath}: {e}")
 
     if not samples:
         raise ValueError(
             f"No training data found in '{data_dir}'. "
-            f"Add .json files with email examples."
+            f"Add .jsonl files with email examples."
         )
 
     return samples

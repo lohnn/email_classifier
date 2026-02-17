@@ -213,7 +213,7 @@ def scheduled_update_job():
 
 def add_to_training_data(log_entry: dict, corrected_category: str):
     """
-    Append a corrected email to the training data JSON files.
+    Append a corrected email to the training data JSONL files.
     """
     # Prepare the example in the format expected by training
     # attachment_types in DB is a JSON string
@@ -238,21 +238,12 @@ def add_to_training_data(log_entry: dict, corrected_category: str):
     # Ensure TRAINING_DATA_DIR exists
     os.makedirs(TRAINING_DATA_DIR, exist_ok=True)
 
-    file_path = os.path.join(TRAINING_DATA_DIR, f"{corrected_category}.json")
+    file_path = os.path.join(TRAINING_DATA_DIR, f"{corrected_category}.jsonl")
 
-    data = []
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            data = []
-
-    data.append(example)
-
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    logger.info(f"Added email to {corrected_category}.json training data.")
+    # Append-only for efficiency and scalability
+    with open(file_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(example) + "\n")
+    logger.info(f"Added email to {corrected_category}.jsonl training data.")
 
 def push_training_data_to_git():
     """
@@ -265,7 +256,6 @@ def push_training_data_to_git():
         return
 
     try:
-        # Check if it's a git repo or part of one
         # git add .
         subprocess.run(["git", "add", "."], cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
 
@@ -274,8 +264,14 @@ def push_training_data_to_git():
 
         if status.stdout.strip():
             logger.info("Changes detected in training data. Committing...")
-            subprocess.run(["git", "commit", "-m", f"Auto-update training data: {datetime.datetime.now().isoformat()}"],
-                           cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
+            # Use -c to provide git config for environments where it might not be set
+            subprocess.run([
+                "git",
+                "-c", "user.name=Classifier Bot",
+                "-c", "user.email=bot@example.com",
+                "commit",
+                "-m", f"Auto-update training data: {datetime.datetime.now().isoformat()}"
+            ], cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
             logger.info("Pushing to remote...")
             subprocess.run(["git", "push"], cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
             logger.info("Training data pushed successfully.")
@@ -404,7 +400,7 @@ def health_check():
     """
     return {"status": "ok"}
 
-@app.post("/logs/{log_id}/correction")
+@app.post("/logs/{log_id}/correction", dependencies=[Depends(get_api_key)])
 def correct_label(log_id: int, req: CorrectionRequest):
     """
     Correct the label for a specific email log.
