@@ -164,7 +164,7 @@ class GmailClient:
             if typ == 'OK' and data[0]:
                 # Return the last one if multiple (shouldn't be multiple for one ID usually)
                 return data[0].split()[-1]
-        except Exception as e:
+        except imaplib.IMAP4.error as e:
             print(f"Error searching for Gmail ID {gmail_id}: {e}")
         return None
 
