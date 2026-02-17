@@ -15,33 +15,27 @@ def get_db_connection() -> sqlite3.Connection:
     return conn
 
 def init_db() -> None:
-    """Initialize the database tables if they do not exist."""
+    """Initialize the database tables."""
     conn = get_db_connection()
     c = conn.cursor()
 
-    # Check for existing table to handle migrations
-    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='logs'")
-    if c.fetchone():
+    # check if 'logs' table exists and has 'id' as INTEGER (old schema)
+    # If so, drop it.
+    try:
         c.execute("PRAGMA table_info(logs)")
-        columns = [row['name'] for row in c.fetchall()]
-
-        # Migration: Add missing columns
-        migrations = {
-            'recipient': 'TEXT',
-            'body': 'TEXT',
-            'cc': 'TEXT',
-            'mass_mail': 'BOOLEAN',
-            'attachment_types': 'TEXT',
-            'corrected_category': 'TEXT'
-        }
-
-        for col_name, col_type in migrations.items():
-            if col_name not in columns:
-                c.execute(f"ALTER TABLE logs ADD COLUMN {col_name} {col_type}")
+        columns = c.fetchall()
+        if columns:
+            # Check type of 'id' column
+            id_col = next((col for col in columns if col['name'] == 'id'), None)
+            if id_col and id_col['type'].upper() == 'INTEGER':
+                print("Detected old schema (id is INTEGER). Dropping table 'logs' for migration to Gmail ID.")
+                c.execute("DROP TABLE logs")
+    except Exception as e:
+        print(f"Error checking schema: {e}")
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT PRIMARY KEY,
             timestamp TEXT NOT NULL,
             sender TEXT,
             recipient TEXT,
@@ -60,6 +54,7 @@ def init_db() -> None:
     conn.close()
 
 def add_log(
+    id: str,
     sender: str,
     recipient: str,
     subject: str,
@@ -79,20 +74,44 @@ def add_log(
 
     att_types_str = json.dumps(attachment_types or [])
 
-    c.execute('''
-        INSERT INTO logs (
-            timestamp, sender, recipient, cc, subject, body,
-            mass_mail, attachment_types, predicted_category, confidence_score, is_read
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-    ''', (
-        ts_str, sender, recipient, cc, subject, body,
-        int(mass_mail), att_types_str, predicted_category, confidence_score
-    ))
-    conn.commit()
+    try:
+        c.execute('''
+            INSERT INTO logs (
+                id, timestamp, sender, recipient, cc, subject, body,
+                mass_mail, attachment_types, predicted_category, confidence_score, is_read
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        ''', (
+            id, ts_str, sender, recipient, cc, subject, body,
+            int(mass_mail), att_types_str, predicted_category, confidence_score
+        ))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        # If ID exists, we could update it, or just ignore. 
+        # For now, let's update the prediction if it's a re-run? 
+        # But add_log roughly implies new entry. Let's just print/pass for now or update?
+        # User wants "re-classify", so we probably update.
+        # Let's do an UPSERT via REPLACE or explicitly UPDATE.
+        # But this function is "add_log".
+        # Let's keep it as INSERT and fail (or ignore) if exists, enforcing uniqueness.
+        # The reclassify logic handles updates via a different function usually, 
+        # but let's allow "add_log" to overwrite if we re-process an email.
+        print(f"Log with ID {id} already exists. Updating...")
+        c.execute('''
+            UPDATE logs SET
+                timestamp=?, sender=?, recipient=?, cc=?, subject=?, body=?,
+                mass_mail=?, attachment_types=?, predicted_category=?, confidence_score=?
+            WHERE id=?
+        ''', (
+            ts_str, sender, recipient, cc, subject, body,
+            int(mass_mail), att_types_str, predicted_category, confidence_score,
+            id
+        ))
+        conn.commit()
+
     conn.close()
 
-def get_log_by_id(log_id: int) -> Optional[Dict[str, Any]]:
+def get_log_by_id(log_id: str) -> Optional[Dict[str, Any]]:
     """Retrieve a specific log entry by its ID."""
     conn = get_db_connection()
     c = conn.cursor()
@@ -101,7 +120,7 @@ def get_log_by_id(log_id: int) -> Optional[Dict[str, Any]]:
     conn.close()
     return dict(row) if row else None
 
-def update_log_correction(log_id: int, corrected_category: str) -> None:
+def update_log_correction(log_id: str, corrected_category: str) -> None:
     """Update a log entry with the corrected category."""
     conn = get_db_connection()
     c = conn.cursor()
@@ -152,7 +171,7 @@ def get_unread_notifications() -> List[Dict[str, Any]]:
     conn.close()
     return [dict(row) for row in rows]
 
-def ack_notifications(log_ids: Optional[List[int]] = None) -> None:
+def ack_notifications(log_ids: Optional[List[str]] = None) -> None:
     """
     Mark notifications as read.
     If log_ids is provided, mark only those.
@@ -173,7 +192,7 @@ def pop_unread_notifications() -> List[Dict[str, Any]]:
     # Reuse existing functions to avoid duplication
     unread = get_unread_notifications()
     if unread:
-        ids = [row['id'] for row in unread]
+        ids = [str(row['id']) for row in unread]
         ack_notifications(ids)
     return unread
 
@@ -190,6 +209,15 @@ def get_read_notifications(start_time: datetime.datetime, end_time: datetime.dat
         ORDER BY timestamp DESC
     ''', (start_time.isoformat(), end_time.isoformat()))
 
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_logs_for_reclassification() -> List[Dict[str, Any]]:
+    """Get all logs that haven't been manually corrected, for re-evaluation."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM logs WHERE corrected_category IS NULL")
     rows = c.fetchall()
     conn.close()
     return [dict(row) for row in rows]

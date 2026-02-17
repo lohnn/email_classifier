@@ -45,19 +45,19 @@ async def lifespan(app: FastAPI):
     # Start scheduler
     logger.info("Starting scheduler...")
     # Run every 5 minutes
-    scheduler.add_job(
-        classification_job,
-        trigger=IntervalTrigger(minutes=5),
-        id="classification_job",
-        replace_existing=True
-    )
-    # Run auto-update every day
-    scheduler.add_job(
-        scheduled_update_job,
-        trigger=IntervalTrigger(days=1),
-        id="auto_update_job",
-        replace_existing=True
-    )
+    # scheduler.add_job(
+    #     classification_job,
+    #     trigger=IntervalTrigger(minutes=5),
+    #     id="classification_job",
+    #     replace_existing=True
+    # )
+    # # Run auto-update every day
+    # scheduler.add_job(
+    #     scheduled_update_job,
+    #     trigger=IntervalTrigger(days=1),
+    #     id="auto_update_job",
+    #     replace_existing=True
+    # )
     scheduler.start()
     logger.info("Scheduler started.")
 
@@ -140,7 +140,7 @@ def classification_job(limit: int = 20):
                     attachment_types=info["attachment_types"],
                     return_score=True
                 )
-                logger.info(f"Classified email {e_id!r}: {label} ({score:.2f})")
+                logger.info(f"Classified email {e_id}: {label} ({score:.2f})")
 
                 # Apply label
                 client.apply_label(e_id, label)
@@ -157,6 +157,7 @@ def classification_job(limit: int = 20):
 
                 # Log to DB with full info
                 database.add_log(
+                    id=e_id,  # This is now the gmail_id string
                     sender=info["sender"],
                     recipient=info["to"],
                     subject=info["subject"],
@@ -170,7 +171,7 @@ def classification_job(limit: int = 20):
                 )
 
                 results.append({
-                    "id": e_id.decode() if isinstance(e_id, bytes) else str(e_id),
+                    "id": e_id,
                     "sender": info["sender"],
                     "recipient": info["to"],
                     "subject": info["subject"],
@@ -286,6 +287,126 @@ def push_training_data_to_git():
     except Exception as e:
         logger.error(f"Unexpected error while pushing training data: {e}")
 
+def reclassify_job(limit: int = 100):
+    """
+    Background job to re-classify existing logs.
+    """
+    if not job_lock.acquire(blocking=False):
+        logger.warning("Job already running. Skipping re-classification.")
+        return {"status": "skipped", "reason": "Job already running"}
+
+    client = None
+    updated_count = 0
+    errors = 0
+    
+    try:
+        logger.info("Starting re-classification job...")
+        logs = database.get_logs_for_reclassification()
+        
+        # Connect to IMAP
+        client = imap_client.GmailClient()
+        
+        # Limit processing
+        if len(logs) > limit:
+            logger.info(f"Limiting re-classification to {limit} emails (out of {len(logs)}).")
+            logs = logs[:limit]
+
+        for log in logs:
+            gmail_id = log['id']
+            current_label = log['predicted_category']
+            
+            try:
+                # 1. Fetch email content using Gmail ID
+                msg = client.fetch_email_by_gmail_id(gmail_id)
+                
+                info = None
+                if msg:
+                     info = classify.extract_email_info(msg)
+                else:
+                    # Fallback: use stored body if available, though less reliable for full re-eval if we added new features dependent on headers not stored
+                    # But for now, if we can't fetch from Gmail (maybe deleted?), we skip or use stored?
+                    # Let's skip if we can't find it in Gmail, as we can't update labels there anyway.
+                    logger.warning(f"Could not fetch email {gmail_id} from Gmail. Skipping.")
+                    continue
+
+                # 2. Re-predict
+                label, score = classify.predict_email(
+                    subject=info["subject"],
+                    body=info["body"],
+                    sender=info["sender"],
+                    to=info["to"],
+                    cc=info["cc"],
+                    mass_mail=info["mass_mail"],
+                    attachment_types=info["attachment_types"],
+                    return_score=True
+                )
+                
+                # 3. Check if changed
+                if label != current_label:
+                    logger.info(f"Re-classification change for {gmail_id}: {current_label} -> {label} ({score:.2f})")
+                    
+                    # 4. Update Gmail Labels
+                    # Remove old label
+                    if current_label:
+                        client.remove_label(gmail_id, current_label)
+                    # Apply new label
+                    client.apply_label(gmail_id, label)
+                    
+                    # 5. Update Database
+                    # We accept specific 'update_log_prediction' but currently 'add_log' handles updates via upsert/duplicate check logic we added? 
+                    # Actually I added logic to update if exists in add_log.
+                    # So calling add_log with same ID should update it.
+                    
+                    # Re-extract timestamp to be safe or keep original? 
+                    # We should probably keep original timestamp.
+                    # add_log uses 'timestamp' arg.
+                    
+                    orig_ts = None
+                    if log['timestamp']:
+                        try:
+                            orig_ts = datetime.datetime.fromisoformat(log['timestamp'])
+                        except:
+                            pass
+                            
+                    database.add_log(
+                        id=gmail_id,
+                        sender=info["sender"],
+                        recipient=info["to"],
+                        subject=info["subject"],
+                        predicted_category=label,
+                        confidence_score=score,
+                        timestamp=orig_ts,
+                        body=info["body"],
+                        cc=info["cc"],
+                        mass_mail=info["mass_mail"],
+                        attachment_types=info["attachment_types"]
+                    )
+                    updated_count += 1
+                else:
+                    # Update score/metadata even if label same? 
+                    # Maybe useful if model confidence changed.
+                    pass
+
+            except Exception as e:
+                logger.error(f"Error re-classifying {gmail_id}: {e}")
+                errors += 1
+
+        logger.info(f"Re-classification finished. Updated {updated_count} emails.")
+        return {
+            "status": "success", 
+            "processed": len(logs), 
+            "updated": updated_count,
+            "errors": errors
+        }
+
+    except Exception as e:
+        logger.error(f"Error in re-classification job: {e}")
+        return {"status": "error", "message": str(e)}
+    finally:
+        if client:
+            client.disconnect()
+        job_lock.release()
+
 
 # Models
 class CorrectionRequest(BaseModel):
@@ -295,7 +416,7 @@ class StatsResponse(BaseModel):
     stats: dict
 
 class Notification(BaseModel):
-    id: int
+    id: str  # Changed to str for Gmail ID
     timestamp: str
     sender: Optional[str]
     recipient: Optional[str] = None
@@ -305,7 +426,7 @@ class Notification(BaseModel):
     is_read: Any
 
 class AckRequest(BaseModel):
-    ids: Optional[List[int]] = None
+    ids: Optional[List[str]] = None
 
 class RunResponse(BaseModel):
     status: str
@@ -405,7 +526,7 @@ def health_check():
     return {"status": "ok"}
 
 @app.post("/logs/{log_id}/correction")
-def correct_label(log_id: int, req: CorrectionRequest):
+def correct_label(log_id: str, req: CorrectionRequest):
     """
     Correct the label for a specific email log.
     Updates the database and adds the email to training data.
@@ -434,6 +555,15 @@ def trigger_push_training_data():
     except Exception as e:
         logger.error(f"Failed to push training data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/reclassify")
+def trigger_reclassify(background_tasks: BackgroundTasks, limit: int = Query(100, description="Limit emails to re-check")):
+    """
+    Trigger the re-classification process for existing logs.
+    """
+    # Run in background to avoid timeout
+    background_tasks.add_task(reclassify_job, limit=limit)
+    return {"status": "accepted", "message": "Re-classification started in background."}
 
 @app.post("/admin/trigger-update", dependencies=[Depends(get_api_key)])
 def trigger_update(background_tasks: BackgroundTasks):

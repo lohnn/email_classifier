@@ -15,6 +15,7 @@ IMAP_SERVER = os.getenv("IMAP_SERVER") or "imap.gmail.com"
 # Handles atoms (no quotes/parens) and quoted strings (with escaped quotes/backslashes).
 # Group 1 captures the content inside the parentheses.
 X_GM_LABELS_PATTERN = re.compile(r'X-GM-LABELS \(((?:[^()"]+|"(\\.|[^"\\])*")*)\)')
+X_GM_MSGID_PATTERN = re.compile(r'X-GM-MSGID (\d+)')
 SEQ_PATTERN = re.compile(r'^(\d+)')
 
 class GmailClient:
@@ -60,7 +61,7 @@ class GmailClient:
     def fetch_unprocessed_emails(self, known_labels: List[str]) -> List[Tuple[bytes, Message]]:
         """
         Fetch UNSEEN emails that do not have any of the known_labels.
-        Returns a list of (uid, email_message_object).
+        Returns a list of (gmail_id, email_message_object).
         """
         self.connect()
 
@@ -87,9 +88,9 @@ class GmailClient:
             # Construct a comma-separated list of IDs for batch fetching
             ids_str = b','.join(batch_ids)
 
-            # Fetch BODY.PEEK[] (full content) and X-GM-LABELS for all IDs in batch
+            # Fetch BODY.PEEK[] (full content), X-GM-LABELS, and X-GM-MSGID
             # PEEK prevents marking as \Seen implicitly by the fetch of body.
-            typ, msg_data = self.connection.fetch(ids_str, '(BODY.PEEK[] X-GM-LABELS)')
+            typ, msg_data = self.connection.fetch(ids_str, '(BODY.PEEK[] X-GM-LABELS X-GM-MSGID)')
 
             if typ != 'OK':
                 continue
@@ -97,15 +98,20 @@ class GmailClient:
             for response_part in msg_data:
                 if isinstance(response_part, tuple):
                     # response_part[0] is bytes, header line
-                    # Example: b'1 (X-GM-LABELS (\\Inbox \\Important) BODY.PEEK[] {1234}'
+                    # Example: b'1 (X-GM-LABELS (\\Inbox \\Important) X-GM-MSGID 123456789 BODY.PEEK[] {1234}'
                     metadata = response_part[0].decode('utf-8', errors='ignore')
 
-                    # Extract sequence number (ID) from the beginning of metadata
-                    # Format is: SEQ (ITEMS...)
+                    # Extract sequence number (ID) - not used for return but for internal logic if needed
                     seq_match = SEQ_PATTERN.match(metadata)
                     if not seq_match:
                         continue
-                    e_id = seq_match.group(1).encode('utf-8')
+                    
+                    # Extract X-GM-MSGID
+                    msgid_match = X_GM_MSGID_PATTERN.search(metadata)
+                    if not msgid_match:
+                        # Should technically not happen if Gmail, but safeguard
+                        continue
+                    gmail_id = msgid_match.group(1)
 
                     # Extract content inside X-GM-LABELS (...)
                     labels_str = ""
@@ -142,22 +148,88 @@ class GmailClient:
                         continue
 
                     msg = email.message_from_bytes(raw_email)
-                    results.append((e_id, msg))
+                    results.append((gmail_id, msg))
 
         return results
 
-    def apply_label(self, email_id: bytes, label: str):
+    def _search_by_gmail_id(self, gmail_id: str) -> bytes:
         """
-        Apply a label to the email using STORE +X-GM-LABELS.
+        Helper to find the UID of an email given its X-GM-MSGID.
+        Returns the UID as bytes, or None if not found.
         """
         self.connect()
+        try:
+            # Search for the UID corresponding to the X-GM-MSGID
+            typ, data = self.connection.uid('SEARCH', None, f'X-GM-MSGID {gmail_id}')
+            if typ == 'OK' and data[0]:
+                # Return the last one if multiple (shouldn't be multiple for one ID usually)
+                return data[0].split()[-1]
+        except Exception as e:
+            print(f"Error searching for Gmail ID {gmail_id}: {e}")
+        return None
+
+    def apply_label(self, gmail_id: str, label: str):
+        """
+        Apply a label to the email using UID STORE +X-GM-LABELS.
+        Accepts gmail_id (X-GM-MSGID).
+        """
+        self.connect()
+
+        uid = self._search_by_gmail_id(gmail_id)
+        if not uid:
+            print(f"Could not find email with Gmail ID {gmail_id} to apply label.")
+            return
 
         # Quote label if it has spaces
         label_to_send = f'"{label}"' if " " in label else label
 
         try:
-            typ, data = self.connection.store(email_id, '+X-GM-LABELS', f'({label_to_send})')
+            typ, data = self.connection.uid('STORE', uid, '+X-GM-LABELS', f'({label_to_send})')
             if typ != 'OK':
-                print(f"Failed to apply label {label} to {email_id}: {data}")
+                print(f"Failed to apply label {label} to {gmail_id}: {data}")
         except Exception as e:
-            print(f"Error applying label {label} to {email_id}: {e}")
+            print(f"Error applying label {label} to {gmail_id}: {e}")
+
+    def remove_label(self, gmail_id: str, label: str):
+        """
+        Remove a label from the email using UID STORE -X-GM-LABELS.
+        Accepts gmail_id (X-GM-MSGID).
+        """
+        self.connect()
+
+        uid = self._search_by_gmail_id(gmail_id)
+        if not uid:
+            print(f"Could not find email with Gmail ID {gmail_id} to remove label.")
+            return
+
+        # Quote label if it has spaces
+        label_to_send = f'"{label}"' if " " in label else label
+
+        try:
+            typ, data = self.connection.uid('STORE', uid, '-X-GM-LABELS', f'({label_to_send})')
+            if typ != 'OK':
+                print(f"Failed to remove label {label} from {gmail_id}: {data}")
+        except Exception as e:
+            print(f"Error removing label {label} from {gmail_id}: {e}")
+
+    def fetch_email_by_gmail_id(self, gmail_id: str) -> Message:
+        """
+        Fetch the email content for a given X-GM-MSGID.
+        """
+        self.connect()
+        uid = self._search_by_gmail_id(gmail_id)
+        if not uid:
+            return None
+
+        try:
+            # Fetch BODY.PEEK[] based on UID
+            typ, msg_data = self.connection.uid('FETCH', uid, '(BODY.PEEK[])')
+            if typ != 'OK':
+                return None
+            
+            for response_part in msg_data:
+                if isinstance(response_part, tuple):
+                    return email.message_from_bytes(response_part[1])
+        except Exception as e:
+            print(f"Error fetching email {gmail_id}: {e}")
+            return None
