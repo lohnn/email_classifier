@@ -410,6 +410,14 @@ def correct_label(log_id: int, req: CorrectionRequest):
     Correct the label for a specific email log.
     Updates the database and adds the email to training data.
     """
+    # Validate category
+    available_categories = classify.get_available_categories()
+    if req.corrected_category not in available_categories:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid category: {req.corrected_category}. Must be one of: {', '.join(available_categories)}"
+        )
+
     log_entry = database.get_log_by_id(log_id)
     if not log_entry:
         raise HTTPException(status_code=404, detail="Log entry not found")

@@ -19,8 +19,10 @@ os.environ["TRAINING_DATA_DIR"] = temp_data_dir
 os.environ["ADMIN_API_KEY"] = "testkey"
 
 # Mock classify to avoid loading model
-sys.modules["classify"] = MagicMock()
-sys.modules["classifier_brain.classify"] = sys.modules["classify"]
+mock_classify = MagicMock()
+mock_classify.get_available_categories.return_value = ["FOCUS", "NOISE", "REFERENCE", "URGENT"]
+sys.modules["classify"] = mock_classify
+sys.modules["classifier_brain.classify"] = mock_classify
 
 import main
 from main import app
