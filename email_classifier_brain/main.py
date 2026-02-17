@@ -22,7 +22,7 @@ try:
     import imap_client
     from config import TRAINING_DATA_DIR
 except ImportError:
-    from classifier_brain import classify, database, imap_client
+    from classifier_brain import classify, database, imap_client, config
     from classifier_brain.config import TRAINING_DATA_DIR
 
 # Setup logging
@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
 
     # Start scheduler
     logger.info("Starting scheduler...")
+<<<<<<< HEAD
     # Run every 5 minutes
     # scheduler.add_job(
     #     classification_job,
@@ -58,6 +59,26 @@ async def lifespan(app: FastAPI):
     #     id="auto_update_job",
     #     replace_existing=True
     # )
+=======
+    # Run every 5 minutes if auto-classification is enabled
+    if config.ENABLE_AUTO_CLASSIFICATION:
+        scheduler.add_job(
+            classification_job,
+            trigger=IntervalTrigger(minutes=5),
+            id="classification_job",
+            replace_existing=True
+        )
+    else:
+        logger.info("Automatic classification is disabled via ENABLE_AUTO_CLASSIFICATION.")
+
+    # Run auto-update every day
+    scheduler.add_job(
+        scheduled_update_job,
+        trigger=IntervalTrigger(days=1),
+        id="auto_update_job",
+        replace_existing=True
+    )
+>>>>>>> origin/main
     scheduler.start()
     logger.info("Scheduler started.")
 
@@ -214,7 +235,7 @@ def scheduled_update_job():
 
 def add_to_training_data(log_entry: dict, corrected_category: str):
     """
-    Append a corrected email to the training data JSON files.
+    Append a corrected email to the training data JSONL files.
     """
     # Prepare the example in the format expected by training
     # attachment_types in DB is a JSON string
@@ -239,21 +260,12 @@ def add_to_training_data(log_entry: dict, corrected_category: str):
     # Ensure TRAINING_DATA_DIR exists
     os.makedirs(TRAINING_DATA_DIR, exist_ok=True)
 
-    file_path = os.path.join(TRAINING_DATA_DIR, f"{corrected_category}.json")
+    file_path = os.path.join(TRAINING_DATA_DIR, f"{corrected_category}.jsonl")
 
-    data = []
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            data = []
-
-    data.append(example)
-
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    logger.info(f"Added email to {corrected_category}.json training data.")
+    # Append-only for efficiency and scalability
+    with open(file_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(example) + "\n")
+    logger.info(f"Added email to {corrected_category}.jsonl training data.")
 
 def push_training_data_to_git():
     """
@@ -266,7 +278,6 @@ def push_training_data_to_git():
         return
 
     try:
-        # Check if it's a git repo or part of one
         # git add .
         subprocess.run(["git", "add", "."], cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
 
@@ -275,8 +286,14 @@ def push_training_data_to_git():
 
         if status.stdout.strip():
             logger.info("Changes detected in training data. Committing...")
-            subprocess.run(["git", "commit", "-m", f"Auto-update training data: {datetime.datetime.now().isoformat()}"],
-                           cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
+            # Use -c to provide git config for environments where it might not be set
+            subprocess.run([
+                "git",
+                "-c", "user.name=Classifier Bot",
+                "-c", "user.email=bot@example.com",
+                "commit",
+                "-m", f"Auto-update training data: {datetime.datetime.now().isoformat()}"
+            ], cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
             logger.info("Pushing to remote...")
             subprocess.run(["git", "push"], cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
             logger.info("Training data pushed successfully.")
@@ -525,12 +542,25 @@ def health_check():
     """
     return {"status": "ok"}
 
+<<<<<<< HEAD
 @app.post("/logs/{log_id}/correction")
 def correct_label(log_id: str, req: CorrectionRequest):
+=======
+@app.post("/logs/{log_id}/correction", dependencies=[Depends(get_api_key)])
+def correct_label(log_id: int, req: CorrectionRequest):
+>>>>>>> origin/main
     """
     Correct the label for a specific email log.
     Updates the database and adds the email to training data.
     """
+    # Validate category
+    available_categories = classify.get_available_categories()
+    if req.corrected_category not in available_categories:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid category: {req.corrected_category}. Must be one of: {', '.join(available_categories)}"
+        )
+
     log_entry = database.get_log_by_id(log_id)
     if not log_entry:
         raise HTTPException(status_code=404, detail="Log entry not found")
