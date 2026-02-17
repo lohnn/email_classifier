@@ -44,22 +44,6 @@ async def lifespan(app: FastAPI):
 
     # Start scheduler
     logger.info("Starting scheduler...")
-<<<<<<< HEAD
-    # Run every 5 minutes
-    # scheduler.add_job(
-    #     classification_job,
-    #     trigger=IntervalTrigger(minutes=5),
-    #     id="classification_job",
-    #     replace_existing=True
-    # )
-    # # Run auto-update every day
-    # scheduler.add_job(
-    #     scheduled_update_job,
-    #     trigger=IntervalTrigger(days=1),
-    #     id="auto_update_job",
-    #     replace_existing=True
-    # )
-=======
     # Run every 5 minutes if auto-classification is enabled
     if config.ENABLE_AUTO_CLASSIFICATION:
         scheduler.add_job(
@@ -78,7 +62,6 @@ async def lifespan(app: FastAPI):
         id="auto_update_job",
         replace_existing=True
     )
->>>>>>> origin/main
     scheduler.start()
     logger.info("Scheduler started.")
 
@@ -542,13 +525,8 @@ def health_check():
     """
     return {"status": "ok"}
 
-<<<<<<< HEAD
-@app.post("/logs/{log_id}/correction")
-def correct_label(log_id: str, req: CorrectionRequest):
-=======
 @app.post("/logs/{log_id}/correction", dependencies=[Depends(get_api_key)])
-def correct_label(log_id: int, req: CorrectionRequest):
->>>>>>> origin/main
+def correct_label(log_id: str, req: CorrectionRequest):
     """
     Correct the label for a specific email log.
     Updates the database and adds the email to training data.
