@@ -3,8 +3,9 @@ import os
 import signal
 import json
 import time
-from datetime import datetime
-from typing import List, Optional, Any
+import datetime
+import subprocess
+from typing import List, Optional, Any, Dict
 from pathlib import Path
 
 from contextlib import asynccontextmanager
@@ -19,8 +20,10 @@ try:
     import classify
     import database
     import imap_client
+    from config import TRAINING_DATA_DIR
 except ImportError:
     from classifier_brain import classify, database, imap_client
+    from classifier_brain.config import TRAINING_DATA_DIR
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -123,17 +126,24 @@ def classification_job(limit: int = 20):
 
         for e_id, msg in emails:
             try:
+                # Extract full info
+                info = classify.extract_email_info(msg)
+
                 # Predict
-                label, score = classify.predict_raw_email(msg, return_score=True)
+                label, score = classify.predict_email(
+                    subject=info["subject"],
+                    body=info["body"],
+                    sender=info["sender"],
+                    to=info["to"],
+                    cc=info["cc"],
+                    mass_mail=info["mass_mail"],
+                    attachment_types=info["attachment_types"],
+                    return_score=True
+                )
                 logger.info(f"Classified email {e_id!r}: {label} ({score:.2f})")
 
                 # Apply label
                 client.apply_label(e_id, label)
-
-                # Log to DB
-                sender = msg.get("From", "") or ""
-                recipient = msg.get("To", "") or ""
-                subject = msg.get("Subject", "") or ""
 
                 # Extract date
                 date_str = msg.get("Date")
@@ -145,13 +155,25 @@ def classification_job(limit: int = 20):
                     except Exception:
                         logger.warning(f"Could not parse date: {date_str}")
 
-                database.add_log(sender, recipient, subject, label, score, timestamp=email_timestamp)
+                # Log to DB with full info
+                database.add_log(
+                    sender=info["sender"],
+                    recipient=info["to"],
+                    subject=info["subject"],
+                    predicted_category=label,
+                    confidence_score=score,
+                    timestamp=email_timestamp,
+                    body=info["body"],
+                    cc=info["cc"],
+                    mass_mail=info["mass_mail"],
+                    attachment_types=info["attachment_types"]
+                )
 
                 results.append({
                     "id": e_id.decode() if isinstance(e_id, bytes) else str(e_id),
-                    "sender": sender,
-                    "recipient": recipient,
-                    "subject": subject,
+                    "sender": info["sender"],
+                    "recipient": info["to"],
+                    "subject": info["subject"],
                     "label": label,
                     "score": score
                 })
@@ -183,13 +205,92 @@ def scheduled_update_job():
     """
     logger.info("Scheduled update job triggering...")
     try:
+        push_training_data_to_git()
         Path(".update_request").touch()
         shutdown_server()
     except Exception as e:
         logger.error(f"Error in scheduled update job: {e}")
 
+def add_to_training_data(log_entry: dict, corrected_category: str):
+    """
+    Append a corrected email to the training data JSON files.
+    """
+    # Prepare the example in the format expected by training
+    # attachment_types in DB is a JSON string
+    try:
+        if isinstance(log_entry.get("attachment_types"), str):
+            att_types = json.loads(log_entry.get("attachment_types"))
+        else:
+            att_types = log_entry.get("attachment_types") or []
+    except Exception:
+        att_types = []
+
+    example = {
+        "subject": log_entry.get("subject", ""),
+        "body": log_entry.get("body", ""),
+        "from": log_entry.get("sender", ""),
+        "to": log_entry.get("recipient", ""),
+        "cc": log_entry.get("cc", ""),
+        "mass_mail": bool(log_entry.get("mass_mail", False)),
+        "attachment_types": att_types
+    }
+
+    # Ensure TRAINING_DATA_DIR exists
+    os.makedirs(TRAINING_DATA_DIR, exist_ok=True)
+
+    file_path = os.path.join(TRAINING_DATA_DIR, f"{corrected_category}.json")
+
+    data = []
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            data = []
+
+    data.append(example)
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    logger.info(f"Added email to {corrected_category}.json training data.")
+
+def push_training_data_to_git():
+    """
+    Commit and push changes in the training data directory to Git.
+    """
+    logger.info("Attempting to push training data to git...")
+
+    if not os.path.exists(TRAINING_DATA_DIR):
+        logger.warning(f"Training data directory {TRAINING_DATA_DIR} does not exist. Skipping push.")
+        return
+
+    try:
+        # Check if it's a git repo or part of one
+        # git add .
+        subprocess.run(["git", "add", "."], cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
+
+        # Check if there are changes to commit
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=TRAINING_DATA_DIR, check=True, capture_output=True, text=True)
+
+        if status.stdout.strip():
+            logger.info("Changes detected in training data. Committing...")
+            subprocess.run(["git", "commit", "-m", f"Auto-update training data: {datetime.datetime.now().isoformat()}"],
+                           cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
+            logger.info("Pushing to remote...")
+            subprocess.run(["git", "push"], cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
+            logger.info("Training data pushed successfully.")
+        else:
+            logger.info("No changes to push in training data.")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Git command failed: {e.stderr}")
+    except Exception as e:
+        logger.error(f"Unexpected error while pushing training data: {e}")
+
 
 # Models
+class CorrectionRequest(BaseModel):
+    corrected_category: str
+
 class StatsResponse(BaseModel):
     stats: dict
 
@@ -240,8 +341,8 @@ def run_classification(background_tasks: BackgroundTasks, limit: int = Query(20,
 
 @app.get("/stats", response_model=StatsResponse)
 def get_stats(
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None
+    start_time: Optional[datetime.datetime] = None,
+    end_time: Optional[datetime.datetime] = None
 ):
     """
     Get classification statistics (counts per category).
@@ -279,8 +380,8 @@ def pop_notifications():
 
 @app.get("/notifications/read", response_model=List[Notification])
 def get_read_notifications(
-    start_time: datetime,
-    end_time: datetime
+    start_time: datetime.datetime,
+    end_time: datetime.datetime
 ):
     """
     Get already read notifications within a time range.
@@ -303,6 +404,37 @@ def health_check():
     """
     return {"status": "ok"}
 
+@app.post("/logs/{log_id}/correction")
+def correct_label(log_id: int, req: CorrectionRequest):
+    """
+    Correct the label for a specific email log.
+    Updates the database and adds the email to training data.
+    """
+    log_entry = database.get_log_by_id(log_id)
+    if not log_entry:
+        raise HTTPException(status_code=404, detail="Log entry not found")
+
+    # Update database
+    database.update_log_correction(log_id, req.corrected_category)
+
+    # Add to training data
+    add_to_training_data(log_entry, req.corrected_category)
+
+    return {"status": "success", "message": f"Label corrected to {req.corrected_category} and added to training data."}
+
+@app.post("/admin/push-training-data", dependencies=[Depends(get_api_key)])
+def trigger_push_training_data():
+    """
+    Manually trigger pushing training data to Git.
+    Requires X-API-Key header if ADMIN_API_KEY is set in .env.
+    """
+    try:
+        push_training_data_to_git()
+        return {"status": "success", "message": "Training data push initiated."}
+    except Exception as e:
+        logger.error(f"Failed to push training data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/admin/trigger-update", dependencies=[Depends(get_api_key)])
 def trigger_update(background_tasks: BackgroundTasks):
     """
@@ -310,6 +442,7 @@ def trigger_update(background_tasks: BackgroundTasks):
     Requires X-API-Key header if ADMIN_API_KEY is set in .env.
     """
     try:
+        push_training_data_to_git()
         Path(".update_request").touch()
         logger.info("Update requested via API. Server will restart.")
         background_tasks.add_task(shutdown_server)
