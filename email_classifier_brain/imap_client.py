@@ -4,7 +4,7 @@ import os
 import ssl
 import re
 from email.message import Message
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -233,3 +233,82 @@ class GmailClient:
         except Exception as e:
             print(f"Error fetching email {gmail_id}: {e}")
             return None
+
+    def get_labels_for_emails(self, gmail_ids: List[str]) -> Dict[str, List[str]]:
+        """
+        Fetch current labels for a list of Gmail IDs (X-GM-MSGID).
+        Returns {gmail_id: [label1, label2, ...]}
+        """
+        self.connect()
+        results = {}
+
+        # We need to find UIDs first.
+        # This loop might be slow for many IDs but it's robust.
+        uids_to_fetch = []
+        uid_to_gmail_id = {}
+
+        for gid in gmail_ids:
+            uid = self._search_by_gmail_id(gid)
+            if uid:
+                uids_to_fetch.append(uid)
+                # Keep mapping. uid is bytes from imaplib
+                uid_to_gmail_id[uid] = gid
+            else:
+                # Email might be deleted or not found
+                pass
+
+        if not uids_to_fetch:
+            return results
+
+        # Fetch in batches
+        BATCH_SIZE = 50
+        for i in range(0, len(uids_to_fetch), BATCH_SIZE):
+            batch_uids = uids_to_fetch[i:i+BATCH_SIZE]
+            uid_str = b','.join(batch_uids)
+
+            try:
+                typ, data = self.connection.uid('FETCH', uid_str, '(X-GM-LABELS)')
+                if typ != 'OK':
+                    continue
+
+                for response_part in data:
+                    if isinstance(response_part, tuple):
+                        metadata = response_part[0].decode('utf-8', errors='ignore')
+                    else:
+                        metadata = response_part.decode('utf-8', errors='ignore')
+
+                    # Extract UID from metadata "123 (UID 456 X-GM-LABELS ...)"
+                    uid_match = re.search(r'UID (\d+)', metadata)
+                    if not uid_match:
+                        continue
+
+                    found_uid_str = uid_match.group(1)
+                    found_uid_bytes = found_uid_str.encode('utf-8')
+
+                    # Find corresponding Gmail ID
+                    gid = uid_to_gmail_id.get(found_uid_bytes)
+                    if not gid:
+                        # Try finding by string if bytes key failed
+                        gid = uid_to_gmail_id.get(found_uid_str)
+
+                    if not gid:
+                        continue
+
+                    # Extract labels
+                    labels = []
+                    match = X_GM_LABELS_PATTERN.search(metadata)
+                    if match:
+                        labels_str = match.group(1)
+                        # Parse labels taking quotes into account
+                        token_pattern = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|([^"\s()]+)')
+                        for m in token_pattern.finditer(labels_str):
+                            if m.group(1):
+                                labels.append(m.group(1).replace('\\"', '"').replace('\\\\', '\\'))
+                            else:
+                                labels.append(m.group(2))
+
+                    results[gid] = labels
+            except Exception as e:
+                print(f"Error fetching labels batch: {e}")
+
+        return results
