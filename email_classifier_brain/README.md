@@ -36,6 +36,8 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
     ├── model_head.pkl
     ├── label_mapping.json
     └── MODEL_INFO.json    # Provenance: links model to training data commit
+├── storage/               # Persistent data (SQLite history)
+│   └── email_history.db   # Classification log and history
 ```
 
 ## Configuration
@@ -47,11 +49,14 @@ The easiest way to configure the system is to use the interactive setup script:
 ```
 
 This will:
+
 1. Create a Python virtual environment.
 2. Install all necessary dependencies.
-3. Guide you through a setup wizard to configure your `.env` file, training data repository, and model syncing.
+3. Guide you through a setup wizard to configure your `.env` file, training data
+   repository, and model syncing.
 
-Alternatively, you can copy `.env.example` to `.env` manually and set your values:
+Alternatively, you can copy `.env.example` to `.env` manually and set your
+values:
 
 ```bash
 cp .env.example .env
@@ -115,7 +120,8 @@ The quickest way to get started on any machine (Training or Server) is:
 ./setup.sh
 ```
 
-Follow the prompts to configure your environment. Once finished, you can start training or run the service as described below.
+Follow the prompts to configure your environment. Once finished, you can start
+training or run the service as described below.
 
 ### Manual Setup (Alternative)
 
