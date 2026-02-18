@@ -16,7 +16,7 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-# 1.# Create directories
+# 1. Create directories
 mkdir -p TrainingData
 mkdir -p model
 mkdir -p checkpoints
