@@ -42,6 +42,8 @@ MY_EMAILS: list[str] = [
 BASE_MODEL = "intfloat/multilingual-e5-small"
 MODEL_OUTPUT_DIR = os.getenv("MODEL_DIR") or "../email_classifier_data/model"
 TRAINING_DATA_DIR = os.getenv("TRAINING_DATA_DIR") or "TrainingData"
+STORAGE_DIR = os.getenv("STORAGE_DIR") or "storage"
+DB_PATH = os.getenv("DB_PATH") or os.path.join(STORAGE_DIR, "email_history.db")
 E5_PREFIX = "passage: "
 
 

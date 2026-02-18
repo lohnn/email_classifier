@@ -3,10 +3,11 @@ import datetime
 import os
 import json
 from typing import Optional, List, Dict, Any
+import config
 
 # Ensure the database file is in the same directory as this script or appropriately located.
 # Using relative path assuming execution from email_classifier_brain/ or similar.
-DB_FILE = os.path.join(os.path.dirname(__file__), "email_history.db")
+DB_FILE = config.DB_PATH
 
 def get_db_connection() -> sqlite3.Connection:
     """Create a database connection to the SQLite database."""

@@ -16,7 +16,11 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-# 1. Create virtual environment if it doesn't exist
+# 1.# Create directories
+mkdir -p TrainingData
+mkdir -p model
+mkdir -p checkpoints
+mkdir -p storage
 if [ ! -d "venv" ]; then
     echo "Creating virtual environment..."
     python3 -m venv venv

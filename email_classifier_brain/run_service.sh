@@ -35,6 +35,8 @@ fi
 GDRIVE_REMOTE="${GDRIVE_REMOTE:-gdrive}"
 GDRIVE_MODEL_PATH="${GDRIVE_MODEL_PATH:-email-classifier-model}"
 MODEL_DIR="${MODEL_DIR:-model}"
+STORAGE_DIR="${STORAGE_DIR:-storage}"
+GDRIVE_STORAGE_PATH="${GDRIVE_STORAGE_PATH:-email-classifier-storage}"
 
 # Function to log to history file (JSON format)
 log_event() {
@@ -134,5 +136,9 @@ if [ -f "$UPDATE_MARKER" ]; then
 fi
 
 # Normal startup
+echo "Backing up storage to Google Drive..."
+# We use copy to avoid deleting files on remote if they are missing locally (safety first)
+$RCLONE_CMD copy "$STORAGE_DIR/" "$GDRIVE_REMOTE:$GDRIVE_STORAGE_PATH/" --progress || echo "Warning: Storage backup failed"
+
 echo "Starting email classifier service..."
 exec $UVICORN_CMD main:app --host 0.0.0.0 --port 8000
