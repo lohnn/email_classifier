@@ -17,6 +17,8 @@ IMAP_SERVER = os.getenv("IMAP_SERVER") or "imap.gmail.com"
 X_GM_LABELS_PATTERN = re.compile(r'X-GM-LABELS \(((?:[^()"]+|"(\\.|[^"\\])*")*)\)')
 X_GM_MSGID_PATTERN = re.compile(r'X-GM-MSGID (\d+)')
 SEQ_PATTERN = re.compile(r'^(\d+)')
+# Regex to parse individual labels from the list (handling quotes)
+LABEL_TOKEN_PATTERN = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|([^"\s()]+)')
 
 class GmailClient:
     def __init__(self):
@@ -242,32 +244,67 @@ class GmailClient:
         self.connect()
         results = {}
 
-        # We need to find UIDs first.
-        # This loop might be slow for many IDs but it's robust.
-        uids_to_fetch = []
-        uid_to_gmail_id = {}
+        # Batch search for UIDs using OR logic
+        # SEARCH (X-GM-MSGID 1 OR X-GM-MSGID 2 ...)
+        # We need to construct this carefully to not exceed line length limits.
+        # But usually IMAP libs handle large commands or we batch search too.
 
-        for gid in gmail_ids:
-            uid = self._search_by_gmail_id(gid)
-            if uid:
-                uids_to_fetch.append(uid)
-                # Keep mapping. uid is bytes from imaplib
-                uid_to_gmail_id[uid] = gid
+        uid_to_gmail_id = {}
+        uids_to_fetch = []
+
+        # Batch the SEARCH command too
+        SEARCH_BATCH = 50
+        for i in range(0, len(gmail_ids), SEARCH_BATCH):
+            batch_gids = gmail_ids[i:i+SEARCH_BATCH]
+
+            # Construct search criteria
+            # Logic: (OR X-GM-MSGID <id> (OR X-GM-MSGID <id> ...))
+            # Or simpler: OR OR OR (if library supports raw string)
+            # Standard IMAP search for multiple items is often OR key1 OR key2 ...
+            # But the OR operator takes two arguments.
+            # So for N items, we need N-1 ORs nested or chained?
+            # Actually, `SEARCH OR <key> <key>` only works for 2?
+            # RFC 3501: OR <search-key> <search-key>
+            # So for 3 items: OR <key1> OR <key2> <key3>
+            # For N items: (N-1) "OR " prefixes followed by N keys.
+
+            if not batch_gids:
+                continue
+
+            if len(batch_gids) == 1:
+                criteria = f'X-GM-MSGID {batch_gids[0]}'
             else:
-                # Email might be deleted or not found
-                pass
+                # Prefix (N-1) times "OR"
+                # Example for [1, 2, 3]: OR X-GM-MSGID 1 OR X-GM-MSGID 2 X-GM-MSGID 3
+                prefixes = "OR " * (len(batch_gids) - 1)
+                keys = " ".join([f'X-GM-MSGID {gid}' for gid in batch_gids])
+                criteria = f'{prefixes}{keys}'
+
+            try:
+                # We need to fetch UIDs and ideally X-GM-MSGID in the response to map them back?
+                # SEARCH returns only IDs (UIDs). It doesn't tell us which criteria matched which ID.
+                # So we have to fetch X-GM-MSGID for the found UIDs to rebuild the map.
+                typ, data = self.connection.uid('SEARCH', None, criteria)
+
+                if typ == 'OK' and data[0]:
+                    found_uids = data[0].split()
+                    if found_uids:
+                        uids_to_fetch.extend(found_uids)
+            except Exception as e:
+                print(f"Error batch searching UIDs: {e}")
 
         if not uids_to_fetch:
             return results
 
-        # Fetch in batches
+        # Fetch in batches (re-using uids found from search)
+        # We fetch X-GM-MSGID again to map UID -> GmailID reliably
         BATCH_SIZE = 50
         for i in range(0, len(uids_to_fetch), BATCH_SIZE):
             batch_uids = uids_to_fetch[i:i+BATCH_SIZE]
             uid_str = b','.join(batch_uids)
 
             try:
-                typ, data = self.connection.uid('FETCH', uid_str, '(X-GM-LABELS)')
+                typ, data = self.connection.uid('FETCH', uid_str, '(X-GM-MSGID X-GM-LABELS)')
                 if typ != 'OK':
                     continue
 
@@ -277,22 +314,11 @@ class GmailClient:
                     else:
                         metadata = response_part.decode('utf-8', errors='ignore')
 
-                    # Extract UID from metadata "123 (UID 456 X-GM-LABELS ...)"
-                    uid_match = re.search(r'UID (\d+)', metadata)
-                    if not uid_match:
+                    # Extract X-GM-MSGID to map back to input
+                    msgid_match = X_GM_MSGID_PATTERN.search(metadata)
+                    if not msgid_match:
                         continue
-
-                    found_uid_str = uid_match.group(1)
-                    found_uid_bytes = found_uid_str.encode('utf-8')
-
-                    # Find corresponding Gmail ID
-                    gid = uid_to_gmail_id.get(found_uid_bytes)
-                    if not gid:
-                        # Try finding by string if bytes key failed
-                        gid = uid_to_gmail_id.get(found_uid_str)
-
-                    if not gid:
-                        continue
+                    gid = msgid_match.group(1)
 
                     # Extract labels
                     labels = []
@@ -300,8 +326,7 @@ class GmailClient:
                     if match:
                         labels_str = match.group(1)
                         # Parse labels taking quotes into account
-                        token_pattern = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|([^"\s()]+)')
-                        for m in token_pattern.finditer(labels_str):
+                        for m in LABEL_TOKEN_PATTERN.finditer(labels_str):
                             if m.group(1):
                                 labels.append(m.group(1).replace('\\"', '"').replace('\\\\', '\\'))
                             else:
