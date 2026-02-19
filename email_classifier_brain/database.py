@@ -31,6 +31,7 @@ def init_db() -> None:
             if id_col and id_col['type'].upper() == 'INTEGER':
                 print("Detected old schema (id is INTEGER). Dropping table 'logs' for migration to Gmail ID.")
                 c.execute("DROP TABLE logs")
+                columns = [] # Reset columns to trigger creation/check
     except Exception as e:
         print(f"Error checking schema: {e}")
 
@@ -48,9 +49,28 @@ def init_db() -> None:
             predicted_category TEXT,
             confidence_score REAL,
             corrected_category TEXT,
-            is_read BOOLEAN DEFAULT 0
+            is_read BOOLEAN DEFAULT 0,
+            last_recheck TEXT,
+            ambiguous_labels TEXT
         )
     ''')
+
+    # Check for new columns and migrate if necessary
+    try:
+        c.execute("PRAGMA table_info(logs)")
+        existing_cols = [col['name'] for col in c.fetchall()]
+
+        if 'last_recheck' not in existing_cols:
+            print("Migrating DB: Adding last_recheck column")
+            c.execute("ALTER TABLE logs ADD COLUMN last_recheck TEXT")
+
+        if 'ambiguous_labels' not in existing_cols:
+            print("Migrating DB: Adding ambiguous_labels column")
+            c.execute("ALTER TABLE logs ADD COLUMN ambiguous_labels TEXT")
+
+    except Exception as e:
+        print(f"Error migrating schema: {e}")
+
     conn.commit()
     conn.close()
 
@@ -74,6 +94,13 @@ def add_log(
     ts_str = timestamp.isoformat() if timestamp else datetime.datetime.now().isoformat()
 
     att_types_str = json.dumps(attachment_types or [])
+
+    # We do NOT update last_recheck or ambiguous_labels on add_log (except maybe on insert default null)
+    # If updating an existing log, we keep its recheck status unless explicitly reset logic is desired.
+    # For now, preserve existing values on update is tricky with this ON CONFLICT logic unless we exclude them.
+    # The current query overwrites everything else but leaves other cols alone if we don't mention them?
+    # No, DO UPDATE SET must specify cols.
+    # If we don't specify last_recheck, it keeps the old value (SQLite behavior for excluded columns not in SET).
 
     c.execute('''
         INSERT INTO logs (
@@ -207,6 +234,96 @@ def get_logs_for_reclassification() -> List[Dict[str, Any]]:
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM logs WHERE corrected_category IS NULL")
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_candidate_logs_for_recheck(limit: int = 200) -> List[Dict[str, Any]]:
+    """
+    Get logs eligible for re-check based on the gliding scale logic.
+    Prioritizes newer emails.
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    now = datetime.datetime.now()
+
+    # Thresholds for 'timestamp'
+    t_1d = (now - datetime.timedelta(days=1)).isoformat()
+    t_7d = (now - datetime.timedelta(days=7)).isoformat()
+    t_30d = (now - datetime.timedelta(days=30)).isoformat()
+
+    # Thresholds for 'last_recheck'
+    r_12h = (now - datetime.timedelta(hours=12)).isoformat()
+    r_24h = (now - datetime.timedelta(hours=24)).isoformat()
+    r_7d = (now - datetime.timedelta(days=7)).isoformat()
+    r_30d = (now - datetime.timedelta(days=30)).isoformat()
+
+    # Logic:
+    # 1. < 1 day old: recheck if last_recheck < 12h ago (or null)
+    # 2. 1-7 days old: recheck if last_recheck < 24h ago (or null)
+    # 3. 7-30 days old: recheck if last_recheck < 7d ago (or null)
+    # 4. > 30 days old: recheck if last_recheck < 30d ago (or null)
+
+    query = '''
+        SELECT * FROM logs
+        WHERE
+            -- Case 1: < 1 day old
+            (timestamp > ? AND (last_recheck IS NULL OR last_recheck < ?))
+            OR
+            -- Case 2: 1-7 days old
+            (timestamp <= ? AND timestamp > ? AND (last_recheck IS NULL OR last_recheck < ?))
+            OR
+            -- Case 3: 7-30 days old
+            (timestamp <= ? AND timestamp > ? AND (last_recheck IS NULL OR last_recheck < ?))
+            OR
+            -- Case 4: > 30 days old
+            (timestamp <= ? AND (last_recheck IS NULL OR last_recheck < ?))
+        ORDER BY timestamp DESC
+        LIMIT ?
+    '''
+
+    params = (
+        t_1d, r_12h,           # Case 1
+        t_1d, t_7d, r_24h,     # Case 2
+        t_7d, t_30d, r_7d,     # Case 3
+        t_30d, r_30d,          # Case 4
+        limit
+    )
+
+    c.execute(query, params)
+    rows = c.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+def update_recheck_status(log_id: str, ambiguous_labels: Optional[List[str]] = None) -> None:
+    """
+    Update the last_recheck timestamp and ambiguous_labels for a log.
+    If ambiguous_labels is None or empty, it sets the column to NULL.
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    now_str = datetime.datetime.now().isoformat()
+
+    amb_str = json.dumps(ambiguous_labels) if ambiguous_labels else None
+
+    c.execute('''
+        UPDATE logs
+        SET last_recheck = ?,
+            ambiguous_labels = ?
+        WHERE id = ?
+    ''', (now_str, amb_str, log_id))
+
+    conn.commit()
+    conn.close()
+
+def get_ambiguous_logs() -> List[Dict[str, Any]]:
+    """Get logs that have been flagged as ambiguous (multiple trained labels found)."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM logs WHERE ambiguous_labels IS NOT NULL ORDER BY timestamp DESC")
     rows = c.fetchall()
     conn.close()
     return [dict(row) for row in rows]
