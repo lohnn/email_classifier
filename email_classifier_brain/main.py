@@ -456,7 +456,7 @@ def check_corrections_job(limit: int = 200):
             # If fetch failed or email deleted, we might not have it in map
             if gid not in current_labels_map:
                 # Update recheck anyway so we don't loop on it
-                database.update_recheck_status(gid, log['ambiguous_labels'])
+                database.update_recheck_status(gid, log.get('ambiguous_labels'))
                 continue
 
             found_labels = current_labels_map[gid]
