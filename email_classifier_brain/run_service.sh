@@ -147,4 +147,4 @@ echo "Backing up storage to Google Drive..."
 $RCLONE_CMD copy "$STORAGE_DIR/" "$GDRIVE_REMOTE:$GDRIVE_STORAGE_PATH/" --progress || echo "Warning: Storage backup failed"
 
 echo "Starting email classifier service..."
-exec $UVICORN_CMD main:app --host 0.0.0.0 --port 8000
+exec $UVICORN_CMD main:app --host 0.0.0.0 --port 8000 "$@"

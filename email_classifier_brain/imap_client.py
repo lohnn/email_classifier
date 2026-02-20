@@ -1,15 +1,17 @@
 import imaplib
+import logging
 import email
 import os
 import ssl
 import re
 from email.message import Message
-from typing import List, Tuple, Dict
+from typing import List, Optional, Tuple, Dict
 from dotenv import load_dotenv
 
 load_dotenv()
 
 IMAP_SERVER = os.getenv("IMAP_SERVER") or "imap.gmail.com"
+logger = logging.getLogger(__name__)
 
 # Regex to match X-GM-LABELS content.
 # Handles atoms (no quotes/parens) and quoted strings (with escaped quotes/backslashes).
@@ -60,95 +62,112 @@ class GmailClient:
                 pass
             self.connection = None
 
-    def fetch_unprocessed_emails(self, known_labels: List[str]) -> List[Tuple[bytes, Message]]:
+    def fetch_unprocessed_emails(self, known_labels: List[str], limit: Optional[int] = None) -> List[Tuple[str, Message]]:
         """
         Fetch UNSEEN emails that do not have any of the known_labels.
-        Returns a list of (gmail_id, email_message_object).
+        Returns a list of (gmail_id, email_message_object), newest first.
+        If limit is set, stops scanning once that many qualifying emails are found.
+
+        Two-phase approach:
+          Phase 1 – metadata-only scan (X-GM-LABELS + X-GM-MSGID, no bodies),
+                    newest-first, collecting qualifying sequence IDs up to limit.
+          Phase 2 – fetch BODY.PEEK[] only for those qualifying IDs.
         """
         self.connect()
 
+        logger.info('Just about to search for unsees emails')
         # Search for UNSEEN emails
         typ, data = self.connection.search(None, 'UNSEEN')
 
         if typ != 'OK' or not data[0]:
             return []
 
-        email_ids = data[0].split()
-        results = []
+        email_ids = data[0].split()[::-1]  # Reverse so newest emails (highest IDs) are processed first
+        logger.info(f'Finished search for unseen emails, found {len(email_ids)} emails to classify')
 
         if not email_ids:
-            return results
+            return []
 
         try:
-            BATCH_SIZE = int(os.getenv("IMAP_BATCH_SIZE", "50"))
+            BATCH_SIZE = int(os.getenv("IMAP_BATCH_SIZE") or "50")
         except ValueError:
             BATCH_SIZE = 50
 
+        # ------------------------------------------------------------------
+        # Phase 1: metadata-only scan (no body download) newest-first.
+        # Collects qualifying sequence IDs and their gmail IDs up to limit.
+        # ------------------------------------------------------------------
+        qualifying_seq_ids: List[bytes] = []
+        known_labels_set = set(known_labels)
+
         for i in range(0, len(email_ids), BATCH_SIZE):
             batch_ids = email_ids[i:i + BATCH_SIZE]
-
-            # Construct a comma-separated list of IDs for batch fetching
             ids_str = b','.join(batch_ids)
 
-            # Fetch BODY.PEEK[] (full content), X-GM-LABELS, and X-GM-MSGID
-            # PEEK prevents marking as \Seen implicitly by the fetch of body.
-            typ, msg_data = self.connection.fetch(ids_str, '(BODY.PEEK[] X-GM-LABELS X-GM-MSGID)')
+            typ, msg_data = self.connection.fetch(ids_str, '(X-GM-LABELS X-GM-MSGID)')
+            if typ != 'OK':
+                continue
 
+            for response_part in msg_data:
+                # Metadata-only fetch returns plain bytes or a 1-tuple
+                raw_line = response_part[0] if isinstance(response_part, tuple) else response_part
+                metadata = raw_line.decode('utf-8', errors='ignore')
+
+                seq_match = SEQ_PATTERN.match(metadata)
+                if not seq_match:
+                    continue
+                seq_id = seq_match.group(1).encode()
+
+                msgid_match = X_GM_MSGID_PATTERN.search(metadata)
+                if not msgid_match:
+                    continue
+                gmail_id = msgid_match.group(1)
+
+                labels_str = ""
+                lbl_match = X_GM_LABELS_PATTERN.search(metadata)
+                if lbl_match:
+                    labels_str = lbl_match.group(1)
+
+                # Skip if any known label is already applied
+                skip = False
+                for m in LABEL_TOKEN_PATTERN.finditer(labels_str):
+                    label_found = m.group(1).replace('\\"', '"').replace('\\\\', '\\') if m.group(1) else m.group(2)
+                    if label_found in known_labels_set:
+                        skip = True
+                        break
+
+                if not skip:
+                    qualifying_seq_ids.append(seq_id)
+                    if limit is not None and len(qualifying_seq_ids) >= limit:
+                        break  # inner loop – got enough
+
+            if limit is not None and len(qualifying_seq_ids) >= limit:
+                break  # outer loop – got enough
+
+        if not qualifying_seq_ids:
+            return []
+
+        # ------------------------------------------------------------------
+        # Phase 2: fetch full bodies only for the qualifying emails.
+        # ------------------------------------------------------------------
+        results: List[Tuple[str, Message]] = []
+
+        for i in range(0, len(qualifying_seq_ids), BATCH_SIZE):
+            batch_seq = qualifying_seq_ids[i:i + BATCH_SIZE]
+            ids_str = b','.join(batch_seq)
+
+            typ, msg_data = self.connection.fetch(ids_str, '(BODY.PEEK[] X-GM-MSGID)')
             if typ != 'OK':
                 continue
 
             for response_part in msg_data:
                 if isinstance(response_part, tuple):
-                    # response_part[0] is bytes, header line
-                    # Example: b'1 (X-GM-LABELS (\\Inbox \\Important) X-GM-MSGID 123456789 BODY.PEEK[] {1234}'
                     metadata = response_part[0].decode('utf-8', errors='ignore')
-
-                    # Extract sequence number (ID) - not used for return but for internal logic if needed
-                    seq_match = SEQ_PATTERN.match(metadata)
-                    if not seq_match:
-                        continue
-                    
-                    # Extract X-GM-MSGID
                     msgid_match = X_GM_MSGID_PATTERN.search(metadata)
                     if not msgid_match:
-                        # Should technically not happen if Gmail, but safeguard
                         continue
                     gmail_id = msgid_match.group(1)
-
-                    # Extract content inside X-GM-LABELS (...)
-                    labels_str = ""
-                    match = X_GM_LABELS_PATTERN.search(metadata)
-                    if match:
-                        labels_str = match.group(1)
-
-                    # The second element is the body content
                     raw_email = response_part[1]
-
-                    skip = False
-                    for label in known_labels:
-                        # Robust check for label presence
-                        # Gmail labels in the list are separated by spaces.
-                        # Labels with spaces are quoted.
-
-                        escaped_label = re.escape(label)
-                        # We check if the label exists as a standalone token or quoted token
-                        # This regex checks for:
-                        # Start of string or space or open paren
-                        # Optional quote
-                        # The label
-                        # Optional quote
-                        # End of string or space or close paren
-
-                        # Note: This is an approximation. A true parser would be better but this covers most cases.
-                        pattern = fr'(?:^|\s|\()"??{escaped_label}"??(?:$|\s|\))'
-
-                        if re.search(pattern, labels_str):
-                            skip = True
-                            break
-
-                    if skip:
-                        continue
-
                     msg = email.message_from_bytes(raw_email)
                     results.append((gmail_id, msg))
 
