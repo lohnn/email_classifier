@@ -138,7 +138,6 @@ class GmailClient:
 
                 if not skip:
                     qualifying_seq_ids.append(seq_id)
-                    qualifying_gmail_ids.append(gmail_id)
                     if limit is not None and len(qualifying_seq_ids) >= limit:
                         break  # inner loop – got enough
 
