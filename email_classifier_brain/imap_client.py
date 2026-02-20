@@ -62,7 +62,7 @@ class GmailClient:
                 pass
             self.connection = None
 
-    def fetch_unprocessed_emails(self, known_labels: List[str], limit: Optional[int] = None) -> List[Tuple[bytes, Message]]:
+    def fetch_unprocessed_emails(self, known_labels: List[str], limit: Optional[int] = None) -> List[Tuple[str, Message]]:
         """
         Fetch UNSEEN emails that do not have any of the known_labels.
         Returns a list of (gmail_id, email_message_object), newest first.
@@ -89,7 +89,7 @@ class GmailClient:
             return []
 
         try:
-            BATCH_SIZE = int(os.getenv("IMAP_BATCH_SIZE", "50"))
+            BATCH_SIZE = int(os.getenv("IMAP_BATCH_SIZE") or "50")
         except ValueError:
             BATCH_SIZE = 50
 
@@ -98,7 +98,7 @@ class GmailClient:
         # Collects qualifying sequence IDs and their gmail IDs up to limit.
         # ------------------------------------------------------------------
         qualifying_seq_ids: List[bytes] = []
-        qualifying_gmail_ids: List[str] = []
+        known_labels_set = set(known_labels)
 
         for i in range(0, len(email_ids), BATCH_SIZE):
             batch_ids = email_ids[i:i + BATCH_SIZE]
