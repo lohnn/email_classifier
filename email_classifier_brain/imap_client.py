@@ -130,10 +130,9 @@ class GmailClient:
 
                 # Skip if any known label is already applied
                 skip = False
-                for label in known_labels:
-                    escaped_label = re.escape(label)
-                    pattern = fr'(?:^|\s|\()\"??{escaped_label}\"??(?:$|\s|\))'
-                    if re.search(pattern, labels_str):
+                for m in LABEL_TOKEN_PATTERN.finditer(labels_str):
+                    label_found = m.group(1).replace('\\"', '"').replace('\\\\', '\\') if m.group(1) else m.group(2)
+                    if label_found in known_labels_set:
                         skip = True
                         break
 
