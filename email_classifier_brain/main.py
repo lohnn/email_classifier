@@ -461,62 +461,114 @@ def check_corrections_job(limit: int = 200):
 
             found_labels = current_labels_map[gid]
 
-            # Identify trained labels
-            trained_found = [lbl for lbl in found_labels if lbl in known_categories]
+            # Identify trained labels (excluding VERIFIED label)
+            trained_found = [lbl for lbl in found_labels if lbl in known_categories and lbl != config.VERIFICATION_LABEL]
+
+            # Check for explicit verification
+            is_verified = config.VERIFICATION_LABEL in found_labels
 
             current_local = log['corrected_category'] or log['predicted_category']
 
             is_ambiguous = False
             correction_candidate = None
             cleanup_needed = False
+            verified_candidate = None
 
             if len(trained_found) == 0:
                 # No trained label found.
                 pass
             elif len(trained_found) == 1:
                 candidate = trained_found[0]
-                if candidate != current_local:
-                    correction_candidate = candidate
-                    # Old label is not on server (since only 1 found), so no cleanup needed.
+
+                if is_verified:
+                    # Verified scenario: 1 trained label + VERIFIED
+                    verified_candidate = candidate
+                    if candidate != current_local:
+                        # Correction + Verification
+                        correction_candidate = candidate
+                    else:
+                        # Just verification of current label
+                        pass
+                else:
+                    # Standard scenario: 1 trained label
+                    if candidate != current_local:
+                        correction_candidate = candidate
+                        # Old label is not on server (since only 1 found), so no cleanup needed.
             else:
                 # Multiple trained labels
-                if current_local in trained_found:
-                    others = [l for l in trained_found if l != current_local]
-                    if len(others) == 1:
-                        # Case: {Old, New} -> New is correction, Old needs cleanup
-                        correction_candidate = others[0]
-                        cleanup_needed = True
+                if is_verified:
+                    # If verified but multiple labels, we try to resolve
+                    if current_local in trained_found:
+                        others = [l for l in trained_found if l != current_local]
+                        if len(others) == 1:
+                            # Case: {Old, New, VERIFIED} -> Treat New as correct, verified
+                            correction_candidate = others[0]
+                            verified_candidate = others[0]
+                            cleanup_needed = True
+                        else:
+                            # Ambiguous despite verification
+                            is_ambiguous = True
                     else:
-                        # Case: {Old, New1, New2} -> Ambiguous
                         is_ambiguous = True
                 else:
-                    # Case: {New1, New2} (Old missing) -> Ambiguous
-                    is_ambiguous = True
+                    # Standard multiple label conflict
+                    if current_local in trained_found:
+                        others = [l for l in trained_found if l != current_local]
+                        if len(others) == 1:
+                            # Case: {Old, New} -> New is correction, Old needs cleanup
+                            correction_candidate = others[0]
+                            cleanup_needed = True
+                        else:
+                            # Case: {Old, New1, New2} -> Ambiguous
+                            is_ambiguous = True
+                    else:
+                        # Case: {New1, New2} (Old missing) -> Ambiguous
+                        is_ambiguous = True
 
             # Execute Actions
             if is_ambiguous:
                 logger.info(f"Ambiguous labels for {gid}: {trained_found}")
                 database.update_recheck_status(gid, ambiguous_labels=trained_found)
                 ambiguous_count += 1
-            elif correction_candidate:
-                logger.info(f"Detected external correction for {gid}: {current_local} -> {correction_candidate}")
+            else:
+                processed = False
 
-                # Update DB
-                database.update_log_correction(gid, correction_candidate)
+                # Apply correction if detected
+                if correction_candidate:
+                    logger.info(f"Detected external correction for {gid}: {current_local} -> {correction_candidate}")
 
-                # Add to training data
-                add_to_training_data(log, correction_candidate)
+                    # Update DB
+                    database.update_log_correction(gid, correction_candidate)
 
-                # Cleanup if needed
-                if cleanup_needed:
-                    logger.info(f"Removing old label {current_local} from {gid}")
-                    client.remove_label(gid, current_local)
+                    # Add to training data
+                    add_to_training_data(log, correction_candidate)
+
+                    # Cleanup old label if needed
+                    if cleanup_needed:
+                        logger.info(f"Removing old label {current_local} from {gid}")
+                        client.remove_label(gid, current_local)
+
+                    processed = True
+                    updates_count += 1
+
+                # Apply verification if detected (even if no correction, or after correction)
+                if verified_candidate:
+                    logger.info(f"Verified correctness for {gid}: {verified_candidate}")
+
+                    # If we didn't just add it via correction, add to training data now
+                    # (Prevent duplicates if correction_candidate == verified_candidate)
+                    if not correction_candidate:
+                        # Update DB just in case (e.g. if it was predicted but not corrected column)
+                        database.update_log_correction(gid, verified_candidate)
+                        add_to_training_data(log, verified_candidate)
+                        processed = True
+                        updates_count += 1
+
+                    # Remove the VERIFIED label
+                    logger.info(f"Removing verification label {config.VERIFICATION_LABEL} from {gid}")
+                    client.remove_label(gid, config.VERIFICATION_LABEL)
 
                 # Mark recheck done (clears ambiguous if any)
-                database.update_recheck_status(gid, ambiguous_labels=None)
-                updates_count += 1
-            else:
-                # No change
                 database.update_recheck_status(gid, ambiguous_labels=None)
 
         logger.info(f"Re-check finished. Updates: {updates_count}, Ambiguous: {ambiguous_count}")

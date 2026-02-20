@@ -33,6 +33,9 @@ try:
 except ValueError:
     RECHECK_INTERVAL_HOURS = 12
 
+# Label used to explicitly verify a classification
+VERIFICATION_LABEL = os.getenv("VERIFICATION_LABEL") or "VERIFIED"
+
 # Comma-separated list of your email addresses.
 # Used to determine your role in an email:
 #   - "Direct" if any of your addresses is in the "To" field
