@@ -462,7 +462,7 @@ def check_corrections_job(limit: int = 200):
             found_labels = current_labels_map[gid]
 
             # Identify trained labels (excluding VERIFIED label)
-            trained_found = [lbl for lbl in found_labels if lbl in known_categories]
+            trained_found = [lbl for lbl in found_labels if lbl in known_categories and lbl != config.VERIFICATION_LABEL]
 
             # Check for explicit verification
             is_verified = config.VERIFICATION_LABEL in found_labels
