@@ -56,6 +56,17 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Automatic classification is disabled via ENABLE_AUTO_CLASSIFICATION.")
 
+    # Run re-check job
+    if config.ENABLE_RECHECK_JOB:
+        scheduler.add_job(
+            check_corrections_job,
+            trigger=IntervalTrigger(hours=config.RECHECK_INTERVAL_HOURS),
+            id="check_corrections_job",
+            replace_existing=True
+        )
+    else:
+        logger.info("Re-check job disabled.")
+
     # Run auto-update every day
     scheduler.add_job(
         scheduled_update_job,
@@ -408,6 +419,167 @@ def reclassify_job(limit: int = 100):
             client.disconnect()
         job_lock.release()
 
+def check_corrections_job(limit: int = 200):
+    """
+    Background job to check for label corrections from the server (IMAP).
+    Checks emails based on a gliding scale of age.
+    """
+    if not job_lock.acquire(blocking=False):
+        logger.warning("Job already running. Skipping check_corrections_job.")
+        return
+
+    client = None
+    try:
+        logger.info("Starting check_corrections_job...")
+
+        # 1. Get candidates
+        candidates = database.get_candidate_logs_for_recheck(limit)
+        if not candidates:
+            logger.info("No candidates for re-check.")
+            return
+
+        logger.info(f"Checking {len(candidates)} emails for external corrections...")
+
+        # 2. Get labels from IMAP
+        client = imap_client.GmailClient()
+        candidate_ids = [c['id'] for c in candidates]
+
+        current_labels_map = client.get_labels_for_emails(candidate_ids)
+
+        known_categories = set(classify.get_available_categories())
+
+        updates_count = 0
+        ambiguous_count = 0
+
+        for log in candidates:
+            gid = log['id']
+            # If fetch failed or email deleted, we might not have it in map
+            if gid not in current_labels_map:
+                # Update recheck anyway so we don't loop on it
+                database.update_recheck_status(gid, log['ambiguous_labels'])
+                continue
+
+            found_labels = current_labels_map[gid]
+
+            # Identify trained labels (excluding VERIFIED label)
+            trained_found = [lbl for lbl in found_labels if lbl in known_categories]
+
+            # Check for explicit verification
+            is_verified = config.VERIFICATION_LABEL in found_labels
+
+            current_local = log['corrected_category'] or log['predicted_category']
+
+            is_ambiguous = False
+            correction_candidate = None
+            cleanup_needed = False
+            verified_candidate = None
+
+            if len(trained_found) == 0:
+                # No trained label found.
+                pass
+            elif len(trained_found) == 1:
+                candidate = trained_found[0]
+
+                if is_verified:
+                    # Verified scenario: 1 trained label + VERIFIED
+                    verified_candidate = candidate
+                    if candidate != current_local:
+                        # Correction + Verification
+                        correction_candidate = candidate
+                    else:
+                        # Just verification of current label
+                        pass
+                else:
+                    # Standard scenario: 1 trained label
+                    if candidate != current_local:
+                        correction_candidate = candidate
+                        # Old label is not on server (since only 1 found), so no cleanup needed.
+            else:
+                # Multiple trained labels
+                if is_verified:
+                    # If verified but multiple labels, we try to resolve
+                    if current_local in trained_found:
+                        others = [l for l in trained_found if l != current_local]
+                        if len(others) == 1:
+                            # Case: {Old, New, VERIFIED} -> Treat New as correct, verified
+                            correction_candidate = others[0]
+                            verified_candidate = others[0]
+                            cleanup_needed = True
+                        else:
+                            # Ambiguous despite verification
+                            is_ambiguous = True
+                    else:
+                        is_ambiguous = True
+                else:
+                    # Standard multiple label conflict
+                    if current_local in trained_found:
+                        others = [l for l in trained_found if l != current_local]
+                        if len(others) == 1:
+                            # Case: {Old, New} -> New is correction, Old needs cleanup
+                            correction_candidate = others[0]
+                            cleanup_needed = True
+                        else:
+                            # Case: {Old, New1, New2} -> Ambiguous
+                            is_ambiguous = True
+                    else:
+                        # Case: {New1, New2} (Old missing) -> Ambiguous
+                        is_ambiguous = True
+
+            # Execute Actions
+            if is_ambiguous:
+                logger.info(f"Ambiguous labels for {gid}: {trained_found}")
+                database.update_recheck_status(gid, ambiguous_labels=trained_found)
+                ambiguous_count += 1
+            else:
+                processed = False
+
+                # Apply correction if detected
+                if correction_candidate:
+                    logger.info(f"Detected external correction for {gid}: {current_local} -> {correction_candidate}")
+
+                    # Update DB
+                    database.update_log_correction(gid, correction_candidate)
+
+                    # Add to training data
+                    add_to_training_data(log, correction_candidate)
+
+                    # Cleanup old label if needed
+                    if cleanup_needed:
+                        logger.info(f"Removing old label {current_local} from {gid}")
+                        client.remove_label(gid, current_local)
+
+                    processed = True
+                    updates_count += 1
+
+                # Apply verification if detected (even if no correction, or after correction)
+                if verified_candidate:
+                    logger.info(f"Verified correctness for {gid}: {verified_candidate}")
+
+                    # If we didn't just add it via correction, add to training data now
+                    # (Prevent duplicates if correction_candidate == verified_candidate)
+                    if not correction_candidate:
+                        # Update DB just in case (e.g. if it was predicted but not corrected column)
+                        database.update_log_correction(gid, verified_candidate)
+                        add_to_training_data(log, verified_candidate)
+                        processed = True
+                        updates_count += 1
+
+                    # Remove the VERIFIED label
+                    logger.info(f"Removing verification label {config.VERIFICATION_LABEL} from {gid}")
+                    client.remove_label(gid, config.VERIFICATION_LABEL)
+
+                # Mark recheck done (clears ambiguous if any)
+                database.update_recheck_status(gid, ambiguous_labels=None)
+
+        logger.info(f"Re-check finished. Updates: {updates_count}, Ambiguous: {ambiguous_count}")
+
+    except Exception as e:
+        logger.error(f"Error in check_corrections_job: {e}")
+    finally:
+        if client:
+            client.disconnect()
+        job_lock.release()
+
 
 # Models
 class CorrectionRequest(BaseModel):
@@ -518,6 +690,13 @@ def get_labels():
     Get all supported labels (categories) for email classification.
     """
     return classify.get_available_categories()
+
+@app.get("/logs/ambiguous", dependencies=[Depends(get_api_key)])
+def get_ambiguous_logs():
+    """
+    Get logs that have been flagged as ambiguous (multiple trained labels found on server).
+    """
+    return database.get_ambiguous_logs()
 
 @app.get("/health")
 def health_check():

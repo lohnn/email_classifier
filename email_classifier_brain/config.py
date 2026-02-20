@@ -24,6 +24,18 @@ load_dotenv()
 # If "false", the background job won't be scheduled.
 ENABLE_AUTO_CLASSIFICATION = (os.getenv("ENABLE_AUTO_CLASSIFICATION") or "true").lower() == "true"
 
+# Enable the background job that checks for label corrections from the server
+ENABLE_RECHECK_JOB = (os.getenv("ENABLE_RECHECK_JOB") or "true").lower() == "true"
+
+# Interval in hours for the recheck job (default: 12)
+try:
+    RECHECK_INTERVAL_HOURS = int(os.getenv("RECHECK_INTERVAL_HOURS") or "12")
+except ValueError:
+    RECHECK_INTERVAL_HOURS = 12
+
+# Label used to explicitly verify a classification
+VERIFICATION_LABEL = os.getenv("VERIFICATION_LABEL") or "VERIFIED"
+
 # Comma-separated list of your email addresses.
 # Used to determine your role in an email:
 #   - "Direct" if any of your addresses is in the "To" field
