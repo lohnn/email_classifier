@@ -130,15 +130,9 @@ def classification_job(limit: int = 20):
         # Get known categories to skip
         known_labels = classify.get_available_categories()
 
-        # Fetch emails
-        # Note: A limit could be implemented in fetch_unprocessed_emails to avoid locking too long
-        emails = client.fetch_unprocessed_emails(known_labels)
-        logger.info(f"Found {len(emails)} unprocessed emails.")
-
-        # Simple limiting (though fetch still gets all headers)
-        if len(emails) > limit:
-            logger.info(f"Limiting processing to first {limit} emails.")
-            emails = emails[:limit]
+        # Fetch emails, stopping early once we have enough
+        emails = client.fetch_unprocessed_emails(known_labels, limit=limit)
+        logger.info(f"Fetched {len(emails)} unprocessed emails (limit={limit}).")
 
         for e_id, msg in emails:
             try:
