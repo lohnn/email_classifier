@@ -5,6 +5,8 @@ import 'models.dart';
 class ApiClient {
   final Dio _dio;
 
+  final String _apiKey = dotenv.env['API_KEY']!;
+
   ApiClient()
     : _dio = Dio(
         BaseOptions(
@@ -56,6 +58,14 @@ class ApiClient {
   Future<RunResponse> runClassification({int limit = 20}) async {
     final response = await _dio.post('/run', queryParameters: {'limit': limit});
     return RunResponse.fromJson(response.data);
+  }
+
+  // /check-corrections
+  Future<void> checkCorrections() async {
+    await _dio.post(
+      '/check-corrections',
+      options: Options(headers: {'X-API-Key': _apiKey}),
+    );
   }
 
   Future<void> correctLabel(String logId, String correctedCategory) async {

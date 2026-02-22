@@ -747,6 +747,15 @@ def trigger_reclassify(background_tasks: BackgroundTasks, limit: int = Query(100
     background_tasks.add_task(reclassify_job, limit=limit)
     return {"status": "accepted", "message": "Re-classification started in background."}
 
+@app.post("/check-corrections", dependencies=[Depends(get_api_key)])
+def trigger_check_corrections(background_tasks: BackgroundTasks):
+    """
+    Trigger the check corrections process for existing logs.
+    """
+    # Run in background to avoid timeout
+    background_tasks.add_task(check_corrections_job)
+    return {"status": "accepted", "message": "Check corrections started in background."}
+
 @app.post("/admin/trigger-update", dependencies=[Depends(get_api_key)])
 def trigger_update(background_tasks: BackgroundTasks):
     """
