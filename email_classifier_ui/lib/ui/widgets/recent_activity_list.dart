@@ -44,7 +44,7 @@ class _NotificationTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final date = DateTime.tryParse(notification.timestamp) ?? DateTime.now();
-    final formattedDate = DateFormat('yyyy MMM d, h:mm a').format(date);
+    final formattedDate = DateFormat('MMM d, h:mm a').format(date);
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 0, vertical: 8),

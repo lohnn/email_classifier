@@ -74,7 +74,7 @@ class CorrectionRequest {
 }
 
 class AckRequest {
-  final List<String>? ids;
+  final List<int>? ids;
 
   AckRequest({this.ids});
 

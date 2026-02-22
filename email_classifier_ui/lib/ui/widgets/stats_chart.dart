@@ -81,7 +81,13 @@ class StatsChart extends ConsumerWidget {
                           ),
                         ),
                         const SizedBox(width: 8),
-                        Text(key, style: const TextStyle(fontSize: 14)),
+                        Text(
+                          key,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
                       ],
                     ),
                   );

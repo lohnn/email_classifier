@@ -58,13 +58,6 @@ class ApiClient {
     return RunResponse.fromJson(response.data);
   }
 
-  Future<void> runReClassification() async {
-    await _dio.post(
-      '/reclassify',
-      options: Options(headers: {'X-API-Key': dotenv.get('ADMIN_API_KEY')}),
-    );
-  }
-
   Future<void> correctLabel(String logId, String correctedCategory) async {
     await _dio.post(
       '/logs/$logId/correction',

@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../widgets/stats_chart.dart';
-import '../widgets/recent_activity_list.dart';
-import '../../providers/api_providers.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import '../../providers/api_providers.dart';
+import '../widgets/recent_activity_list.dart';
+import '../widgets/stats_chart.dart';
 
 class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
@@ -15,38 +15,7 @@ class DashboardScreen extends ConsumerWidget {
         title: const Text('Email Classifier'),
         actions: [
           IconButton(
-            icon: const Icon(LucideIcons.bean),
-            tooltip: 'Reclassify emails',
-            onPressed: () async {
-              // Trigger classification
-              final client = ref.read(apiClientProvider);
-              try {
-                await client.runReClassification();
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        "Reclassified emails",
-                      ),
-                    ),
-                  );
-                  ref.invalidate(statsProvider);
-                  ref.invalidate(notificationsProvider);
-                }
-              } catch (e, stackTrace) {
-                debugPrint(e.toString());
-                debugPrintStack(stackTrace: stackTrace);
-                if (context.mounted) {
-                  ScaffoldMessenger.of(
-                    context,
-                  ).showSnackBar(SnackBar(content: Text("Error: $e")));
-                }
-              }
-            },
-          ),
-          IconButton(
             icon: const Icon(LucideIcons.refreshCw),
-            tooltip: 'Refresh data',
             onPressed: () {
               ref.invalidate(statsProvider);
               ref.invalidate(notificationsProvider);
