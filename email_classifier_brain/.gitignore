@@ -28,7 +28,7 @@ model/
 checkpoints/
 
 # Default (private) training data folder
-email-classifier-data/
+email_classifier_data/
 storage/
 
 *.db

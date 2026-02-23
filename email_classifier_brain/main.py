@@ -251,6 +251,21 @@ def add_to_training_data(log_entry: dict, corrected_category: str):
 
     file_path = os.path.join(TRAINING_DATA_DIR, f"{corrected_category}.jsonl")
 
+    # Dedup check: skip if an entry with the same subject+body already exists
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    existing = json.loads(line)
+                    if existing.get("subject") == example["subject"] and existing.get("body") == example["body"]:
+                        logger.info(f"Skipping duplicate in {corrected_category}.jsonl (subject: {example['subject'][:50]}...)")
+                        return
+        except Exception as e:
+            logger.warning(f"Error reading {file_path} for dedup check: {e}")
+
     # Append-only for efficiency and scalability
     with open(file_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(example) + "\n")
@@ -531,16 +546,20 @@ def check_corrections_job(limit: int = 200):
                 if correction_candidate:
                     logger.info(f"Detected external correction for {gid}: {current_local} -> {correction_candidate}")
 
-                    # Update DB
-                    database.update_log_correction(gid, correction_candidate)
-
-                    # Add to training data
+                    # Write training data FIRST, then update DB.
+                    # If training data write fails, the DB won't be updated.
                     add_to_training_data(log, correction_candidate)
+                    database.update_log_correction(gid, correction_candidate)
 
                     # Cleanup old label if needed
                     if cleanup_needed:
                         logger.info(f"Removing old label {current_local} from {gid}")
                         client.remove_label(gid, current_local)
+
+                    # Mark as verified in IMAP (permanent marker)
+                    if not is_verified:
+                        logger.info(f"Adding {config.VERIFICATION_LABEL} to {gid}")
+                        client.apply_label(gid, config.VERIFICATION_LABEL)
 
                     processed = True
                     updates_count += 1
@@ -552,15 +571,11 @@ def check_corrections_job(limit: int = 200):
                     # If we didn't just add it via correction, add to training data now
                     # (Prevent duplicates if correction_candidate == verified_candidate)
                     if not correction_candidate:
-                        # Update DB just in case (e.g. if it was predicted but not corrected column)
-                        database.update_log_correction(gid, verified_candidate)
+                        # Write training data FIRST, then update DB.
                         add_to_training_data(log, verified_candidate)
+                        database.update_log_correction(gid, verified_candidate)
                         processed = True
                         updates_count += 1
-
-                    # Remove the VERIFIED label
-                    logger.info(f"Removing verification label {config.VERIFICATION_LABEL} from {gid}")
-                    client.remove_label(gid, config.VERIFICATION_LABEL)
 
                 # Mark recheck done (clears ambiguous if any)
                 database.update_recheck_status(gid, ambiguous_labels=None)
@@ -573,6 +588,235 @@ def check_corrections_job(limit: int = 200):
         if client:
             client.disconnect()
         job_lock.release()
+
+def force_check_corrections_job():
+    """
+    Force re-check ALL emails for label corrections, bypassing the gliding
+    scale schedule. Also imports any labeled emails from IMAP that are
+    missing from the local database (e.g. after a DB reset).
+
+    WARNING: This is an expensive operation. It should ONLY be used when you
+    have manually re-labelled emails in Gmail and want to pick up those
+    corrections immediately to update training data. Do NOT call this as part
+    of regular scheduled operation — use check_corrections_job instead.
+    """
+    BATCH_SIZE = 200
+
+    if not job_lock.acquire(blocking=False):
+        logger.warning("Job already running. Skipping force_check_corrections_job.")
+        return
+
+    client = None
+    try:
+        logger.info("Starting force_check_corrections_job (bypassing schedule)...")
+
+        client = imap_client.GmailClient()
+        known_categories_list = classify.get_available_categories()
+        known_categories = set(known_categories_list)
+
+        # ---------------------------------------------------------------
+        # Phase 0: Import labeled emails from IMAP that are missing in DB
+        # ---------------------------------------------------------------
+        logger.info("Phase 0: Scanning IMAP for labeled emails missing from DB...")
+        labeled_emails = client.scan_labeled_emails(known_categories_list)
+        import_count = 0
+
+        for gid, (labels, msg) in labeled_emails.items():
+            # Check if this email already exists in the DB
+            existing = database.get_log_by_id(gid)
+            if existing:
+                continue
+
+            # Find the trained label on this email
+            trained_labels = [lbl for lbl in labels if lbl in known_categories and lbl != config.VERIFICATION_LABEL]
+            if len(trained_labels) != 1:
+                # Ambiguous or no trained label — skip import
+                if trained_labels:
+                    logger.info(f"Skipping import of {gid}: ambiguous labels {trained_labels}")
+                continue
+
+            label = trained_labels[0]
+
+            try:
+                info = classify.extract_email_info(msg)
+
+                # Extract date
+                date_str = msg.get("Date")
+                email_timestamp = None
+                if date_str:
+                    try:
+                        from email.utils import parsedate_to_datetime
+                        email_timestamp = parsedate_to_datetime(date_str)
+                    except Exception:
+                        logger.warning(f"Could not parse date for imported email {gid}: {date_str}")
+
+                database.add_log(
+                    id=gid,
+                    sender=info["sender"],
+                    recipient=info["to"],
+                    subject=info["subject"],
+                    predicted_category=label,
+                    confidence_score=0.0,  # Imported, not predicted
+                    timestamp=email_timestamp,
+                    body=info["body"],
+                    cc=info["cc"],
+                    mass_mail=info["mass_mail"],
+                    attachment_types=info["attachment_types"]
+                )
+                import_count += 1
+                logger.info(f"Imported email {gid} with label {label}")
+            except Exception as e:
+                logger.error(f"Error importing email {gid}: {e}")
+
+        logger.info(f"Phase 0 complete. Imported {import_count} emails from IMAP.")
+
+        # ---------------------------------------------------------------
+        # Phase 1: Check corrections on all DB entries
+        # ---------------------------------------------------------------
+        all_candidates = database.get_all_logs_for_recheck()
+        if not all_candidates:
+            logger.info("No candidates for forced re-check.")
+            return
+
+        total = len(all_candidates)
+        total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+        logger.info(f"Phase 1: Force-checking {total} emails in {total_batches} batches of {BATCH_SIZE}...")
+
+        updates_count = 0
+        ambiguous_count = 0
+
+        for batch_num in range(total_batches):
+            batch_start = batch_num * BATCH_SIZE
+            batch = all_candidates[batch_start:batch_start + BATCH_SIZE]
+            logger.info(f"Processing batch {batch_num + 1}/{total_batches} ({len(batch)} emails)...")
+
+            batch_ids = [c['id'] for c in batch]
+            current_labels_map = client.get_labels_for_emails(batch_ids)
+
+            for log in batch:
+                gid = log['id']
+                if gid not in current_labels_map:
+                    database.update_recheck_status(gid, log.get('ambiguous_labels'))
+                    continue
+
+                found_labels = current_labels_map[gid]
+
+                trained_found = [lbl for lbl in found_labels if lbl in known_categories and lbl != config.VERIFICATION_LABEL]
+
+                is_verified = config.VERIFICATION_LABEL in found_labels
+
+                current_local = log['corrected_category'] or log['predicted_category']
+
+                is_ambiguous = False
+                correction_candidate = None
+                cleanup_needed = False
+                verified_candidate = None
+
+                if len(trained_found) == 0:
+                    pass
+                elif len(trained_found) == 1:
+                    candidate = trained_found[0]
+                    if is_verified:
+                        verified_candidate = candidate
+                        if candidate != current_local:
+                            correction_candidate = candidate
+                    else:
+                        if candidate != current_local:
+                            correction_candidate = candidate
+                else:
+                    if is_verified:
+                        if current_local in trained_found:
+                            others = [l for l in trained_found if l != current_local]
+                            if len(others) == 1:
+                                correction_candidate = others[0]
+                                verified_candidate = others[0]
+                                cleanup_needed = True
+                            else:
+                                is_ambiguous = True
+                        else:
+                            is_ambiguous = True
+                    else:
+                        if current_local in trained_found:
+                            others = [l for l in trained_found if l != current_local]
+                            if len(others) == 1:
+                                correction_candidate = others[0]
+                                cleanup_needed = True
+                            else:
+                                is_ambiguous = True
+                        else:
+                            is_ambiguous = True
+
+                # Execute Actions
+                if is_ambiguous:
+                    logger.info(f"Ambiguous labels for {gid}: {trained_found}")
+                    database.update_recheck_status(gid, ambiguous_labels=trained_found)
+                    ambiguous_count += 1
+                else:
+                    if correction_candidate:
+                        logger.info(f"Detected external correction for {gid}: {current_local} -> {correction_candidate}")
+                        # Write training data FIRST, then update DB.
+                        add_to_training_data(log, correction_candidate)
+                        database.update_log_correction(gid, correction_candidate)
+                        if cleanup_needed:
+                            logger.info(f"Removing old label {current_local} from {gid}")
+                            client.remove_label(gid, current_local)
+                        # Mark as verified in IMAP (permanent marker)
+                        if not is_verified:
+                            logger.info(f"Adding {config.VERIFICATION_LABEL} to {gid}")
+                            client.apply_label(gid, config.VERIFICATION_LABEL)
+                        updates_count += 1
+
+                    if verified_candidate:
+                        logger.info(f"Verified correctness for {gid}: {verified_candidate}")
+                        if not correction_candidate:
+                            # Write training data FIRST, then update DB.
+                            add_to_training_data(log, verified_candidate)
+                            database.update_log_correction(gid, verified_candidate)
+                            updates_count += 1
+
+                    database.update_recheck_status(gid, ambiguous_labels=None)
+
+            logger.info(f"Batch {batch_num + 1}/{total_batches} done. Running totals — Updates: {updates_count}, Ambiguous: {ambiguous_count}")
+
+        logger.info(f"Force re-check finished. Total updates: {updates_count}, Total ambiguous: {ambiguous_count}")
+
+    except Exception as e:
+        logger.error(f"Error in force_check_corrections_job: {e}")
+    finally:
+        if client:
+            client.disconnect()
+        job_lock.release()
+
+def backfill_training_data_job():
+    """
+    Rebuild training data files from all corrected entries in the database.
+    Use this to recover training data if the training data directory was
+    accidentally emptied or lost.
+
+    Note: This appends to existing .jsonl files, so duplicates may be created
+    if some entries already exist. The training pipeline should handle dedup.
+    """
+    logger.info("Starting backfill_training_data_job...")
+
+    corrected_logs = database.get_all_corrected_logs()
+    if not corrected_logs:
+        logger.info("No corrected logs found in database. Nothing to backfill.")
+        return
+
+    logger.info(f"Backfilling training data from {len(corrected_logs)} corrected entries...")
+
+    success_count = 0
+    error_count = 0
+
+    for log in corrected_logs:
+        try:
+            add_to_training_data(log, log['corrected_category'])
+            success_count += 1
+        except Exception as e:
+            logger.error(f"Error backfilling training data for {log['id']}: {e}")
+            error_count += 1
+
+    logger.info(f"Backfill finished. Success: {success_count}, Errors: {error_count}")
 
 
 # Models
@@ -717,11 +961,23 @@ def correct_label(log_id: str, req: CorrectionRequest):
     if not log_entry:
         raise HTTPException(status_code=404, detail="Log entry not found")
 
-    # Update database
+    # Write training data FIRST, then update DB.
+    # If training data write fails, the DB won't be updated.
+    add_to_training_data(log_entry, req.corrected_category)
     database.update_log_correction(log_id, req.corrected_category)
 
-    # Add to training data
-    add_to_training_data(log_entry, req.corrected_category)
+    # Apply VERIFIED label in IMAP as permanent marker
+    try:
+        client = imap_client.GmailClient()
+        client.apply_label(log_id, req.corrected_category)
+        # Remove old label if different
+        old_label = log_entry.get('corrected_category') or log_entry.get('predicted_category')
+        if old_label and old_label != req.corrected_category:
+            client.remove_label(log_id, old_label)
+        client.apply_label(log_id, config.VERIFICATION_LABEL)
+        client.disconnect()
+    except Exception as e:
+        logger.error(f"Failed to update IMAP labels for {log_id}: {e}")
 
     return {"status": "success", "message": f"Label corrected to {req.corrected_category} and added to training data."}
 
@@ -755,6 +1011,30 @@ def trigger_check_corrections(background_tasks: BackgroundTasks):
     # Run in background to avoid timeout
     background_tasks.add_task(check_corrections_job)
     return {"status": "accepted", "message": "Check corrections started in background."}
+
+# WARNING: This endpoint is expensive and should ONLY be used when you have
+# manually re-labelled emails in Gmail and need to pick up those corrections
+# immediately (e.g. to update training data before a model retrain).
+# Do NOT use this for regular periodic checks — use /check-corrections instead.
+@app.post("/force-check-corrections", dependencies=[Depends(get_api_key)])
+def trigger_force_check_corrections(background_tasks: BackgroundTasks):
+    """
+    Force re-check ALL emails for label corrections, bypassing the gliding
+    scale schedule. Use this after manually re-labelling emails in Gmail to
+    update training data.
+    """
+    background_tasks.add_task(force_check_corrections_job)
+    return {"status": "accepted", "message": "Force check corrections started in background."}
+
+@app.post("/backfill-training-data", dependencies=[Depends(get_api_key)])
+def trigger_backfill_training_data(background_tasks: BackgroundTasks):
+    """
+    Rebuild training data files from all corrected entries in the database.
+    Use this to recover training data if the training data directory was
+    accidentally emptied or lost.
+    """
+    background_tasks.add_task(backfill_training_data_job)
+    return {"status": "accepted", "message": "Backfill training data started in background."}
 
 @app.post("/admin/trigger-update", dependencies=[Depends(get_api_key)])
 def trigger_update(background_tasks: BackgroundTasks):

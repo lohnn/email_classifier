@@ -63,7 +63,7 @@ class ApiClient {
   // /check-corrections
   Future<void> checkCorrections() async {
     await _dio.post(
-      '/check-corrections',
+      '/force-check-corrections',
       options: Options(headers: {'X-API-Key': _apiKey}),
     );
   }

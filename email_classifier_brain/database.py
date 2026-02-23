@@ -297,6 +297,35 @@ def get_candidate_logs_for_recheck(limit: int = 200) -> List[Dict[str, Any]]:
 
     return [dict(row) for row in rows]
 
+def get_all_logs_for_recheck(limit: int = 0) -> List[Dict[str, Any]]:
+    """
+    Get ALL logs for a forced re-check, ignoring the gliding scale schedule.
+    Ordered by newest first.
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    query = 'SELECT * FROM logs ORDER BY timestamp DESC'
+    params = ()
+
+    if limit > 0:
+        query += ' LIMIT ?'
+        params = (limit,)
+
+    c.execute(query, params)
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_all_corrected_logs() -> List[Dict[str, Any]]:
+    """Get all logs that have a corrected_category set."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM logs WHERE corrected_category IS NOT NULL ORDER BY timestamp DESC")
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
 def update_recheck_status(log_id: str, ambiguous_labels: Optional[List[str]] = None) -> None:
     """
     Update the last_recheck timestamp and ambiguous_labels for a log.

@@ -136,15 +136,66 @@ if [ -f "$UPDATE_MARKER" ]; then
 fi
 
 # Normal startup
-# Restore storage from Google Drive if local storage is empty
-if [ -z "$(ls -A \"$STORAGE_DIR\" 2>/dev/null)" ]; then
-    echo "Local storage is empty. Restoring from Google Drive..."
-    $RCLONE_CMD copy "$GDRIVE_REMOTE:$GDRIVE_STORAGE_PATH/" "$STORAGE_DIR/" --progress || echo "Warning: Storage restore failed. A new database will be created if one does not exist."
+# Ensure storage directory exists
+mkdir -p "$STORAGE_DIR"
+
+DB_FILE="${STORAGE_DIR}/email_history.db"
+
+# Check if DB has actual data (not just empty schema)
+DB_ROW_COUNT=0
+if [ -f "$DB_FILE" ]; then
+    DB_ROW_COUNT=$($PYTHON_CMD -c "
+import sqlite3, sys
+try:
+    conn = sqlite3.connect(sys.argv[1])
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM logs')
+    print(c.fetchone()[0])
+    conn.close()
+except:
+    print(0)
+" "$DB_FILE" 2>/dev/null || echo 0)
 fi
 
-echo "Backing up storage to Google Drive..."
-# We use copy to avoid deleting files on remote if they are missing locally (safety first)
-$RCLONE_CMD copy "$STORAGE_DIR/" "$GDRIVE_REMOTE:$GDRIVE_STORAGE_PATH/" --progress || echo "Warning: Storage backup failed"
+# Restore from Google Drive if DB is missing or empty
+JUST_RESTORED=false
+if [ "$DB_ROW_COUNT" -eq 0 ]; then
+    echo "Local DB is empty or missing (${DB_ROW_COUNT} rows). Restoring from Google Drive..."
+    $RCLONE_CMD copy "$GDRIVE_REMOTE:$GDRIVE_STORAGE_PATH/" "$STORAGE_DIR/" --progress
+    if [ $? -eq 0 ]; then
+        echo "Storage restored from Google Drive."
+        JUST_RESTORED=true
+    else
+        echo "Warning: Storage restore failed. A new database will be created if one does not exist."
+    fi
+fi
+
+# Only back up if we have actual data and didn't just restore
+if [ "$JUST_RESTORED" = false ]; then
+    # Re-check row count (in case restore happened above)
+    if [ -f "$DB_FILE" ]; then
+        DB_ROW_COUNT=$($PYTHON_CMD -c "
+import sqlite3, sys
+try:
+    conn = sqlite3.connect(sys.argv[1])
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM logs')
+    print(c.fetchone()[0])
+    conn.close()
+except:
+    print(0)
+" "$DB_FILE" 2>/dev/null || echo 0)
+    fi
+
+    if [ "$DB_ROW_COUNT" -gt 0 ]; then
+        echo "Backing up storage to Google Drive (${DB_ROW_COUNT} rows)..."
+        $RCLONE_CMD copy "$STORAGE_DIR/" "$GDRIVE_REMOTE:$GDRIVE_STORAGE_PATH/" --progress || echo "Warning: Storage backup failed"
+    else
+        echo "Warning: Local DB has no data (${DB_ROW_COUNT} rows). Skipping backup to avoid overwriting remote."
+    fi
+else
+    echo "Skipping backup (just restored from remote)."
+fi
 
 echo "Starting email classifier service..."
 exec $UVICORN_CMD main:app --host 0.0.0.0 --port 8000 "$@"

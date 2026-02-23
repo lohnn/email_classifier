@@ -356,3 +356,84 @@ class GmailClient:
                 print(f"Error fetching labels batch: {e}")
 
         return results
+
+    def scan_labeled_emails(self, known_labels: List[str]) -> Dict[str, Tuple[List[str], Message]]:
+        """
+        Scan INBOX for all emails that have at least one of the known_labels.
+        Returns {gmail_id: (labels_list, email_message_object)}.
+
+        This is used to discover emails that have labels applied in Gmail
+        but are missing from the local database (e.g. after a DB reset).
+        """
+        self.connect()
+        results: Dict[str, Tuple[List[str], Message]] = {}
+
+        all_uids = set()
+
+        # Search for each known label
+        for label in known_labels:
+            try:
+                # X-GM-LABELS requires the label to be quoted
+                criteria = f'X-GM-LABELS "{label}"'
+                typ, data = self.connection.uid('SEARCH', None, criteria)
+                if typ == 'OK' and data[0]:
+                    found_uids = data[0].split()
+                    all_uids.update(found_uids)
+            except Exception as e:
+                logger.warning(f"Error searching for label '{label}': {e}")
+
+        if not all_uids:
+            return results
+
+        logger.info(f"Found {len(all_uids)} unique emails with known labels in IMAP.")
+
+        # Batch fetch: get BODY, X-GM-MSGID, and X-GM-LABELS for all found UIDs
+        uids_list = list(all_uids)
+        BATCH_SIZE = 50
+
+        for i in range(0, len(uids_list), BATCH_SIZE):
+            batch_uids = uids_list[i:i + BATCH_SIZE]
+            uid_str = b','.join(batch_uids)
+
+            try:
+                typ, data = self.connection.uid(
+                    'FETCH', uid_str, '(BODY.PEEK[] X-GM-MSGID X-GM-LABELS)'
+                )
+                if typ != 'OK':
+                    continue
+
+                for response_part in data:
+                    if not isinstance(response_part, tuple):
+                        continue
+
+                    metadata = response_part[0].decode('utf-8', errors='ignore')
+
+                    # Extract X-GM-MSGID
+                    msgid_match = X_GM_MSGID_PATTERN.search(metadata)
+                    if not msgid_match:
+                        continue
+                    gid = msgid_match.group(1)
+
+                    # Extract labels
+                    labels = []
+                    match = X_GM_LABELS_PATTERN.search(metadata)
+                    if match:
+                        labels_str = match.group(1)
+                        for m in LABEL_TOKEN_PATTERN.finditer(labels_str):
+                            if m.group(1):
+                                labels.append(
+                                    m.group(1).replace('\\"', '"').replace('\\\\', '\\')
+                                )
+                            else:
+                                labels.append(m.group(2))
+
+                    # Parse email body
+                    raw_email = response_part[1]
+                    msg = email.message_from_bytes(raw_email)
+
+                    results[gid] = (labels, msg)
+
+            except Exception as e:
+                logger.warning(f"Error fetching labeled emails batch: {e}")
+
+        return results
