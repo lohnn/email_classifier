@@ -85,8 +85,8 @@ if [ -f "$UPDATE_MARKER" ]; then
             echo "Verifying new version..."
             # Start in background, capturing output
             # We use a different port for verification if needed?
-            # But the main service is down (we are in the wrapper), so 8000 is free.
-            $UVICORN_CMD main:app --host 0.0.0.0 --port 8000 > startup.log 2>&1 &
+            # But the main service is down (we are in the wrapper), so 8008 is free.
+            $UVICORN_CMD main:app --host 0.0.0.0 --port 8008 > startup.log 2>&1 &
             PID=$!
 
             # Wait up to 30 seconds for the health check to pass
@@ -101,7 +101,7 @@ if [ -f "$UPDATE_MARKER" ]; then
 
                 # Check health endpoint
                 # We use curl to check if the status is 200
-                if curl -s -f http://localhost:8000/health >/dev/null; then
+                if curl -s -f http://localhost:8008/health >/dev/null; then
                     HEALTH_CHECK_PASSED=true
                     break
                 fi
