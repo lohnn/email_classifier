@@ -67,6 +67,20 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Re-check job disabled.")
 
+    # Run reclassify job
+    if config.ENABLE_RECLASSIFY_JOB:
+        # Offset by half the interval to avoid overlapping with check_corrections_job
+        reclassify_offset = datetime.timedelta(hours=config.RECLASSIFY_INTERVAL_HOURS / 2)
+        scheduler.add_job(
+            reclassify_job,
+            trigger=IntervalTrigger(hours=config.RECLASSIFY_INTERVAL_HOURS),
+            id="reclassify_job",
+            replace_existing=True,
+            next_run_time=datetime.datetime.now() + reclassify_offset,
+        )
+    else:
+        logger.info("Reclassify job disabled.")
+
     # Run auto-update every day
     scheduler.add_job(
         scheduled_update_job,

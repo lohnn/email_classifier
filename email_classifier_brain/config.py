@@ -37,6 +37,15 @@ try:
 except ValueError:
     RECHECK_INTERVAL_HOURS = 12
 
+# Enable the background job that periodically re-classifies existing emails
+ENABLE_RECLASSIFY_JOB = (os.getenv("ENABLE_RECLASSIFY_JOB") or "true").lower() == "true"
+
+# Interval in hours for the reclassify job (default: same as RECHECK_INTERVAL_HOURS)
+try:
+    RECLASSIFY_INTERVAL_HOURS = int(os.getenv("RECLASSIFY_INTERVAL_HOURS") or str(RECHECK_INTERVAL_HOURS))
+except ValueError:
+    RECLASSIFY_INTERVAL_HOURS = RECHECK_INTERVAL_HOURS
+
 # Label used to explicitly verify a classification
 VERIFICATION_LABEL = os.getenv("VERIFICATION_LABEL") or "VERIFIED"
 
