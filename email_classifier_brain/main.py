@@ -1060,4 +1060,4 @@ def get_update_errors():
 if __name__ == "__main__":
     import uvicorn
     # Use 0.0.0.0 for external access if needed
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8008)
