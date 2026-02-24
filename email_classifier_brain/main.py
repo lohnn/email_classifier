@@ -263,7 +263,7 @@ def add_to_training_data(log_entry: dict, corrected_category: str):
                     existing = json.loads(line)
                     existing_keys.add((existing.get("subject"), existing.get("body")))
             if (example["subject"], example["body"]) in existing_keys:
-                logger.info(f"Skipping duplicate in {corrected_category}.jsonl (subject: {example['subject'][:50]}...)")
+                logger.info(f"Skipping duplicate in {corrected_category}.jsonl")
                 return
         except Exception as e:
             logger.warning(f"Error reading {file_path} for dedup check: {e}")
