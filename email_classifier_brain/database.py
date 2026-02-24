@@ -51,7 +51,8 @@ def init_db() -> None:
             corrected_category TEXT,
             is_read BOOLEAN DEFAULT 0,
             last_recheck TEXT,
-            ambiguous_labels TEXT
+            ambiguous_labels TEXT,
+            last_reclassified_at TEXT
         )
     ''')
 
@@ -67,6 +68,10 @@ def init_db() -> None:
         if 'ambiguous_labels' not in existing_cols:
             print("Migrating DB: Adding ambiguous_labels column")
             c.execute("ALTER TABLE logs ADD COLUMN ambiguous_labels TEXT")
+
+        if 'last_reclassified_at' not in existing_cols:
+            print("Migrating DB: Adding last_reclassified_at column")
+            c.execute("ALTER TABLE logs ADD COLUMN last_reclassified_at TEXT")
 
     except Exception as e:
         print(f"Error migrating schema: {e}")
@@ -229,14 +234,34 @@ def get_read_notifications(start_time: datetime.datetime, end_time: datetime.dat
     conn.close()
     return [dict(row) for row in rows]
 
-def get_logs_for_reclassification() -> List[Dict[str, Any]]:
-    """Get all logs that haven't been manually corrected, for re-evaluation."""
+def get_logs_for_reclassification(limit: int = 100) -> List[Dict[str, Any]]:
+    """Get uncorrected logs for re-evaluation, oldest-reclassified first.
+
+    Rotates through all uncorrected emails by prioritising those that have
+    never been reclassified (NULL) or were reclassified longest ago.
+    """
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM logs WHERE corrected_category IS NULL")
+    c.execute(
+        "SELECT * FROM logs WHERE corrected_category IS NULL "
+        "ORDER BY last_reclassified_at ASC NULLS FIRST LIMIT ?",
+        (limit,)
+    )
     rows = c.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def update_reclassified_at(log_id: str) -> None:
+    """Stamp a log entry with the current time after reclassification."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE logs SET last_reclassified_at = ? WHERE id = ?",
+        (datetime.datetime.now().isoformat(), log_id)
+    )
+    conn.commit()
+    conn.close()
 
 def get_candidate_logs_for_recheck(limit: int = 200) -> List[Dict[str, Any]]:
     """

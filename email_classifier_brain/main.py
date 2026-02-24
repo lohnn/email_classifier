@@ -67,6 +67,20 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Re-check job disabled.")
 
+    # Run reclassify job
+    if config.ENABLE_RECLASSIFY_JOB:
+        # Offset by half the interval to avoid overlapping with check_corrections_job
+        reclassify_offset = datetime.timedelta(hours=config.RECLASSIFY_INTERVAL_HOURS / 2)
+        scheduler.add_job(
+            reclassify_job,
+            trigger=IntervalTrigger(hours=config.RECLASSIFY_INTERVAL_HOURS),
+            id="reclassify_job",
+            replace_existing=True,
+            next_run_time=datetime.datetime.now() + reclassify_offset,
+        )
+    else:
+        logger.info("Reclassify job disabled.")
+
     # Run auto-update every day
     scheduler.add_job(
         scheduled_update_job,
@@ -324,15 +338,10 @@ def reclassify_job(limit: int = 100):
     
     try:
         logger.info("Starting re-classification job...")
-        logs = database.get_logs_for_reclassification()
+        logs = database.get_logs_for_reclassification(limit=limit)
         
         # Connect to IMAP
         client = imap_client.GmailClient()
-        
-        # Limit processing
-        if len(logs) > limit:
-            logger.info(f"Limiting re-classification to {limit} emails (out of {len(logs)}).")
-            logs = logs[:limit]
 
         for log in logs:
             gmail_id = log['id']
@@ -409,6 +418,9 @@ def reclassify_job(limit: int = 100):
                     # Update score/metadata even if label same? 
                     # Maybe useful if model confidence changed.
                     pass
+
+                # Stamp as reclassified so rotation moves to next batch
+                database.update_reclassified_at(gmail_id)
 
             except Exception as e:
                 logger.error(f"Error re-classifying {gmail_id}: {e}")
