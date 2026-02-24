@@ -96,6 +96,11 @@ class GmailClient:
         # ------------------------------------------------------------------
         # Phase 1: metadata-only scan (no body download) newest-first.
         # Collects qualifying sequence IDs and their gmail IDs up to limit.
+        #
+        # NOTE: IMAP FETCH returns results in ascending sequence-number order
+        # regardless of the order requested.  To honour newest-first we build
+        # a lookup dict from each batch response, then walk `batch_ids` (which
+        # *are* in newest-first order) to decide qualification order.
         # ------------------------------------------------------------------
         qualifying_seq_ids: List[bytes] = []
         known_labels_set = set(known_labels)
@@ -108,25 +113,31 @@ class GmailClient:
             if typ != 'OK':
                 continue
 
+            # Build a lookup: seq_id (str) -> labels_str
+            metadata_by_seq: Dict[str, str] = {}
             for response_part in msg_data:
-                # Metadata-only fetch returns plain bytes or a 1-tuple
                 raw_line = response_part[0] if isinstance(response_part, tuple) else response_part
                 metadata = raw_line.decode('utf-8', errors='ignore')
 
                 seq_match = SEQ_PATTERN.match(metadata)
                 if not seq_match:
                     continue
-                seq_id = seq_match.group(1).encode()
-
-                msgid_match = X_GM_MSGID_PATTERN.search(metadata)
-                if not msgid_match:
-                    continue
-                gmail_id = msgid_match.group(1)
+                seq_id_str = seq_match.group(1)
 
                 labels_str = ""
                 lbl_match = X_GM_LABELS_PATTERN.search(metadata)
                 if lbl_match:
                     labels_str = lbl_match.group(1)
+
+                metadata_by_seq[seq_id_str] = labels_str
+
+            # Walk batch_ids in newest-first order to preserve ordering
+            for bid in batch_ids:
+                bid_str = bid.decode('utf-8', errors='ignore')
+                if bid_str not in metadata_by_seq:
+                    continue
+
+                labels_str = metadata_by_seq[bid_str]
 
                 # Skip if any known label is already applied
                 skip = False
@@ -137,9 +148,9 @@ class GmailClient:
                         break
 
                 if not skip:
-                    qualifying_seq_ids.append(seq_id)
+                    qualifying_seq_ids.append(bid)
                     if limit is not None and len(qualifying_seq_ids) >= limit:
-                        break  # inner loop – got enough
+                        break  # got enough from this batch
 
             if limit is not None and len(qualifying_seq_ids) >= limit:
                 break  # outer loop – got enough
@@ -149,8 +160,11 @@ class GmailClient:
 
         # ------------------------------------------------------------------
         # Phase 2: fetch full bodies only for the qualifying emails.
+        #
+        # Again, IMAP returns results in ascending order, so we collect into
+        # a dict and then reassemble in qualifying_seq_ids order.
         # ------------------------------------------------------------------
-        results: List[Tuple[str, Message]] = []
+        body_by_seq: Dict[str, Tuple[str, Message]] = {}
 
         for i in range(0, len(qualifying_seq_ids), BATCH_SIZE):
             batch_seq = qualifying_seq_ids[i:i + BATCH_SIZE]
@@ -163,13 +177,22 @@ class GmailClient:
             for response_part in msg_data:
                 if isinstance(response_part, tuple):
                     metadata = response_part[0].decode('utf-8', errors='ignore')
+                    seq_match = SEQ_PATTERN.match(metadata)
                     msgid_match = X_GM_MSGID_PATTERN.search(metadata)
-                    if not msgid_match:
+                    if not seq_match or not msgid_match:
                         continue
+                    seq_id_str = seq_match.group(1)
                     gmail_id = msgid_match.group(1)
                     raw_email = response_part[1]
                     msg = email.message_from_bytes(raw_email)
-                    results.append((gmail_id, msg))
+                    body_by_seq[seq_id_str] = (gmail_id, msg)
+
+        # Reassemble in newest-first order (matching qualifying_seq_ids)
+        results: List[Tuple[str, Message]] = []
+        for seq_id in qualifying_seq_ids:
+            key = seq_id.decode('utf-8', errors='ignore')
+            if key in body_by_seq:
+                results.append(body_by_seq[key])
 
         return results
 

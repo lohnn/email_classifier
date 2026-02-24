@@ -1,6 +1,6 @@
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 import os
 import sys
 
@@ -9,11 +9,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import imap_client
 
+
 @pytest.fixture
 def mock_imap_conn():
     with patch('imaplib.IMAP4_SSL') as MockIMAP:
         mock_conn = MockIMAP.return_value
         yield mock_conn
+
 
 @pytest.fixture
 def client(mock_imap_conn):
@@ -24,108 +26,156 @@ def client(mock_imap_conn):
         client.connection = mock_imap_conn
         return client
 
+
+def _make_metadata_response(seq_id, gmail_id, labels_str="\\Inbox"):
+    """Helper to build a Phase 1 metadata response line."""
+    return f'{seq_id} (X-GM-LABELS ({labels_str}) X-GM-MSGID {gmail_id})'.encode()
+
+
+def _make_body_response(seq_id, gmail_id, subject="Test", body="Body"):
+    """Helper to build a Phase 2 body response tuple."""
+    header = f'{seq_id} (BODY[] {{100}} X-GM-MSGID {gmail_id})'.encode()
+    raw_email = f'Subject: {subject}\r\n\r\n{body}'.encode()
+    return (header, raw_email)
+
+
 def test_fetch_unprocessed_emails_multiple(client, mock_imap_conn):
-    # Setup search response: 3 emails
+    """Test that emails with known labels are filtered out."""
     mock_imap_conn.search.return_value = ('OK', [b'1 2 3'])
 
-    # Setup fetch response
-    # We need to simulate the structure returned by imaplib for 3 emails.
-    # It's a list of parts.
-    # Email 1
-    header1 = b'1 (X-GM-LABELS (\\Inbox) BODY.PEEK[] {10}'
-    body1 = b'Subject: One\r\n\r\nBody1'
-    # Email 2 (with skipped label - user label typically has no backslash)
-    header2 = b'2 (X-GM-LABELS (\\Inbox Skipped) BODY.PEEK[] {10}'
-    body2 = b'Subject: Two\r\n\r\nBody2'
-    # Email 3
-    header3 = b'3 (X-GM-LABELS (\\Inbox) BODY.PEEK[] {10}'
-    body3 = b'Subject: Three\r\n\r\nBody3'
-
-    # The list contains tuples for message parts and bytes for closing parens ')'
-    fetch_data = [
-        (header1, body1), b')',
-        (header2, body2), b')',
-        (header3, body3), b')'
+    # Phase 1: metadata fetch — IMAP returns in ascending order (1, 2, 3)
+    # even though we request reversed (3, 2, 1)
+    phase1_data = [
+        _make_metadata_response(1, '1001', '\\Inbox'),
+        _make_metadata_response(2, '1002', '\\Inbox Skipped'),
+        _make_metadata_response(3, '1003', '\\Inbox'),
     ]
-    mock_imap_conn.fetch.return_value = ('OK', fetch_data)
 
-    # Call the method
+    # Phase 2: body fetch for qualifying IDs (3, 1 — newest first)
+    phase2_data = [
+        _make_body_response(1, '1001', 'One', 'Body1'), b')',
+        _make_body_response(3, '1003', 'Three', 'Body3'), b')',
+    ]
+
+    mock_imap_conn.fetch.side_effect = [
+        ('OK', phase1_data),  # Phase 1
+        ('OK', phase2_data),  # Phase 2
+    ]
+
     results = client.fetch_unprocessed_emails(known_labels=["Skipped"])
 
-    # Verify fetch called with comma separated IDs
-    mock_imap_conn.fetch.assert_called_with(b'1,2,3', '(BODY.PEEK[] X-GM-LABELS)')
-
-    # Verify results
-    # Should have 2 emails (email 2 skipped)
     assert len(results) == 2
 
-    # Check first email
+    # Should be newest-first: 3 (Three), then 1 (One)
     eid1, msg1 = results[0]
-    assert eid1 == b'1'
-    assert msg1['Subject'] == 'One'
+    assert eid1 == '1003'
+    assert msg1['Subject'] == 'Three'
 
-    # Check second email (which was ID 3)
     eid2, msg2 = results[1]
-    assert eid2 == b'3'
-    assert msg2['Subject'] == 'Three'
+    assert eid2 == '1001'
+    assert msg2['Subject'] == 'One'
+
 
 def test_fetch_unprocessed_emails_parentheses(client, mock_imap_conn):
-    # Test for labels containing parentheses, which caused issues with simple regex
+    """Test labels containing parentheses are correctly matched."""
     mock_imap_conn.search.return_value = ('OK', [b'1'])
 
-    # Label "My (Label)" which broke the old regex
-    header = b'1 (X-GM-LABELS ("My (Label)") BODY.PEEK[] {10}'
-    body = b'Subject: Parens\r\n\r\nBody'
+    phase1_data = [
+        f'1 (X-GM-LABELS ("My (Label)") X-GM-MSGID 1001)'.encode(),
+    ]
 
-    mock_imap_conn.fetch.return_value = ('OK', [(header, body), b')'])
+    mock_imap_conn.fetch.side_effect = [('OK', phase1_data)]
 
-    # We want to skip emails with "My (Label)"
     results = client.fetch_unprocessed_emails(known_labels=["My (Label)"])
 
-    # Should be skipped
+    # Should be skipped — no Phase 2 call
     assert len(results) == 0
+    assert mock_imap_conn.fetch.call_count == 1  # only Phase 1
+
 
 def test_fetch_unprocessed_emails_empty(client, mock_imap_conn):
-    # Setup search response: empty
     mock_imap_conn.search.return_value = ('OK', [b''])
 
     results = client.fetch_unprocessed_emails(known_labels=[])
 
     assert len(results) == 0
-    # Fetch should not be called
     mock_imap_conn.fetch.assert_not_called()
+
 
 def test_fetch_unprocessed_emails_single(client, mock_imap_conn):
     mock_imap_conn.search.return_value = ('OK', [b'10'])
 
-    header = b'10 (X-GM-LABELS (\\Inbox) BODY.PEEK[] {10}'
-    body = b'Subject: Single\r\n\r\nBody'
-    mock_imap_conn.fetch.return_value = ('OK', [(header, body), b')'])
+    phase1_data = [_make_metadata_response(10, '2001', '\\Inbox')]
+    phase2_data = [_make_body_response(10, '2001', 'Single', 'Body'), b')']
+
+    mock_imap_conn.fetch.side_effect = [
+        ('OK', phase1_data),
+        ('OK', phase2_data),
+    ]
 
     results = client.fetch_unprocessed_emails(known_labels=[])
 
     assert len(results) == 1
-    assert results[0][0] == b'10'
-    mock_imap_conn.fetch.assert_called_with(b'10', '(BODY.PEEK[] X-GM-LABELS)')
+    assert results[0][0] == '2001'
+
+
+def test_fetch_unprocessed_emails_newest_first_with_limit(client, mock_imap_conn):
+    """Core regression test: with a limit, the NEWEST qualifying emails
+    must be returned, not the oldest."""
+    # 5 unseen emails
+    mock_imap_conn.search.return_value = ('OK', [b'1 2 3 4 5'])
+
+    # IMAP returns metadata in ascending order regardless of request
+    phase1_data = [
+        _make_metadata_response(1, '1001', '\\Inbox'),
+        _make_metadata_response(2, '1002', '\\Inbox'),
+        _make_metadata_response(3, '1003', '\\Inbox'),
+        _make_metadata_response(4, '1004', '\\Inbox'),
+        _make_metadata_response(5, '1005', '\\Inbox'),
+    ]
+
+    # Phase 2: only the 2 newest (5, 4)
+    phase2_data = [
+        _make_body_response(4, '1004', 'Four', 'Body4'), b')',
+        _make_body_response(5, '1005', 'Five', 'Body5'), b')',
+    ]
+
+    mock_imap_conn.fetch.side_effect = [
+        ('OK', phase1_data),
+        ('OK', phase2_data),
+    ]
+
+    results = client.fetch_unprocessed_emails(known_labels=[], limit=2)
+
+    assert len(results) == 2
+    # Newest first: 5 then 4
+    assert results[0][0] == '1005'
+    assert results[0][1]['Subject'] == 'Five'
+    assert results[1][0] == '1004'
+    assert results[1][1]['Subject'] == 'Four'
+
 
 def test_fetch_unprocessed_emails_batching(client, mock_imap_conn):
-    # Test batching behavior when more than 50 emails are present
+    """Test batching behavior when more than BATCH_SIZE emails are present."""
     # Create 60 IDs
     ids = [str(i).encode() for i in range(1, 61)]
     ids_str = b' '.join(ids)
     mock_imap_conn.search.return_value = ('OK', [ids_str])
 
-    # Mock fetch side effect to handle calls
-    # We expect 2 calls: one for 1-50, one for 51-60
-
     def fetch_side_effect(ids_bytes, query):
         requested = ids_bytes.split(b',')
         resp = []
-        for rid in requested:
-            header = f'{rid.decode()} (X-GM-LABELS (\\Inbox) BODY.PEEK[] {{10}}'.encode()
-            body = b'Subject: Batch\r\n\r\nBody'
-            resp.append((header, body))
-            resp.append(b')')
+        if 'X-GM-LABELS' in query:
+            # Phase 1: metadata
+            for rid in requested:
+                rid_int = int(rid)
+                resp.append(_make_metadata_response(rid_int, rid_int + 1000, '\\Inbox'))
+        else:
+            # Phase 2: bodies
+            for rid in requested:
+                rid_int = int(rid)
+                resp.append(_make_body_response(rid_int, rid_int + 1000, f'Subj{rid_int}', 'Body'))
+                resp.append(b')')
         return ('OK', resp)
 
     mock_imap_conn.fetch.side_effect = fetch_side_effect
@@ -133,13 +183,9 @@ def test_fetch_unprocessed_emails_batching(client, mock_imap_conn):
     results = client.fetch_unprocessed_emails(known_labels=[])
 
     assert len(results) == 60
-    assert mock_imap_conn.fetch.call_count == 2
+    # Phase 1: 2 batches (50 + 10), Phase 2: 2 batches (50 + 10)
+    assert mock_imap_conn.fetch.call_count == 4
 
-    # Verify the arguments of the calls
-    call1_args = mock_imap_conn.fetch.call_args_list[0][0][0]
-    call2_args = mock_imap_conn.fetch.call_args_list[1][0][0]
-
-    # First batch should have 50 items
-    assert len(call1_args.split(b',')) == 50
-    # Second batch should have 10 items
-    assert len(call2_args.split(b',')) == 10
+    # First result should be the highest ID (newest first)
+    assert results[0][0] == '1060'
+    assert results[-1][0] == '1001'

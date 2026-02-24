@@ -193,4 +193,4 @@ else
 fi
 
 echo "Starting email classifier service..."
-exec $UVICORN_CMD main:app --host 0.0.0.0 --port 8000 "$@"
+exec $UVICORN_CMD main:app --host 0.0.0.0 --port 8008 "$@"
