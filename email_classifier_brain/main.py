@@ -254,15 +254,17 @@ def add_to_training_data(log_entry: dict, corrected_category: str):
     # Dedup check: skip if an entry with the same subject+body already exists
     if os.path.exists(file_path):
         try:
+            existing_keys = set()
             with open(file_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
                     existing = json.loads(line)
-                    if existing.get("subject") == example["subject"] and existing.get("body") == example["body"]:
-                        logger.info(f"Skipping duplicate in {corrected_category}.jsonl (subject: {example['subject'][:50]}...)")
-                        return
+                    existing_keys.add((existing.get("subject"), existing.get("body")))
+            if (example["subject"], example["body"]) in existing_keys:
+                logger.info(f"Skipping duplicate in {corrected_category}.jsonl (subject: {example['subject'][:50]}...)")
+                return
         except Exception as e:
             logger.warning(f"Error reading {file_path} for dedup check: {e}")
 
@@ -428,6 +430,63 @@ def reclassify_job(limit: int = 100):
             client.disconnect()
         job_lock.release()
 
+def _resolve_correction(trained_found, is_verified, current_local):
+    """
+    Determine correction action based on found IMAP labels vs local state.
+
+    Returns a dict with keys:
+      - is_ambiguous: bool
+      - correction_candidate: str or None
+      - cleanup_needed: bool
+      - verified_candidate: str or None
+    """
+    is_ambiguous = False
+    correction_candidate = None
+    cleanup_needed = False
+    verified_candidate = None
+
+    if len(trained_found) == 0:
+        pass
+    elif len(trained_found) == 1:
+        candidate = trained_found[0]
+        if is_verified:
+            verified_candidate = candidate
+            if candidate != current_local:
+                correction_candidate = candidate
+        else:
+            if candidate != current_local:
+                correction_candidate = candidate
+    else:
+        # Multiple trained labels
+        if is_verified:
+            if current_local in trained_found:
+                others = [l for l in trained_found if l != current_local]
+                if len(others) == 1:
+                    correction_candidate = others[0]
+                    verified_candidate = others[0]
+                    cleanup_needed = True
+                else:
+                    is_ambiguous = True
+            else:
+                is_ambiguous = True
+        else:
+            if current_local in trained_found:
+                others = [l for l in trained_found if l != current_local]
+                if len(others) == 1:
+                    correction_candidate = others[0]
+                    cleanup_needed = True
+                else:
+                    is_ambiguous = True
+            else:
+                is_ambiguous = True
+
+    return {
+        "is_ambiguous": is_ambiguous,
+        "correction_candidate": correction_candidate,
+        "cleanup_needed": cleanup_needed,
+        "verified_candidate": verified_candidate,
+    }
+
 def check_corrections_job(limit: int = 200):
     """
     Background job to check for label corrections from the server (IMAP).
@@ -478,61 +537,11 @@ def check_corrections_job(limit: int = 200):
 
             current_local = log['corrected_category'] or log['predicted_category']
 
-            is_ambiguous = False
-            correction_candidate = None
-            cleanup_needed = False
-            verified_candidate = None
-
-            if len(trained_found) == 0:
-                # No trained label found.
-                pass
-            elif len(trained_found) == 1:
-                candidate = trained_found[0]
-
-                if is_verified:
-                    # Verified scenario: 1 trained label + VERIFIED
-                    verified_candidate = candidate
-                    if candidate != current_local:
-                        # Correction + Verification
-                        correction_candidate = candidate
-                    else:
-                        # Just verification of current label
-                        pass
-                else:
-                    # Standard scenario: 1 trained label
-                    if candidate != current_local:
-                        correction_candidate = candidate
-                        # Old label is not on server (since only 1 found), so no cleanup needed.
-            else:
-                # Multiple trained labels
-                if is_verified:
-                    # If verified but multiple labels, we try to resolve
-                    if current_local in trained_found:
-                        others = [l for l in trained_found if l != current_local]
-                        if len(others) == 1:
-                            # Case: {Old, New, VERIFIED} -> Treat New as correct, verified
-                            correction_candidate = others[0]
-                            verified_candidate = others[0]
-                            cleanup_needed = True
-                        else:
-                            # Ambiguous despite verification
-                            is_ambiguous = True
-                    else:
-                        is_ambiguous = True
-                else:
-                    # Standard multiple label conflict
-                    if current_local in trained_found:
-                        others = [l for l in trained_found if l != current_local]
-                        if len(others) == 1:
-                            # Case: {Old, New} -> New is correction, Old needs cleanup
-                            correction_candidate = others[0]
-                            cleanup_needed = True
-                        else:
-                            # Case: {Old, New1, New2} -> Ambiguous
-                            is_ambiguous = True
-                    else:
-                        # Case: {New1, New2} (Old missing) -> Ambiguous
-                        is_ambiguous = True
+            result = _resolve_correction(trained_found, is_verified, current_local)
+            is_ambiguous = result["is_ambiguous"]
+            correction_candidate = result["correction_candidate"]
+            cleanup_needed = result["cleanup_needed"]
+            verified_candidate = result["verified_candidate"]
 
             # Execute Actions
             if is_ambiguous:
@@ -707,44 +716,11 @@ def force_check_corrections_job():
 
                 current_local = log['corrected_category'] or log['predicted_category']
 
-                is_ambiguous = False
-                correction_candidate = None
-                cleanup_needed = False
-                verified_candidate = None
-
-                if len(trained_found) == 0:
-                    pass
-                elif len(trained_found) == 1:
-                    candidate = trained_found[0]
-                    if is_verified:
-                        verified_candidate = candidate
-                        if candidate != current_local:
-                            correction_candidate = candidate
-                    else:
-                        if candidate != current_local:
-                            correction_candidate = candidate
-                else:
-                    if is_verified:
-                        if current_local in trained_found:
-                            others = [l for l in trained_found if l != current_local]
-                            if len(others) == 1:
-                                correction_candidate = others[0]
-                                verified_candidate = others[0]
-                                cleanup_needed = True
-                            else:
-                                is_ambiguous = True
-                        else:
-                            is_ambiguous = True
-                    else:
-                        if current_local in trained_found:
-                            others = [l for l in trained_found if l != current_local]
-                            if len(others) == 1:
-                                correction_candidate = others[0]
-                                cleanup_needed = True
-                            else:
-                                is_ambiguous = True
-                        else:
-                            is_ambiguous = True
+                result = _resolve_correction(trained_found, is_verified, current_local)
+                is_ambiguous = result["is_ambiguous"]
+                correction_candidate = result["correction_candidate"]
+                cleanup_needed = result["cleanup_needed"]
+                verified_candidate = result["verified_candidate"]
 
                 # Execute Actions
                 if is_ambiguous:
@@ -967,6 +943,7 @@ def correct_label(log_id: str, req: CorrectionRequest):
     database.update_log_correction(log_id, req.corrected_category)
 
     # Apply VERIFIED label in IMAP as permanent marker
+    client = None
     try:
         client = imap_client.GmailClient()
         client.apply_label(log_id, req.corrected_category)
@@ -975,9 +952,11 @@ def correct_label(log_id: str, req: CorrectionRequest):
         if old_label and old_label != req.corrected_category:
             client.remove_label(log_id, old_label)
         client.apply_label(log_id, config.VERIFICATION_LABEL)
-        client.disconnect()
     except Exception as e:
         logger.error(f"Failed to update IMAP labels for {log_id}: {e}")
+    finally:
+        if client:
+            client.disconnect()
 
     return {"status": "success", "message": f"Label corrected to {req.corrected_category} and added to training data."}
 
@@ -1003,7 +982,7 @@ def trigger_reclassify(background_tasks: BackgroundTasks, limit: int = Query(100
     background_tasks.add_task(reclassify_job, limit=limit)
     return {"status": "accepted", "message": "Re-classification started in background."}
 
-@app.post("/check-corrections", dependencies=[Depends(get_api_key)])
+@app.post("/admin/check-corrections", dependencies=[Depends(get_api_key)])
 def trigger_check_corrections(background_tasks: BackgroundTasks):
     """
     Trigger the check corrections process for existing logs.
@@ -1015,8 +994,8 @@ def trigger_check_corrections(background_tasks: BackgroundTasks):
 # WARNING: This endpoint is expensive and should ONLY be used when you have
 # manually re-labelled emails in Gmail and need to pick up those corrections
 # immediately (e.g. to update training data before a model retrain).
-# Do NOT use this for regular periodic checks — use /check-corrections instead.
-@app.post("/force-check-corrections", dependencies=[Depends(get_api_key)])
+# Do NOT use this for regular periodic checks — use /admin/check-corrections instead.
+@app.post("/admin/force-check-corrections", dependencies=[Depends(get_api_key)])
 def trigger_force_check_corrections(background_tasks: BackgroundTasks):
     """
     Force re-check ALL emails for label corrections, bypassing the gliding
@@ -1026,7 +1005,7 @@ def trigger_force_check_corrections(background_tasks: BackgroundTasks):
     background_tasks.add_task(force_check_corrections_job)
     return {"status": "accepted", "message": "Force check corrections started in background."}
 
-@app.post("/backfill-training-data", dependencies=[Depends(get_api_key)])
+@app.post("/admin/backfill-training-data", dependencies=[Depends(get_api_key)])
 def trigger_backfill_training_data(background_tasks: BackgroundTasks):
     """
     Rebuild training data files from all corrected entries in the database.

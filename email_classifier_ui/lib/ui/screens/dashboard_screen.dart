@@ -18,7 +18,7 @@ class DashboardScreen extends ConsumerWidget {
             tooltip: 'Check ALL labels for Corrections',
             icon: const Icon(LucideIcons.alarmCheck),
             onPressed: () async {
-              await ref.read(apiClientProvider).checkCorrections();
+              await ref.read(apiClientProvider).forceCheckCorrections();
               ref.invalidate(statsProvider);
               ref.invalidate(notificationsProvider);
             },

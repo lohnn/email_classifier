@@ -303,28 +303,32 @@ def get_all_logs_for_recheck(limit: int = 0) -> List[Dict[str, Any]]:
     Ordered by newest first.
     """
     conn = get_db_connection()
-    c = conn.cursor()
+    try:
+        c = conn.cursor()
 
-    query = 'SELECT * FROM logs ORDER BY timestamp DESC'
-    params = ()
+        query = 'SELECT * FROM logs ORDER BY timestamp DESC'
+        params = ()
 
-    if limit > 0:
-        query += ' LIMIT ?'
-        params = (limit,)
+        if limit > 0:
+            query += ' LIMIT ?'
+            params = (limit,)
 
-    c.execute(query, params)
-    rows = c.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+        c.execute(query, params)
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 def get_all_corrected_logs() -> List[Dict[str, Any]]:
     """Get all logs that have a corrected_category set."""
     conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM logs WHERE corrected_category IS NOT NULL ORDER BY timestamp DESC")
-    rows = c.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    try:
+        c = conn.cursor()
+        c.execute("SELECT * FROM logs WHERE corrected_category IS NOT NULL ORDER BY timestamp DESC")
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 def update_recheck_status(log_id: str, ambiguous_labels: Optional[List[str]] = None) -> None:
     """

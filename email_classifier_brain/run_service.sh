@@ -141,10 +141,11 @@ mkdir -p "$STORAGE_DIR"
 
 DB_FILE="${STORAGE_DIR}/email_history.db"
 
-# Check if DB has actual data (not just empty schema)
-DB_ROW_COUNT=0
-if [ -f "$DB_FILE" ]; then
-    DB_ROW_COUNT=$($PYTHON_CMD -c "
+# Function to get DB row count
+get_db_row_count() {
+    local db_file="$1"
+    if [ -f "$db_file" ]; then
+        $PYTHON_CMD -c "
 import sqlite3, sys
 try:
     conn = sqlite3.connect(sys.argv[1])
@@ -154,8 +155,14 @@ try:
     conn.close()
 except:
     print(0)
-" "$DB_FILE" 2>/dev/null || echo 0)
-fi
+" "$db_file" 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+# Check if DB has actual data (not just empty schema)
+DB_ROW_COUNT=$(get_db_row_count "$DB_FILE")
 
 # Restore from Google Drive if DB is missing or empty
 JUST_RESTORED=false
@@ -173,19 +180,7 @@ fi
 # Only back up if we have actual data and didn't just restore
 if [ "$JUST_RESTORED" = false ]; then
     # Re-check row count (in case restore happened above)
-    if [ -f "$DB_FILE" ]; then
-        DB_ROW_COUNT=$($PYTHON_CMD -c "
-import sqlite3, sys
-try:
-    conn = sqlite3.connect(sys.argv[1])
-    c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM logs')
-    print(c.fetchone()[0])
-    conn.close()
-except:
-    print(0)
-" "$DB_FILE" 2>/dev/null || echo 0)
-    fi
+    DB_ROW_COUNT=$(get_db_row_count "$DB_FILE")
 
     if [ "$DB_ROW_COUNT" -gt 0 ]; then
         echo "Backing up storage to Google Drive (${DB_ROW_COUNT} rows)..."

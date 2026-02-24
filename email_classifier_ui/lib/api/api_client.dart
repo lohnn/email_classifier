@@ -4,11 +4,16 @@ import 'models.dart';
 
 class ApiClient {
   final Dio _dio;
-
-  final String _apiKey = dotenv.env['API_KEY']!;
+  final String _apiKey;
 
   ApiClient()
-    : _dio = Dio(
+    : _apiKey =
+          dotenv.env['API_KEY'] ??
+          (throw StateError(
+            'API_KEY not found in .env file. '
+            'Please add API_KEY=<your-key> to your .env file.',
+          )),
+      _dio = Dio(
         BaseOptions(
           baseUrl: dotenv.env['API_URL'] ?? 'http://127.0.0.1:8000',
           connectTimeout: const Duration(seconds: 10),
@@ -60,10 +65,10 @@ class ApiClient {
     return RunResponse.fromJson(response.data);
   }
 
-  // /check-corrections
-  Future<void> checkCorrections() async {
+  // /admin/force-check-corrections
+  Future<void> forceCheckCorrections() async {
     await _dio.post(
-      '/force-check-corrections',
+      '/admin/force-check-corrections',
       options: Options(headers: {'X-API-Key': _apiKey}),
     );
   }
@@ -72,15 +77,22 @@ class ApiClient {
     await _dio.post(
       '/logs/$logId/correction',
       data: {'corrected_category': correctedCategory},
+      options: Options(headers: {'X-API-Key': _apiKey}),
     );
   }
 
   // Admin endpoints
   Future<void> triggerUpdate() async {
-    await _dio.post('/admin/trigger-update');
+    await _dio.post(
+      '/admin/trigger-update',
+      options: Options(headers: {'X-API-Key': _apiKey}),
+    );
   }
 
   Future<void> pushTrainingData() async {
-    await _dio.post('/admin/push-training-data');
+    await _dio.post(
+      '/admin/push-training-data',
+      options: Options(headers: {'X-API-Key': _apiKey}),
+    );
   }
 }
