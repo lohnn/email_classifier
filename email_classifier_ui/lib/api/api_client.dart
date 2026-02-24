@@ -73,6 +73,13 @@ class ApiClient {
     );
   }
 
+  Future<void> reclassify() async {
+    await _dio.post(
+      '/reclassify',
+      options: Options(headers: {'X-API-Key': _apiKey}),
+    );
+  }
+
   Future<void> correctLabel(String logId, String correctedCategory) async {
     await _dio.post(
       '/logs/$logId/correction',

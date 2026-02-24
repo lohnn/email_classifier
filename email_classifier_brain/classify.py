@@ -41,9 +41,9 @@ import os
 from setfit import SetFitModel
 
 try:
-    from config import MODEL_OUTPUT_DIR, format_model_input
+    from config import MODEL_OUTPUT_DIR, format_model_input, clean_subject, clean_body
 except ImportError:
-    from classifier_brain.config import MODEL_OUTPUT_DIR, format_model_input
+    from classifier_brain.config import MODEL_OUTPUT_DIR, format_model_input, clean_subject, clean_body
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +207,8 @@ def extract_email_info(msg: email.message.Message) -> dict:
         "sender": sender,
         "to": to,
         "cc": cc,
-        "subject": subject,
-        "body": body,
+        "subject": clean_subject(subject),
+        "body": clean_body(body),
         "mass_mail": mass_mail,
         "attachment_types": unique_types,
     }
