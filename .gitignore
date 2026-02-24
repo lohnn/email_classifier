@@ -1,0 +1,4 @@
+email_classifier_data/
+.env
+.idea/
+.DS_Store
