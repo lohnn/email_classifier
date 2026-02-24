@@ -10,7 +10,11 @@ Configuration is loaded from a `.env` file in the project root.
 Copy `.env.example` to `.env` and fill in your values.
 """
 
+import email.header
 import os
+import re
+from html.parser import HTMLParser
+from io import StringIO
 
 from dotenv import load_dotenv
 
@@ -58,6 +62,121 @@ STORAGE_DIR = os.getenv("STORAGE_DIR") or "storage"
 DB_PATH = os.getenv("DB_PATH") or os.path.join(STORAGE_DIR, "email_history.db")
 E5_PREFIX = "passage: "
 
+# Regex to match long tracking/marketing URLs (common in newsletter emails)
+_TRACKING_URL_PATTERN = re.compile(
+    r'https?://\S{100,}',  # URLs longer than 100 chars are almost always tracking
+)
+
+# Regex to collapse multiple blank lines / excessive whitespace
+_MULTI_NEWLINE_PATTERN = re.compile(r'\n\s*\n\s*\n+')
+_MULTI_SPACE_PATTERN = re.compile(r'[ \t]{2,}')
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """
+    Minimal stdlib-based HTML-to-text extractor.
+
+    Strips all HTML tags and extracts visible text content.
+    Ignores content inside <style> and <script> elements.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._result = StringIO()
+        self._skip_depth = 0
+        self._skip_tags = {"style", "script", "head"}
+
+    def handle_starttag(self, tag: str, attrs):
+        if tag.lower() in self._skip_tags:
+            self._skip_depth += 1
+        elif tag.lower() in ("br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6"):
+            self._result.write("\n")
+
+    def handle_endtag(self, tag: str):
+        if tag.lower() in self._skip_tags:
+            self._skip_depth = max(0, self._skip_depth - 1)
+
+    def handle_data(self, data: str):
+        if self._skip_depth == 0:
+            self._result.write(data)
+
+    def get_text(self) -> str:
+        return self._result.getvalue()
+
+
+def clean_subject(raw_subject: str) -> str:
+    """
+    Decode MIME-encoded email subjects to plain text.
+
+    Handles both Quoted-Printable (=?UTF-8?Q?...?=) and
+    Base64 (=?UTF-8?B?...?=) encodings. Already-decoded text
+    passes through unchanged.
+
+    Args:
+        raw_subject: The raw subject string (possibly MIME-encoded).
+
+    Returns:
+        Decoded plain-text subject string.
+    """
+    if not raw_subject:
+        return ""
+
+    try:
+        decoded_parts = email.header.decode_header(raw_subject)
+        parts = []
+        for part, charset in decoded_parts:
+            if isinstance(part, bytes):
+                parts.append(part.decode(charset or "utf-8", errors="replace"))
+            else:
+                parts.append(part)
+        return " ".join(parts).strip()
+    except Exception:
+        # If decoding fails for any reason, return the original
+        return raw_subject.strip()
+
+
+def clean_body(raw_body: str) -> str:
+    """
+    Clean email body text for use in classification.
+
+    If the body contains HTML tags, strips them and extracts visible
+    text. Also removes tracking URLs and collapses excessive whitespace.
+    Already-clean plain text passes through with minimal changes
+    (only whitespace normalization).
+
+    Args:
+        raw_body: The raw body string (may be HTML or plain text).
+
+    Returns:
+        Cleaned plain-text body.
+    """
+    if not raw_body:
+        return ""
+
+    text = raw_body
+
+    # If it looks like HTML, extract text
+    if "<" in text and (">" in text) and any(
+        tag in text.lower() for tag in ("<html", "<body", "<div", "<table", "<p>", "<!doctype", "<br")
+    ):
+        extractor = _HTMLTextExtractor()
+        try:
+            extractor.feed(text)
+            text = extractor.get_text()
+        except Exception:
+            pass  # Fall back to original text if parsing fails
+
+    # Remove tracking URLs (very long URLs, typically from marketing emails)
+    text = _TRACKING_URL_PATTERN.sub("", text)
+
+    # Collapse excessive whitespace
+    text = _MULTI_NEWLINE_PATTERN.sub("\n\n", text)
+    text = _MULTI_SPACE_PATTERN.sub(" ", text)
+
+    # Remove zero-width spaces and other invisible Unicode chars
+    text = text.replace("\u200c", "").replace("\u200b", "").replace("\u200d", "")
+
+    return text.strip()
 
 # ---------------------------------------------------------------------------
 # Role Detection

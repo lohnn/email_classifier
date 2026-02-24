@@ -237,8 +237,8 @@ def add_to_training_data(log_entry: dict, corrected_category: str):
         att_types = []
 
     example = {
-        "subject": log_entry.get("subject", ""),
-        "body": log_entry.get("body", ""),
+        "subject": config.clean_subject(log_entry.get("subject", "")),
+        "body": config.clean_body(log_entry.get("body", "")),
         "from": log_entry.get("sender", ""),
         "to": log_entry.get("recipient", ""),
         "cc": log_entry.get("cc", ""),

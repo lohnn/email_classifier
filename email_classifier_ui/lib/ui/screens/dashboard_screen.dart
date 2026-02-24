@@ -15,6 +15,15 @@ class DashboardScreen extends ConsumerWidget {
         title: const Text('Email Classifier'),
         actions: [
           IconButton(
+            tooltip: 'Reclassify',
+            icon: const Icon(LucideIcons.refreshCcwDot),
+            onPressed: () async {
+              await ref.read(apiClientProvider).reclassify();
+              ref.invalidate(statsProvider);
+              ref.invalidate(notificationsProvider);
+            },
+          ),
+          IconButton(
             tooltip: 'Check ALL labels for Corrections',
             icon: const Icon(LucideIcons.alarmCheck),
             onPressed: () async {
