@@ -338,15 +338,10 @@ def reclassify_job(limit: int = 100):
     
     try:
         logger.info("Starting re-classification job...")
-        logs = database.get_logs_for_reclassification()
+        logs = database.get_logs_for_reclassification(limit=limit)
         
         # Connect to IMAP
         client = imap_client.GmailClient()
-        
-        # Limit processing
-        if len(logs) > limit:
-            logger.info(f"Limiting re-classification to {limit} emails (out of {len(logs)}).")
-            logs = logs[:limit]
 
         for log in logs:
             gmail_id = log['id']
@@ -423,6 +418,9 @@ def reclassify_job(limit: int = 100):
                     # Update score/metadata even if label same? 
                     # Maybe useful if model confidence changed.
                     pass
+
+                # Stamp as reclassified so rotation moves to next batch
+                database.update_reclassified_at(gmail_id)
 
             except Exception as e:
                 logger.error(f"Error re-classifying {gmail_id}: {e}")
