@@ -18,26 +18,29 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
 
 ```
 .
-├── config.py              # Shared config (MY_EMAIL, input formatting)
-├── train.py               # Training script
-├── classify.py            # Inference script (RPi optimized)
+├── main.py                # FastAPI microservice & background jobs
+├── database.py            # SQLite schema & persistence logic
+├── imap_client.py         # Gmail/IMAP integration
+├── config.py              # Shared configuration & input formatting
+├── train.py               # SetFit training script
+├── classify.py            # Inference engine
 ├── retrain.sh             # Trainer workflow (pull → train → upload)
-├── run_service.sh         # Service wrapper with auto-upgrade
+├── run_service.sh         # Production service wrapper with auto-upgrade
+├── setup.sh               # Venv & dependency bootstrap
+├── setup_wizard.py        # Interactive configuration
 ├── requirements.txt       # Python dependencies
-├── TrainingData/ ←─────── # Symlink/path to private email-classifier-data repo
-│   ├── NOISE.json         # → label "NOISE"
-│   ├── WORK/
-│   │   ├── URGENT.json    # → label "WORK/URGENT"
-│   │   └── FOCUS.json     # → label "WORK/FOCUS"
-│   └── PERSONAL/
-│       └── REFERENCE.json # → label "PERSONAL/REFERENCE"
-└── model/ ←───────────────# Synced from Google Drive via rclone
+├── TrainingData/          # Category examples (.jsonl format)
+│   ├── NOISE.jsonl        # → label "NOISE"
+│   └── WORK/
+│       ├── URGENT.jsonl   # → label "WORK/URGENT"
+│       └── FOCUS.jsonl    # → label "WORK/FOCUS"
+└── model/                 # Trained model artifacts (Synced via rclone)
     ├── model.safetensors
     ├── model_head.pkl
     ├── label_mapping.json
-    └── MODEL_INFO.json    # Provenance: links model to training data commit
-├── storage/               # Persistent data (SQLite history)
-│   └── email_history.db   # Classification log and history
+    └── MODEL_INFO.json
+├── storage/               # Persistent data
+│   └── email_history.db   # SQLite logs and notification state
 ```
 
 ## Configuration
@@ -63,35 +66,57 @@ cp .env.example .env
 # Then edit .env
 ```
 
-This is used to determine your **role** in each email:
+### Environment Variables
 
-- `Direct` — you're in the "To" field
-- `CC` — you're in the "CC" field
-- `Hidden` — BCC or mailing list
+| Variable | Description |
+| :--- | :--- |
+| `MY_EMAIL` | Comma-separated list of your email addresses. |
+| `IMAP_SERVER` | IMAP server (defaults to `imap.gmail.com`). |
+| `IMAP_USER` | Email address for authentication. |
+| `IMAP_PASSWORD` | App password or standard password. |
+| `ADMIN_API_KEY` | Key for protecting admin/write endpoints. |
+| `ENABLE_AUTO_CLASSIFICATION` | Set to `false` to disable the 5-min job. |
+| `ENABLE_RECHECK_JOB` | Set to `false` to disable correction discovery. |
+| `RECHECK_INTERVAL_HOURS` | Frequency of re-check job (default: 12). |
+| `ENABLE_RECLASSIFY_JOB` | Set to `false` to disable periodic re-classification. |
+| `RECLASSIFY_INTERVAL_HOURS`| Frequency of re-classification (default: re-check). |
+| `VERIFICATION_LABEL` | Gmail label used for explicit verification. |
+| `MODEL_DIR` | Path to trained model artifacts. |
+| `TRAINING_DATA_DIR` | Path to JSONL training files. |
+| `GDRIVE_REMOTE` | Rclone remote name (e.g. `gdrive`). |
+| `GDRIVE_MODEL_PATH` | Google Drive path for model storage. |
+| `STORAGE_DIR` | Directory for SQLite database. |
+
+The `MY_EMAIL` list is used to determine your **role** in each email:
+
+- `Direct` — any of your addresses is in the "To" field.
+- `CC` — any is in the "CC" field.
+- `Hidden` — BCC or mailing list.
 
 ## Training Data Format
 
-Each category has one JSON file in `TrainingData/`. The label is derived from
-the file's path relative to `TrainingData/`, with `.json` stripped:
+Each category has one **JSONL** (JSON Lines) file in `TrainingData/`. The label
+is derived from the file's path relative to `TrainingData/`, with `.jsonl`
+stripped:
 
-- `TrainingData/NOISE.json` → label **NOISE**
-- `TrainingData/WORK/URGENT.json` → label **WORK/URGENT**
-- `TrainingData/A/B/C.json` → label **A/B/C** (arbitrary depth)
+- `TrainingData/NOISE.jsonl` → label **NOISE**
+- `TrainingData/WORK/URGENT.jsonl` → label **WORK/URGENT**
+- `TrainingData/A/B/C.jsonl` → label **A/B/C** (arbitrary depth)
 
 Subdirectories create hierarchical labels separated by `/`.
 
+Each line in the `.jsonl` file is a single JSON object:
+
 ```json
-[
-    {
-        "subject": "Server is down",
-        "body": "All services are offline! Engineers have been paged.",
-        "from": "ops-alert@company.com",
-        "to": "me@company.com",
-        "cc": "cto@company.com",
-        "mass_mail": false,
-        "attachment_types": ["PDF"]
-    }
-]
+{
+    "subject": "Server is down",
+    "body": "All services are offline! Engineers have been paged.",
+    "from": "ops-alert@company.com",
+    "to": "me@company.com",
+    "cc": "cto@company.com",
+    "mass_mail": false,
+    "attachment_types": ["PDF"]
+}
 ```
 
 | Field              | Type     | Description                                    |
@@ -168,15 +193,46 @@ label = predict_raw_email(msg)
 
 **Flat label:**
 
-1. Create `TrainingData/BILLING.json` with examples
+1. Create `TrainingData/BILLING.jsonl` with examples (one JSON per line)
 2. Run `python train.py` → label `BILLING`
 
 **Nested label:**
 
-1. Create `TrainingData/WORK/BILLING.json` with examples
+1. Create `TrainingData/WORK/BILLING.jsonl` with examples
 2. Run `python train.py` → label `WORK/BILLING`
 
 `classify.py` picks up new labels automatically from `model/label_mapping.json`.
+
+## Microservice API
+
+The brain runs a FastAPI microservice for inference, monitoring, and feedback.
+
+### Endpoints
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/run` | Manually trigger the classification job immediately. |
+| `GET` | `/stats` | Get classification counts per category. |
+| `GET` | `/notifications` | Get unread classification logs for the UI. |
+| `POST` | `/notifications/ack` | Mark specific (or all) notifications as read. |
+| `POST` | `/notifications/pop` | Fetch and mark unread notifications as read. |
+| `GET` | `/labels` | List all supported classification categories. |
+| `POST` | `/logs/{id}/correction` | Submit a category correction for a logged email. |
+| `POST` | `/reclassify` | Re-predict categories for existing logs. |
+| `GET` | `/health` | Simple service health check. |
+
+### Administrative Endpoints
+
+Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/admin/check-corrections` | Discovery job for external label changes. |
+| `POST` | `/admin/force-check-corrections`| Exhaustive re-check of all history labels. |
+| `POST` | `/admin/backfill-training-data` | Rebuild JSONL from database corrections. |
+| `POST` | `/admin/trigger-update` | Pull code/model and restart service. |
+| `POST` | `/admin/push-training-data` | Manually push `TrainingData/` to Git. |
+| `GET` | `/admin/update-errors` | Get history of automated update failures. |
 
 ## Google Drive — Model Storage
 
@@ -194,6 +250,30 @@ rclone config  # → New remote → name it "gdrive" → Google Drive → authen
 
 After training, `retrain.sh` handles the upload automatically.
 
+## Security
+
+State-modifying and administrative endpoints are protected by an **API Key**
+mechanism.
+
+- **Header:** `X-API-Key`
+- **Environment Variable:** `ADMIN_API_KEY`
+- If `ADMIN_API_KEY` is not set in `.env`, all protected endpoints will return
+  `500 Server Error` as a safety measure.
+
+## Background Jobs
+
+The service uses `APScheduler` to handle recurring tasks:
+
+| Job | Interval | Description |
+| :--- | :--- | :--- |
+| **Classification** | 5 mins | Fetches unprocessed emails from Gmail and applies labels. |
+| **Re-check** | 12 hrs | Discovers label changes made manually on the server. |
+| **Re-classify** | 12 hrs | Updates local history labels if the model has improved. |
+| **Auto-Update** | 1 day | Pushes training data to Git and triggers a service refresh. |
+
+The re-check job uses a "gliding scale" based on email age — checking newer
+emails more frequently than older ones to optimize performance.
+
 ## Retraining Workflow
 
 On the trainer machine (workstation with GPU/MPS):
@@ -205,9 +285,9 @@ On the trainer machine (workstation with GPU/MPS):
 This single command:
 
 1. Pulls the latest training data from the private Git repo
-2. Trains the model
-3. Uploads the model to Google Drive
-4. Commits and pushes any training data changes
+2. Trains the model (SetFit few-shot learning)
+3. Uploads the model artifacts to Google Drive
+4. Commits and pushes any new label corrections to the training data repo
 
 ## Deploying on Raspberry Pi
 
