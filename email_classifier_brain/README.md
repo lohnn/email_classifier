@@ -242,6 +242,9 @@ sudo cp email-classifier.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable email-classifier
 sudo systemctl start email-classifier
+
+# Check service status
+sudo systemctl status email-classifier
 ```
 
 ### 2. Service Management
