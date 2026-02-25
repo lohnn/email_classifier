@@ -77,8 +77,13 @@ def _load_label_mapping() -> dict[int, str]:
 
 
 # Global singletons — loaded once when the module is first imported
-_model = _load_model()
-_label_mapping = _load_label_mapping()
+# (Skip loading during tests to avoid heavy ML model overhead)
+if os.getenv("TESTING") == "true":
+    _model = None
+    _label_mapping = {}
+else:
+    _model = _load_model()
+    _label_mapping = _load_label_mapping()
 
 
 # ---------------------------------------------------------------------------

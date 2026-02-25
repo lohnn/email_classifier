@@ -211,6 +211,14 @@ The brain runs a FastAPI microservice for inference, monitoring, and feedback.
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
+| `GET` | `/health` | Simple service health check. |
+
+### Protected Endpoints
+
+Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
 | `POST` | `/run` | Manually trigger the classification job immediately. |
 | `GET` | `/stats` | Get classification counts per category. |
 | `GET` | `/notifications` | Get unread classification logs for the UI. |
@@ -219,14 +227,6 @@ The brain runs a FastAPI microservice for inference, monitoring, and feedback.
 | `GET` | `/labels` | List all supported classification categories. |
 | `POST` | `/logs/{id}/correction` | Submit a category correction for a logged email. |
 | `POST` | `/reclassify` | Re-predict categories for existing logs. |
-| `GET` | `/health` | Simple service health check. |
-
-### Administrative Endpoints
-
-Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
-
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
 | `POST` | `/admin/check-corrections` | Discovery job for external label changes. |
 | `POST` | `/admin/force-check-corrections`| Exhaustive re-check of all history labels. |
 | `POST` | `/admin/backfill-training-data` | Rebuild JSONL from database corrections. |

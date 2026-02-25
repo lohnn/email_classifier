@@ -18,6 +18,7 @@ class ApiClient {
           baseUrl: dotenv.env['API_URL'] ?? 'http://127.0.0.1:8000',
           connectTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 30),
+          headers: {'X-API-Key': _apiKey},
         ),
       );
 
@@ -67,39 +68,26 @@ class ApiClient {
 
   // /admin/force-check-corrections
   Future<void> forceCheckCorrections() async {
-    await _dio.post(
-      '/admin/force-check-corrections',
-      options: Options(headers: {'X-API-Key': _apiKey}),
-    );
+    await _dio.post('/admin/force-check-corrections');
   }
 
   Future<void> reclassify() async {
-    await _dio.post(
-      '/reclassify',
-      options: Options(headers: {'X-API-Key': _apiKey}),
-    );
+    await _dio.post('/reclassify');
   }
 
   Future<void> correctLabel(String logId, String correctedCategory) async {
     await _dio.post(
       '/logs/$logId/correction',
       data: {'corrected_category': correctedCategory},
-      options: Options(headers: {'X-API-Key': _apiKey}),
     );
   }
 
   // Admin endpoints
   Future<void> triggerUpdate() async {
-    await _dio.post(
-      '/admin/trigger-update',
-      options: Options(headers: {'X-API-Key': _apiKey}),
-    );
+    await _dio.post('/admin/trigger-update');
   }
 
   Future<void> pushTrainingData() async {
-    await _dio.post(
-      '/admin/push-training-data',
-      options: Options(headers: {'X-API-Key': _apiKey}),
-    );
+    await _dio.post('/admin/push-training-data');
   }
 }

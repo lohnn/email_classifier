@@ -25,9 +25,9 @@ Each JSONL file contains one JSON object per line with these fields:
       "attachment_types": ["PDF", "DOCX"]
     }
 
-Categories are auto-discovered from the .json file paths (relative to
+Categories are auto-discovered from the .jsonl file paths (relative to
 TrainingData/). Subdirectories create hierarchical labels separated by '/'.
-To add a new category, create a new JSON file or subdirectory.
+To add a new category, create a new JSONL file or subdirectory.
 
 Usage:
     python train.py
