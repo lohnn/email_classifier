@@ -4,21 +4,21 @@ import 'models.dart';
 
 class ApiClient {
   final Dio _dio;
-  final String _apiKey;
 
   ApiClient()
-    : _apiKey =
-          dotenv.env['API_KEY'] ??
-          (throw StateError(
-            'API_KEY not found in .env file. '
-            'Please add API_KEY=<your-key> to your .env file.',
-          )),
-      _dio = Dio(
+    : _dio = Dio(
         BaseOptions(
-          baseUrl: dotenv.env['API_URL'] ?? 'http://127.0.0.1:8000',
+          baseUrl: dotenv.env['API_URL'] ?? 'http://127.0.0.1:8008',
           connectTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 30),
-          headers: {'X-API-Key': _apiKey},
+          headers: {
+            'X-API-Key':
+                dotenv.env['API_KEY'] ??
+                (throw StateError(
+                  'API_KEY not found in .env file. '
+                  'Please add API_KEY=<your-key> to your .env file.',
+                )),
+          },
         ),
       );
 
