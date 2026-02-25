@@ -68,24 +68,24 @@ cp .env.example .env
 
 ### Environment Variables
 
-| Variable | Description |
-| :--- | :--- |
-| `MY_EMAIL` | Comma-separated list of your email addresses. |
-| `IMAP_SERVER` | IMAP server (defaults to `imap.gmail.com`). |
-| `IMAP_USER` | Email address for authentication. |
-| `IMAP_PASSWORD` | App password or standard password. |
-| `ADMIN_API_KEY` | Key for protecting admin/write endpoints. |
-| `ENABLE_AUTO_CLASSIFICATION` | Set to `false` to disable the 5-min job. |
-| `ENABLE_RECHECK_JOB` | Set to `false` to disable correction discovery. |
-| `RECHECK_INTERVAL_HOURS` | Frequency of re-check job (default: 12). |
-| `ENABLE_RECLASSIFY_JOB` | Set to `false` to disable periodic re-classification. |
-| `RECLASSIFY_INTERVAL_HOURS`| Frequency of re-classification (default: re-check). |
-| `VERIFICATION_LABEL` | Gmail label used for explicit verification. |
-| `MODEL_DIR` | Path to trained model artifacts. |
-| `TRAINING_DATA_DIR` | Path to JSONL training files. |
-| `GDRIVE_REMOTE` | Rclone remote name (e.g. `gdrive`). |
-| `GDRIVE_MODEL_PATH` | Google Drive path for model storage. |
-| `STORAGE_DIR` | Directory for SQLite database. |
+| Variable                     | Description                                           |
+| :--------------------------- | :---------------------------------------------------- |
+| `MY_EMAIL`                   | Comma-separated list of your email addresses.         |
+| `IMAP_SERVER`                | IMAP server (defaults to `imap.gmail.com`).           |
+| `IMAP_USER`                  | Email address for authentication.                     |
+| `IMAP_PASSWORD`              | App password or standard password.                    |
+| `ADMIN_API_KEY`              | Key for protecting admin/write endpoints.             |
+| `ENABLE_AUTO_CLASSIFICATION` | Set to `false` to disable the 5-min job.              |
+| `ENABLE_RECHECK_JOB`         | Set to `false` to disable correction discovery.       |
+| `RECHECK_INTERVAL_HOURS`     | Frequency of re-check job (default: 12).              |
+| `ENABLE_RECLASSIFY_JOB`      | Set to `false` to disable periodic re-classification. |
+| `RECLASSIFY_INTERVAL_HOURS`  | Frequency of re-classification (default: re-check).   |
+| `VERIFICATION_LABEL`         | Gmail label used for explicit verification.           |
+| `MODEL_DIR`                  | Path to trained model artifacts.                      |
+| `TRAINING_DATA_DIR`          | Path to JSONL training files.                         |
+| `GDRIVE_REMOTE`              | Rclone remote name (e.g. `gdrive`).                   |
+| `GDRIVE_MODEL_PATH`          | Google Drive path for model storage.                  |
+| `STORAGE_DIR`                | Directory for SQLite database.                        |
 
 The `MY_EMAIL` list is used to determine your **role** in each email:
 
@@ -109,13 +109,13 @@ Each line in the `.jsonl` file is a single JSON object:
 
 ```json
 {
-    "subject": "Server is down",
-    "body": "All services are offline! Engineers have been paged.",
-    "from": "ops-alert@company.com",
-    "to": "me@company.com",
-    "cc": "cto@company.com",
-    "mass_mail": false,
-    "attachment_types": ["PDF"]
+  "subject": "Server is down",
+  "body": "All services are offline! Engineers have been paged.",
+  "from": "ops-alert@company.com",
+  "to": "me@company.com",
+  "cc": "cto@company.com",
+  "mass_mail": false,
+  "attachment_types": ["PDF"]
 }
 ```
 
@@ -209,30 +209,30 @@ The brain runs a FastAPI microservice for inference, monitoring, and feedback.
 
 ### Endpoints
 
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/health` | Simple service health check. |
+| Method | Endpoint  | Description                  |
+| :----- | :-------- | :--------------------------- |
+| `GET`  | `/health` | Simple service health check. |
 
 ### Protected Endpoints
 
 Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
 
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `POST` | `/run` | Manually trigger the classification job immediately. |
-| `GET` | `/stats` | Get classification counts per category. |
-| `GET` | `/notifications` | Get unread classification logs for the UI. |
-| `POST` | `/notifications/ack` | Mark specific (or all) notifications as read. |
-| `POST` | `/notifications/pop` | Fetch and mark unread notifications as read. |
-| `GET` | `/labels` | List all supported classification categories. |
-| `POST` | `/logs/{id}/correction` | Submit a category correction for a logged email. |
-| `POST` | `/reclassify` | Re-predict categories for existing logs. |
-| `POST` | `/admin/check-corrections` | Discovery job for external label changes. |
-| `POST` | `/admin/force-check-corrections`| Exhaustive re-check of all history labels. |
-| `POST` | `/admin/backfill-training-data` | Rebuild JSONL from database corrections. |
-| `POST` | `/admin/trigger-update` | Pull code/model and restart service. |
-| `POST` | `/admin/push-training-data` | Manually push `TrainingData/` to Git. |
-| `GET` | `/admin/update-errors` | Get history of automated update failures. |
+| Method | Endpoint                         | Description                                          |
+| :----- | :------------------------------- | :--------------------------------------------------- |
+| `POST` | `/run`                           | Manually trigger the classification job immediately. |
+| `GET`  | `/stats`                         | Get classification counts per category.              |
+| `GET`  | `/notifications`                 | Get unread classification logs for the UI.           |
+| `POST` | `/notifications/ack`             | Mark specific (or all) notifications as read.        |
+| `POST` | `/notifications/pop`             | Fetch and mark unread notifications as read.         |
+| `GET`  | `/labels`                        | List all supported classification categories.        |
+| `POST` | `/logs/{id}/correction`          | Submit a category correction for a logged email.     |
+| `POST` | `/reclassify`                    | Re-predict categories for existing logs.             |
+| `POST` | `/admin/check-corrections`       | Discovery job for external label changes.            |
+| `POST` | `/admin/force-check-corrections` | Exhaustive re-check of all history labels.           |
+| `POST` | `/admin/backfill-training-data`  | Rebuild JSONL from database corrections.             |
+| `POST` | `/admin/trigger-update`          | Pull code/model and restart service.                 |
+| `POST` | `/admin/push-training-data`      | Manually push `TrainingData/` to Git.                |
+| `GET`  | `/admin/update-errors`           | Get history of automated update failures.            |
 
 ## Google Drive — Model Storage
 
@@ -264,12 +264,12 @@ mechanism.
 
 The service uses `APScheduler` to handle recurring tasks:
 
-| Job | Interval | Description |
-| :--- | :--- | :--- |
-| **Classification** | 5 mins | Fetches unprocessed emails from Gmail and applies labels. |
-| **Re-check** | 12 hrs | Discovers label changes made manually on the server. |
-| **Re-classify** | 12 hrs | Updates local history labels if the model has improved. |
-| **Auto-Update** | 1 day | Pushes training data to Git and triggers a service refresh. |
+| Job                | Default Interval | Env Override                                         | Description                                                 |
+| :----------------- | :--------------- | :--------------------------------------------------- | :---------------------------------------------------------- |
+| **Classification** | 5 mins           | `ENABLE_AUTO_CLASSIFICATION` (on/off)                | Fetches unprocessed emails from Gmail and applies labels.   |
+| **Re-check**       | 12 hrs           | `RECHECK_INTERVAL_HOURS`, `ENABLE_RECHECK_JOB`       | Discovers label changes made manually on the server.        |
+| **Re-classify**    | 12 hrs           | `RECLASSIFY_INTERVAL_HOURS`, `ENABLE_RECLASSIFY_JOB` | Updates local history labels if the model has improved.     |
+| **Auto-Update**    | 1 day            | —                                                    | Pushes training data to Git and triggers a service refresh. |
 
 The re-check job uses a "gliding scale" based on email age — checking newer
 emails more frequently than older ones to optimize performance.
@@ -309,10 +309,13 @@ rclone sync gdrive:email-classifier-model/ model/
 
 ## Running as a Service (systemd)
 
-For production deployment, use `systemd` to manage the service. This ensures it starts on boot and restarts automatically if it crashes.
+For production deployment, use `systemd` to manage the service. This ensures it
+starts on boot and restarts automatically if it crashes.
 
 ### 1. Install the service
-The `email-classifier.service` file has been pre-configured for your environment.
+
+The `email-classifier.service` file has been pre-configured for your
+environment.
 
 ```bash
 # Copy the service file to the system directory
@@ -329,20 +332,25 @@ sudo systemctl status email-classifier
 
 ### 2. Service Management
 
-| Action | Command |
-| :--- | :--- |
-| **Start** | `sudo systemctl start email-classifier` |
-| **Stop** | `sudo systemctl stop email-classifier` |
-| **Restart** | `sudo systemctl restart email-classifier` |
-| **Status** | `sudo systemctl status email-classifier` |
-| **View Logs** | `journalctl -u email-classifier -f` |
+| Action        | Command                                   |
+| :------------ | :---------------------------------------- |
+| **Start**     | `sudo systemctl start email-classifier`   |
+| **Stop**      | `sudo systemctl stop email-classifier`    |
+| **Restart**   | `sudo systemctl restart email-classifier` |
+| **Status**    | `sudo systemctl status email-classifier`  |
+| **View Logs** | `journalctl -u email-classifier -f`       |
 
 ### 3. Automatic Updates
-The service uses `run_service.sh`, which supports a safe update-and-rollback mechanism. To trigger an update (syncs model from Drive, pulls latest code, updates dependencies):
+
+The service uses `run_service.sh`, which supports a safe update-and-rollback
+mechanism. To trigger an update (syncs model from Drive, pulls latest code,
+updates dependencies):
 
 ```bash
 touch .update_request
 sudo systemctl restart email-classifier
 ```
 
-This triggers: sync from Drive → `git pull` → `pip install` → health check → serve. If the health check fails, it automatically rolls back the code to the previous commit.
+This triggers: sync from Drive → `git pull` → `pip install` → health check →
+serve. If the health check fails, it automatically rolls back the code to the
+previous commit.
