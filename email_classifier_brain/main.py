@@ -833,7 +833,7 @@ class RunResponse(BaseModel):
     details: List[dict]
 
 # Endpoints
-@app.post("/run", response_model=RunResponse)
+@app.post("/run", response_model=RunResponse, dependencies=[Depends(get_api_key)])
 def run_classification(background_tasks: BackgroundTasks, limit: int = Query(20, description="Limit the number of emails to process")):
     """
     Manually trigger the classification job immediately.
@@ -859,7 +859,7 @@ def run_classification(background_tasks: BackgroundTasks, limit: int = Query(20,
         "details": output
     }
 
-@app.get("/stats", response_model=StatsResponse)
+@app.get("/stats", response_model=StatsResponse, dependencies=[Depends(get_api_key)])
 def get_stats(
     start_time: Optional[datetime.datetime] = None,
     end_time: Optional[datetime.datetime] = None
@@ -871,7 +871,7 @@ def get_stats(
     stats = database.get_stats(start_time, end_time)
     return {"stats": stats}
 
-@app.get("/notifications", response_model=List[Notification])
+@app.get("/notifications", response_model=List[Notification], dependencies=[Depends(get_api_key)])
 def get_notifications():
     """
     Get all unread notifications.
@@ -879,7 +879,7 @@ def get_notifications():
     notifs = database.get_unread_notifications()
     return notifs
 
-@app.post("/notifications/ack")
+@app.post("/notifications/ack", dependencies=[Depends(get_api_key)])
 def ack_notifications(req: AckRequest):
     """
     Acknowledge notifications (mark as read).
@@ -889,7 +889,7 @@ def ack_notifications(req: AckRequest):
     database.ack_notifications(req.ids)
     return {"status": "success"}
 
-@app.post("/notifications/pop", response_model=List[Notification])
+@app.post("/notifications/pop", response_model=List[Notification], dependencies=[Depends(get_api_key)])
 def pop_notifications():
     """
     Get all unread notifications AND mark them as read immediately.
@@ -898,7 +898,7 @@ def pop_notifications():
     notifs = database.pop_unread_notifications()
     return notifs
 
-@app.get("/notifications/read", response_model=List[Notification])
+@app.get("/notifications/read", response_model=List[Notification], dependencies=[Depends(get_api_key)])
 def get_read_notifications(
     start_time: datetime.datetime,
     end_time: datetime.datetime
@@ -910,7 +910,7 @@ def get_read_notifications(
     notifs = database.get_read_notifications(start_time, end_time)
     return notifs
 
-@app.get("/labels", response_model=List[str])
+@app.get("/labels", response_model=List[str], dependencies=[Depends(get_api_key)])
 def get_labels():
     """
     Get all supported labels (categories) for email classification.

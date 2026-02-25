@@ -18,15 +18,16 @@ temp_data_dir = tempfile.mkdtemp()
 os.environ["TRAINING_DATA_DIR"] = temp_data_dir
 os.environ["ADMIN_API_KEY"] = "testkey"
 
-# Mock classify to avoid loading model
-mock_classify = MagicMock()
-mock_classify.get_available_categories.return_value = ["FOCUS", "NOISE", "REFERENCE", "URGENT"]
-sys.modules["classify"] = mock_classify
-sys.modules["classifier_brain.classify"] = mock_classify
+os.environ["TESTING"] = "true"
 
 import main
 from main import app
 import database
+
+@pytest.fixture
+def mock_classify():
+    with patch("main.classify") as mock:
+        yield mock
 
 @pytest.fixture
 def client():
@@ -35,7 +36,7 @@ def client():
         os.makedirs(temp_data_dir)
 
     with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
-        with patch("database.DB_FILE", tmp.name):
+        with patch("database.DB_FILE", tmp.name), patch("main.TRAINING_DATA_DIR", temp_data_dir):
             database.init_db()
             with TestClient(app) as c:
                 yield c
@@ -43,9 +44,11 @@ def client():
     if os.path.exists(temp_data_dir):
         shutil.rmtree(temp_data_dir)
 
-def test_correction_endpoint(client):
+def test_correction_endpoint(client, mock_classify):
+    mock_classify.get_available_categories.return_value = ["FOCUS", "NOISE", "REFERENCE", "URGENT"]
     # 1. Add a log entry first
     database.add_log(
+        id="123",
         sender="test@example.com",
         recipient="me@example.com",
         subject="Test subject",
@@ -88,7 +91,8 @@ def test_correction_endpoint(client):
         assert data[0]["from"] == "test@example.com"
         assert data[0]["attachment_types"] == ["PDF"]
 
-def test_correction_nonexistent_log(client):
+def test_correction_nonexistent_log(client, mock_classify):
+    mock_classify.get_available_categories.return_value = ["FOCUS", "NOISE", "REFERENCE", "URGENT"]
     response = client.post(
         "/logs/999/correction",
         json={"corrected_category": "FOCUS"},
@@ -102,9 +106,9 @@ def test_correction_unauthorized(client):
     assert response.json()["detail"] == "Could not validate credentials"
 
 @patch("subprocess.run")
-def test_push_training_data_admin(mock_run, client):
+def test_push_training_data_admin(mock_run, client, mock_classify):
     # Mock git status to show changes
-    mock_run.return_value = MagicMock(stdout=" M FOCUS.json\n")
+    mock_run.return_value = MagicMock(stdout=" M FOCUS.jsonl\n")
 
     # Need to make sure TRAINING_DATA_DIR exists
     if not os.path.exists(temp_data_dir):
