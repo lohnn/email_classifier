@@ -227,12 +227,42 @@ rclone sync gdrive:email-classifier-model/ model/
 ./run_service.sh
 ```
 
-The service auto-upgrades when a `.update_request` marker is created:
+## Running as a Service (systemd)
+
+For production deployment, use `systemd` to manage the service. This ensures it starts on boot and restarts automatically if it crashes.
+
+### 1. Install the service
+The `email-classifier.service` file has been pre-configured for your environment.
+
+```bash
+# Copy the service file to the system directory
+sudo cp email-classifier.service /etc/systemd/system/
+
+# Reload systemd and enable the service
+sudo systemctl daemon-reload
+sudo systemctl enable email-classifier
+sudo systemctl start email-classifier
+
+# Check service status
+sudo systemctl status email-classifier
+```
+
+### 2. Service Management
+
+| Action | Command |
+| :--- | :--- |
+| **Start** | `sudo systemctl start email-classifier` |
+| **Stop** | `sudo systemctl stop email-classifier` |
+| **Restart** | `sudo systemctl restart email-classifier` |
+| **Status** | `sudo systemctl status email-classifier` |
+| **View Logs** | `journalctl -u email-classifier -f` |
+
+### 3. Automatic Updates
+The service uses `run_service.sh`, which supports a safe update-and-rollback mechanism. To trigger an update (syncs model from Drive, pulls latest code, updates dependencies):
 
 ```bash
 touch .update_request
 sudo systemctl restart email-classifier
 ```
 
-This triggers: model sync from Drive → code pull → dependency update → health
-check → serve.
+This triggers: sync from Drive → `git pull` → `pip install` → health check → serve. If the health check fails, it automatically rolls back the code to the previous commit.

@@ -32,3 +32,4 @@ email_classifier_data/
 storage/
 
 *.db
+.python-version
