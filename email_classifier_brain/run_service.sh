@@ -139,6 +139,12 @@ fi
 # Ensure storage directory exists
 mkdir -p "$STORAGE_DIR"
 
+# Ensure model directory exists and has content
+if [ ! -f "${MODEL_DIR}/config.json" ]; then
+    echo "Model config.json missing. Syncing model from Google Drive..."
+    $RCLONE_CMD sync "$GDRIVE_REMOTE:$GDRIVE_MODEL_PATH/" "$MODEL_DIR/" --progress
+fi
+
 DB_FILE="${STORAGE_DIR}/email_history.db"
 
 # Function to get DB row count
