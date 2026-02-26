@@ -681,24 +681,21 @@ def force_check_corrections_job():
         logger.info(f"Phase 0 complete. Imported {import_count} emails from IMAP.")
 
         # ---------------------------------------------------------------
-        # Phase 1: Check corrections on all DB entries
+        # Phase 1: Check corrections on all DB entries (in batches)
         # ---------------------------------------------------------------
-        all_candidates = database.get_all_logs_for_recheck()
-        if not all_candidates:
-            logger.info("No candidates for forced re-check.")
-            return
-
-        total = len(all_candidates)
-        total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
-        logger.info(f"Phase 1: Force-checking {total} emails in {total_batches} batches of {BATCH_SIZE}...")
-
         updates_count = 0
         ambiguous_count = 0
+        batch_num = 0
 
-        for batch_num in range(total_batches):
-            batch_start = batch_num * BATCH_SIZE
-            batch = all_candidates[batch_start:batch_start + BATCH_SIZE]
-            logger.info(f"Processing batch {batch_num + 1}/{total_batches} ({len(batch)} emails)...")
+        while True:
+            batch = database.get_all_logs_for_recheck(limit=BATCH_SIZE, offset=batch_num * BATCH_SIZE)
+            if not batch:
+                if batch_num == 0:
+                    logger.info("No candidates for forced re-check.")
+                break
+
+            batch_num += 1
+            logger.info(f"Phase 1: Processing batch {batch_num} ({len(batch)} emails)...")
 
             batch_ids = [c['id'] for c in batch]
             current_labels_map = client.get_labels_for_emails(batch_ids)
@@ -753,7 +750,7 @@ def force_check_corrections_job():
 
                     database.update_recheck_status(gid, ambiguous_labels=None)
 
-            logger.info(f"Batch {batch_num + 1}/{total_batches} done. Running totals — Updates: {updates_count}, Ambiguous: {ambiguous_count}")
+            logger.info(f"Batch {batch_num} done. Running totals — Updates: {updates_count}, Ambiguous: {ambiguous_count}")
 
         logger.info(f"Force re-check finished. Total updates: {updates_count}, Total ambiguous: {ambiguous_count}")
 
