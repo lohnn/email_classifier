@@ -79,33 +79,46 @@ class DashboardScreen extends ConsumerWidget {
                         ),
                       ),
                     ),
-                    child: const RecentActivityList(),
+                    child: const CustomScrollView(
+                      slivers: [
+                        SliverPadding(
+                          padding: EdgeInsets.all(24),
+                          sliver: RecentActivityList(),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
             );
           } else {
             // Mobile Layout
-            return SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    "Overview",
-                    style: Theme.of(context).textTheme.headlineSmall,
+            return CustomScrollView(
+              slivers: [
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                  sliver: SliverList.list(
+                    children: [
+                      Text(
+                        "Overview",
+                        style: Theme.of(context).textTheme.headlineSmall,
+                      ),
+                      const SizedBox(height: 16),
+                      const SizedBox(height: 300, child: StatsChart()),
+                      const SizedBox(height: 24),
+                      Text(
+                        "Recent Activity",
+                        style: Theme.of(context).textTheme.headlineSmall,
+                      ),
+                      const SizedBox(height: 16),
+                    ],
                   ),
-                  const SizedBox(height: 16),
-                  const SizedBox(height: 300, child: StatsChart()),
-                  const SizedBox(height: 24),
-                  Text(
-                    "Recent Activity",
-                    style: Theme.of(context).textTheme.headlineSmall,
-                  ),
-                  const SizedBox(height: 16),
-                  const RecentActivityList(shrinkWrap: true),
-                ],
-              ),
+                ),
+                const SliverPadding(
+                  padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  sliver: RecentActivityList(),
+                ),
+              ],
             );
           }
         },

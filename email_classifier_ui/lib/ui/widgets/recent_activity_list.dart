@@ -6,8 +6,7 @@ import '../../api/models.dart' as model;
 import 'package:intl/intl.dart';
 
 class RecentActivityList extends ConsumerWidget {
-  final bool shrinkWrap;
-  const RecentActivityList({super.key, this.shrinkWrap = false});
+  const RecentActivityList({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -16,12 +15,15 @@ class RecentActivityList extends ConsumerWidget {
     return notificationsAsync.when(
       data: (notifications) {
         if (notifications.isEmpty) {
-          return const Center(child: Text("No recent classifications"));
+          return const SliverToBoxAdapter(
+            child: Padding(
+              padding: EdgeInsets.all(32.0),
+              child: Center(child: Text("No recent classifications")),
+            ),
+          );
         }
 
-        return ListView.builder(
-          shrinkWrap: shrinkWrap,
-          physics: shrinkWrap ? const NeverScrollableScrollPhysics() : null,
+        return SliverList.builder(
           itemCount: notifications.length,
           itemBuilder: (context, index) {
             final notif = notifications[index];
@@ -29,8 +31,18 @@ class RecentActivityList extends ConsumerWidget {
           },
         );
       },
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (err, stack) => Center(child: Text("Error: $err")),
+      loading: () => const SliverToBoxAdapter(
+        child: Padding(
+          padding: EdgeInsets.all(32.0),
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      ),
+      error: (err, stack) => SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.all(32.0),
+          child: Center(child: Text("Error: $err")),
+        ),
+      ),
     );
   }
 }
