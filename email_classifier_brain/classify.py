@@ -157,10 +157,10 @@ def extract_email_info(msg: email.message.Message) -> dict:
     Returns a dictionary with keys: sender, to, cc, subject, body,
     mass_mail, and attachment_types.
     """
-    sender = msg.get("From", "")
-    to = msg.get("To", "")
-    cc = msg.get("Cc", "")
-    subject = msg.get("Subject", "")
+    sender = str(msg.get("From", ""))
+    to = str(msg.get("To", ""))
+    cc = str(msg.get("Cc", ""))
+    subject = str(msg.get("Subject", ""))
 
     # Mass mail detection via List-Unsubscribe header
     mass_mail = msg.get("List-Unsubscribe") is not None
