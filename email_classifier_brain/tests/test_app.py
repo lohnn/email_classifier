@@ -20,7 +20,7 @@ os.environ["TESTING"] = "true"
 
 # Now import main
 import main
-from main import app, job_lock
+from main import app, job_queue
 import database
 
 @pytest.fixture
@@ -47,8 +47,6 @@ def test_get_stats_empty(client):
     assert response.json() == {"stats": {}}
 
 def test_run_classification(client, mock_imap_client, mock_classify):
-    if job_lock.locked():
-        job_lock.release()
 
     mock_instance = mock_imap_client.return_value
     from email.message import Message
@@ -77,9 +75,10 @@ def test_run_classification(client, mock_imap_client, mock_classify):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "success"
-    assert data["processed_count"] == 1
-    assert data["details"][0]["label"] == "URGENT"
+    assert data["status"] == "accepted"
+
+    # Drain the queue to execute the job synchronously for testing
+    job_queue._drain()
 
     mock_instance.apply_label.assert_called_with("123", "URGENT")
 
@@ -87,8 +86,6 @@ def test_run_classification(client, mock_imap_client, mock_classify):
     assert stats_response.json()["stats"]["URGENT"] == 1
 
 def test_run_classification_limit(client, mock_imap_client, mock_classify):
-    if job_lock.locked():
-        job_lock.release()
 
     mock_instance = mock_imap_client.return_value
     from email.message import Message
@@ -104,26 +101,44 @@ def test_run_classification_limit(client, mock_imap_client, mock_classify):
 
     response = client.post("/run", headers={"X-API-Key": "testkey"})
     assert response.status_code == 200
+    
+    # Drain the queue to execute the job synchronously for testing
+    job_queue._drain()
 
     # Verify it was called with default limit 20
     args, kwargs = mock_instance.fetch_unprocessed_emails.call_args
     assert kwargs.get('limit') == 20
 
 def test_run_concurrently(client):
-    if job_lock.locked():
-        job_lock.release()
-    job_lock.acquire()
+    # Enqueue a long-running dummy job
+    import time
+    def slow_job():
+        time.sleep(0.5)
+        
+    job_queue.enqueue("classification", slow_job)
+    
     try:
         response = client.post("/run", headers={"X-API-Key": "testkey"})
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "skipped"
+        assert data["status"] == "already_queued"
     finally:
-        job_lock.release()
+        # Stop the worker so the test completes fast
+        job_queue._stop.set()
+        job_queue._has_work.set()
+        job_queue._worker.join(timeout=2)
+        
+        # Reset queue for next tests
+        job_queue._queue.clear()
+        job_queue._running = None
+        
+        # Restart worker
+        job_queue._stop.clear()
+        import threading
+        job_queue._worker = threading.Thread(target=job_queue._run, daemon=True, name="job-queue-worker")
+        job_queue._worker.start()
 
 def test_pop_notifications(client, mock_imap_client, mock_classify):
-    if job_lock.locked():
-        job_lock.release()
 
     mock_instance = mock_imap_client.return_value
     from email.message import Message
@@ -139,6 +154,8 @@ def test_pop_notifications(client, mock_imap_client, mock_classify):
     mock_classify.get_available_categories.return_value = ["URGENT"]
 
     client.post("/run", headers={"X-API-Key": "testkey"})
+    job_queue._drain()
+    
     response = client.get("/notifications", headers={"X-API-Key": "testkey"})
     assert len(response.json()) == 1
 
@@ -151,8 +168,6 @@ def test_pop_notifications(client, mock_imap_client, mock_classify):
     assert len(response.json()) == 0
 
 def test_get_read_notifications(client, mock_imap_client, mock_classify):
-    if job_lock.locked():
-        job_lock.release()
 
     mock_instance = mock_imap_client.return_value
     from email.message import Message
@@ -167,7 +182,8 @@ def test_get_read_notifications(client, mock_imap_client, mock_classify):
     mock_classify.predict_email.return_value = ("URGENT", 0.95)
 
     client.post("/run", headers={"X-API-Key": "testkey"})
-    client.post("/notifications/ack", json={}, headers={"X-API-Key": "testkey"})
+    job_queue._drain()
+    client.post("/notifications/ack", json={"all": True}, headers={"X-API-Key": "testkey"})
 
     start_time = (now - timedelta(hours=1)).isoformat()
     end_time = (now + timedelta(hours=1)).isoformat()
