@@ -16,10 +16,7 @@ class RecentActivityList extends ConsumerWidget {
       data: (notifications) {
         if (notifications.isEmpty) {
           return const SliverToBoxAdapter(
-            child: Padding(
-              padding: EdgeInsets.all(32.0),
-              child: Center(child: Text("No recent classifications")),
-            ),
+            child: Center(child: Text("No recent classifications")),
           );
         }
 
@@ -32,16 +29,10 @@ class RecentActivityList extends ConsumerWidget {
         );
       },
       loading: () => const SliverToBoxAdapter(
-        child: Padding(
-          padding: EdgeInsets.all(32.0),
-          child: Center(child: CircularProgressIndicator()),
-        ),
+        child: Center(child: CircularProgressIndicator()),
       ),
       error: (err, stack) => SliverToBoxAdapter(
-        child: Padding(
-          padding: const EdgeInsets.all(32.0),
-          child: Center(child: Text("Error: $err")),
-        ),
+        child: Center(child: Text("Error: $err")),
       ),
     );
   }

@@ -97,21 +97,24 @@ class DashboardScreen extends ConsumerWidget {
               slivers: [
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                  sliver: SliverList.list(
-                    children: [
-                      Text(
-                        "Overview",
-                        style: Theme.of(context).textTheme.headlineSmall,
-                      ),
-                      const SizedBox(height: 16),
-                      const SizedBox(height: 300, child: StatsChart()),
-                      const SizedBox(height: 24),
-                      Text(
-                        "Recent Activity",
-                        style: Theme.of(context).textTheme.headlineSmall,
-                      ),
-                      const SizedBox(height: 16),
-                    ],
+                  sliver: SliverToBoxAdapter(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          "Overview",
+                          style: Theme.of(context).textTheme.headlineSmall,
+                        ),
+                        const SizedBox(height: 16),
+                        const SizedBox(height: 300, child: StatsChart()),
+                        const SizedBox(height: 24),
+                        Text(
+                          "Recent Activity",
+                          style: Theme.of(context).textTheme.headlineSmall,
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                    ),
                   ),
                 ),
                 const SliverPadding(
