@@ -322,21 +322,23 @@ def get_candidate_logs_for_recheck(limit: int = 200) -> List[Dict[str, Any]]:
 
     return [dict(row) for row in rows]
 
-def get_all_logs_for_recheck(limit: int = 0) -> List[Dict[str, Any]]:
+def get_all_logs_for_recheck(limit: int = 0, offset: int = 0) -> List[Dict[str, Any]]:
     """
     Get ALL logs for a forced re-check, ignoring the gliding scale schedule.
     Ordered by newest first.
+
+    Supports pagination via limit/offset for batched processing.
     """
     conn = get_db_connection()
     try:
         c = conn.cursor()
 
         query = 'SELECT * FROM logs ORDER BY timestamp DESC'
-        params = ()
+        params = []
 
         if limit > 0:
-            query += ' LIMIT ?'
-            params = (limit,)
+            query += ' LIMIT ? OFFSET ?'
+            params.extend([limit, offset])
 
         c.execute(query, params)
         rows = c.fetchall()
