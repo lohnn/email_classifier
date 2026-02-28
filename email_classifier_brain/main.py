@@ -821,7 +821,7 @@ class RunResponse(BaseModel):
 
 # Endpoints
 @app.post("/run", response_model=RunResponse, dependencies=[Depends(get_api_key)])
-def run_classification(background_tasks: BackgroundTasks, limit: int = Query(20, description="Limit the number of emails to process")):
+def run_classification(limit: int = Query(20, description="Limit the number of emails to process")):
     """
     Manually trigger the classification job immediately.
     Optionally limit the number of emails processed (default: 20).
@@ -959,7 +959,7 @@ def trigger_push_training_data():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/reclassify", dependencies=[Depends(get_api_key)])
-def trigger_reclassify(background_tasks: BackgroundTasks, limit: int = Query(100, description="Limit emails to re-check")):
+def trigger_reclassify(limit: int = Query(100, description="Limit emails to re-check")):
     """
     Trigger the re-classification process for existing logs.
     """
@@ -969,7 +969,7 @@ def trigger_reclassify(background_tasks: BackgroundTasks, limit: int = Query(100
     return {"status": "already_queued", "message": "Job already queued or running."}
 
 @app.post("/admin/check-corrections", dependencies=[Depends(get_api_key)])
-def trigger_check_corrections(background_tasks: BackgroundTasks):
+def trigger_check_corrections():
     """
     Trigger the check corrections process for existing logs.
     """
@@ -983,7 +983,7 @@ def trigger_check_corrections(background_tasks: BackgroundTasks):
 # immediately (e.g. to update training data before a model retrain).
 # Do NOT use this for regular periodic checks — use /admin/check-corrections instead.
 @app.post("/admin/force-check-corrections", dependencies=[Depends(get_api_key)])
-def trigger_force_check_corrections(background_tasks: BackgroundTasks):
+def trigger_force_check_corrections():
     """
     Force re-check ALL emails for label corrections, bypassing the gliding
     scale schedule. Use this after manually re-labelling emails in Gmail to
@@ -995,7 +995,7 @@ def trigger_force_check_corrections(background_tasks: BackgroundTasks):
     return {"status": "already_queued", "message": "Job already queued or running."}
 
 @app.post("/admin/backfill-training-data", dependencies=[Depends(get_api_key)])
-def trigger_backfill_training_data(background_tasks: BackgroundTasks):
+def trigger_backfill_training_data():
     """
     Rebuild training data files from all corrected entries in the database.
     Use this to recover training data if the training data directory was

@@ -1,4 +1,3 @@
-
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock, patch
@@ -9,6 +8,23 @@ from datetime import datetime, timedelta
 # Add the brain directory to sys.path to resolve imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../email_classifier_brain')))
+
+from main import app, job_queue
+
+@pytest.fixture(autouse=True)
+def stop_queue_worker():
+    """Stop the global JobQueue worker thread to prevent race conditions in tests.
+    This ensures that when tests call `job_queue._drain()`, jobs run synchronously
+    in the main test thread and are fully completed before subsequent assertions."""
+    # Stop the worker
+    job_queue._stop.set()
+    job_queue._has_work.set()
+    if job_queue._worker.is_alive():
+        job_queue._worker.join(timeout=2)
+    # Clear state
+    with job_queue._lock:
+        job_queue._queue.clear()
+        job_queue._running = None
 
 # Mock things that might be imported during main import
 import tempfile
@@ -110,33 +126,19 @@ def test_run_classification_limit(client, mock_imap_client, mock_classify):
     assert kwargs.get('limit') == 20
 
 def test_run_concurrently(client):
-    # Enqueue a long-running dummy job
-    import time
-    def slow_job():
-        time.sleep(0.5)
-        
-    job_queue.enqueue("classification", slow_job)
-    
+    from main import job_queue
+    # Manually simulate a running classification job
+    with job_queue._lock:
+        job_queue._running = "classification"
+
     try:
         response = client.post("/run", headers={"X-API-Key": "testkey"})
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "already_queued"
     finally:
-        # Stop the worker so the test completes fast
-        job_queue._stop.set()
-        job_queue._has_work.set()
-        job_queue._worker.join(timeout=2)
-        
-        # Reset queue for next tests
-        job_queue._queue.clear()
-        job_queue._running = None
-        
-        # Restart worker
-        job_queue._stop.clear()
-        import threading
-        job_queue._worker = threading.Thread(target=job_queue._run, daemon=True, name="job-queue-worker")
-        job_queue._worker.start()
+        with job_queue._lock:
+            job_queue._running = None
 
 def test_pop_notifications(client, mock_imap_client, mock_classify):
 
@@ -174,7 +176,7 @@ def test_get_read_notifications(client, mock_imap_client, mock_classify):
     mock_msg = Message()
     mock_msg["Subject"] = "Test Read"
 
-    now = datetime.utcnow()
+    now = datetime.now()
     mock_instance.fetch_unprocessed_emails.return_value = [("123", mock_msg)]
     mock_classify.extract_email_info.return_value = {
         "sender": "s@t.com", "to": "r@t.com", "cc": "", "subject": "Test Read", "body": "B", "mass_mail": False, "attachment_types": []
@@ -183,7 +185,7 @@ def test_get_read_notifications(client, mock_imap_client, mock_classify):
 
     client.post("/run", headers={"X-API-Key": "testkey"})
     job_queue._drain()
-    client.post("/notifications/ack", json={"all": True}, headers={"X-API-Key": "testkey"})
+    client.post("/notifications/ack", json={}, headers={"X-API-Key": "testkey"})
 
     start_time = (now - timedelta(hours=1)).isoformat()
     end_time = (now + timedelta(hours=1)).isoformat()

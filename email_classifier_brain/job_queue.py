@@ -73,31 +73,26 @@ class JobQueue:
             # Wait for work (or stop signal)
             self._has_work.wait()
 
-            if self._stop.is_set():
-                # Drain remaining work before exiting
-                self._drain()
-                break
-
+            # Drain any work that has been queued. If the stop flag is set,
+            # the loop will terminate after this drain.
             self._drain()
 
     def _drain(self) -> None:
-        """Process all currently queued jobs."""
+        """Process all queued jobs. Protected internally by the same lock."""
         while True:
             with self._lock:
                 if not self._queue:
                     self._has_work.clear()
                     self._running = None
                     return
+                # Pop the oldest job
                 name, (fn, args, kwargs) = self._queue.popitem(last=False)
                 self._running = name
-
-            # Execute outside the lock so new items can be enqueued
-            logger.info(f"Job '{name}' starting.")
+            
             try:
                 fn(*args, **kwargs)
             except Exception:
-                logger.exception(f"Job '{name}' failed with exception.")
+                logger.exception(f"Job '{name}' failed with an exception.")
             finally:
-                logger.info(f"Job '{name}' finished.")
                 with self._lock:
                     self._running = None

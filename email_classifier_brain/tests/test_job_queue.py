@@ -99,32 +99,29 @@ def test_re_enqueue_after_completion(queue):
 
 def test_sequential_execution(queue):
     events = []
-    
+    lock = threading.Lock()
+    job2_finished = threading.Event()
+
     def job1():
-        events.append("j1_start")
-        time.sleep(0.1)
-        events.append("j1_end")
+        with lock:
+            events.append("j1_start")
+        time.sleep(0.05)
+        with lock:
+            events.append("j1_end")
         
     def job2():
-        events.append("j2_start")
-        time.sleep(0.1)
-        events.append("j2_end")
+        with lock:
+            events.append("j2_start")
+        time.sleep(0.05)
+        with lock:
+            events.append("j2_end")
+        job2_finished.set()
         
-    # Since worker is running, might start job1 immediately.
-    # Stop worker to enqueue both sequentially.
-    queue._stop.set()
-    queue._has_work.set()
-    queue._worker.join()
-    
-    # Clear stop flags and create a new worker
-    queue._stop.clear()
-    
-    # Enqueue both
     queue.enqueue("job1", job1)
     queue.enqueue("job2", job2)
     
-    # Process sequentially inline
-    queue._drain()
+    # Wait for the second job to finish, which implies the first also finished.
+    assert job2_finished.wait(timeout=2), "Jobs did not complete in time."
     
     assert events == ["j1_start", "j1_end", "j2_start", "j2_end"]
 
