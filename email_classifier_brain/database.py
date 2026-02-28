@@ -334,15 +334,13 @@ def get_all_logs_for_recheck(limit: int = 0, offset: int = 0) -> List[Dict[str, 
         c = conn.cursor()
 
         query = 'SELECT * FROM logs ORDER BY timestamp DESC'
-        params: list = []
+        params = []
 
         if limit > 0:
-            query += ' LIMIT ?'
-            params.append(limit)
-            query += ' OFFSET ?'
-            params.append(offset)
+            query += ' LIMIT ? OFFSET ?'
+            params.extend([limit, offset])
 
-        c.execute(query, tuple(params))
+        c.execute(query, params)
         rows = c.fetchall()
         return [dict(row) for row in rows]
     finally:
