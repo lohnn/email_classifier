@@ -1,4 +1,3 @@
-
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock, patch
@@ -10,6 +9,23 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../email_classifier_brain')))
 
+from main import app, job_queue
+
+@pytest.fixture(autouse=True)
+def stop_queue_worker():
+    """Stop the global JobQueue worker thread to prevent race conditions in tests.
+    This ensures that when tests call `job_queue._drain()`, jobs run synchronously
+    in the main test thread and are fully completed before subsequent assertions."""
+    # Stop the worker
+    job_queue._stop.set()
+    job_queue._has_work.set()
+    if job_queue._worker.is_alive():
+        job_queue._worker.join(timeout=2)
+    # Clear state
+    with job_queue._lock:
+        job_queue._queue.clear()
+        job_queue._running = None
+
 # Mock things that might be imported during main import
 import tempfile
 temp_data_dir = tempfile.mkdtemp()
@@ -20,7 +36,7 @@ os.environ["TESTING"] = "true"
 
 # Now import main
 import main
-from main import app, job_lock
+from main import app, job_queue
 import database
 
 @pytest.fixture
@@ -47,8 +63,6 @@ def test_get_stats_empty(client):
     assert response.json() == {"stats": {}}
 
 def test_run_classification(client, mock_imap_client, mock_classify):
-    if job_lock.locked():
-        job_lock.release()
 
     mock_instance = mock_imap_client.return_value
     from email.message import Message
@@ -77,9 +91,10 @@ def test_run_classification(client, mock_imap_client, mock_classify):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "success"
-    assert data["processed_count"] == 1
-    assert data["details"][0]["label"] == "URGENT"
+    assert data["status"] == "accepted"
+
+    # Drain the queue to execute the job synchronously for testing
+    job_queue._drain()
 
     mock_instance.apply_label.assert_called_with("123", "URGENT")
 
@@ -87,8 +102,6 @@ def test_run_classification(client, mock_imap_client, mock_classify):
     assert stats_response.json()["stats"]["URGENT"] == 1
 
 def test_run_classification_limit(client, mock_imap_client, mock_classify):
-    if job_lock.locked():
-        job_lock.release()
 
     mock_instance = mock_imap_client.return_value
     from email.message import Message
@@ -104,26 +117,30 @@ def test_run_classification_limit(client, mock_imap_client, mock_classify):
 
     response = client.post("/run", headers={"X-API-Key": "testkey"})
     assert response.status_code == 200
+    
+    # Drain the queue to execute the job synchronously for testing
+    job_queue._drain()
 
     # Verify it was called with default limit 20
     args, kwargs = mock_instance.fetch_unprocessed_emails.call_args
     assert kwargs.get('limit') == 20
 
 def test_run_concurrently(client):
-    if job_lock.locked():
-        job_lock.release()
-    job_lock.acquire()
+    from main import job_queue
+    # Manually simulate a running classification job
+    with job_queue._lock:
+        job_queue._running = "classification"
+
     try:
         response = client.post("/run", headers={"X-API-Key": "testkey"})
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "skipped"
+        assert data["status"] == "already_queued"
     finally:
-        job_lock.release()
+        with job_queue._lock:
+            job_queue._running = None
 
 def test_pop_notifications(client, mock_imap_client, mock_classify):
-    if job_lock.locked():
-        job_lock.release()
 
     mock_instance = mock_imap_client.return_value
     from email.message import Message
@@ -139,6 +156,8 @@ def test_pop_notifications(client, mock_imap_client, mock_classify):
     mock_classify.get_available_categories.return_value = ["URGENT"]
 
     client.post("/run", headers={"X-API-Key": "testkey"})
+    job_queue._drain()
+    
     response = client.get("/notifications", headers={"X-API-Key": "testkey"})
     assert len(response.json()) == 1
 
@@ -151,15 +170,13 @@ def test_pop_notifications(client, mock_imap_client, mock_classify):
     assert len(response.json()) == 0
 
 def test_get_read_notifications(client, mock_imap_client, mock_classify):
-    if job_lock.locked():
-        job_lock.release()
 
     mock_instance = mock_imap_client.return_value
     from email.message import Message
     mock_msg = Message()
     mock_msg["Subject"] = "Test Read"
 
-    now = datetime.utcnow()
+    now = datetime.now()
     mock_instance.fetch_unprocessed_emails.return_value = [("123", mock_msg)]
     mock_classify.extract_email_info.return_value = {
         "sender": "s@t.com", "to": "r@t.com", "cc": "", "subject": "Test Read", "body": "B", "mass_mail": False, "attachment_types": []
@@ -167,6 +184,7 @@ def test_get_read_notifications(client, mock_imap_client, mock_classify):
     mock_classify.predict_email.return_value = ("URGENT", 0.95)
 
     client.post("/run", headers={"X-API-Key": "testkey"})
+    job_queue._drain()
     client.post("/notifications/ack", json={}, headers={"X-API-Key": "testkey"})
 
     start_time = (now - timedelta(hours=1)).isoformat()

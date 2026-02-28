@@ -30,10 +30,9 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Global lock for the classification job to prevent concurrent execution
-# Since we are running in a sync endpoint, a threading.Lock is appropriate.
-import threading
-job_lock = threading.Lock()
+# Job Queue for executing background tasks sequentially
+from job_queue import JobQueue
+job_queue = JobQueue()
 
 scheduler = BackgroundScheduler()
 
@@ -43,12 +42,22 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing database...")
     database.init_db()
 
+    # Wrapper functions for the scheduler to enqueue jobs
+    def _enqueue_classification():
+        job_queue.enqueue("classification", classification_job)
+
+    def _enqueue_recheck():
+        job_queue.enqueue("recheck", check_corrections_job)
+        
+    def _enqueue_reclassify():
+        job_queue.enqueue("reclassify", reclassify_job)
+
     # Start scheduler
     logger.info("Starting scheduler...")
     # Run every 5 minutes if auto-classification is enabled
     if config.ENABLE_AUTO_CLASSIFICATION:
         scheduler.add_job(
-            classification_job,
+            _enqueue_classification,
             trigger=IntervalTrigger(minutes=5),
             id="classification_job",
             replace_existing=True
@@ -58,11 +67,14 @@ async def lifespan(app: FastAPI):
 
     # Run re-check job
     if config.ENABLE_RECHECK_JOB:
+        # Schedule the first run briefly after startup
+        next_run = datetime.datetime.now() + datetime.timedelta(minutes=2)
         scheduler.add_job(
-            check_corrections_job,
+            _enqueue_recheck,
             trigger=IntervalTrigger(hours=config.RECHECK_INTERVAL_HOURS),
             id="check_corrections_job",
-            replace_existing=True
+            replace_existing=True,
+            next_run_time=next_run
         )
     else:
         logger.info("Re-check job disabled.")
@@ -72,7 +84,7 @@ async def lifespan(app: FastAPI):
         # Offset by half the interval to avoid overlapping with check_corrections_job
         reclassify_offset = datetime.timedelta(hours=config.RECLASSIFY_INTERVAL_HOURS / 2)
         scheduler.add_job(
-            reclassify_job,
+            _enqueue_reclassify,
             trigger=IntervalTrigger(hours=config.RECLASSIFY_INTERVAL_HOURS),
             id="reclassify_job",
             replace_existing=True,
@@ -95,7 +107,8 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     scheduler.shutdown()
-    logger.info("Scheduler shutdown.")
+    job_queue.shutdown()
+    logger.info("Scheduler and JobQueue shutdown.")
 
 app = FastAPI(title="Email Classifier Microservice", lifespan=lifespan)
 
@@ -125,15 +138,6 @@ def get_api_key(api_key: str = Security(api_key_scheme)):
 
 # Job
 def classification_job(limit: int = 20):
-    if not job_lock.acquire(blocking=False):
-        logger.warning("Classification job already running. Skipping this execution.")
-        return {
-            "status": "skipped",
-            "reason": "Job already running",
-            "processed_count": 0,
-            "details": []
-        }
-
     logger.info("Starting classification job...")
     results = []
     client = None
@@ -214,7 +218,6 @@ def classification_job(limit: int = 20):
     finally:
         if client:
             client.disconnect()
-        job_lock.release()
 
 def shutdown_server():
     """
@@ -328,10 +331,6 @@ def reclassify_job(limit: int = 100):
     """
     Background job to re-classify existing logs.
     """
-    if not job_lock.acquire(blocking=False):
-        logger.warning("Job already running. Skipping re-classification.")
-        return {"status": "skipped", "reason": "Job already running"}
-
     client = None
     updated_count = 0
     errors = 0
@@ -440,7 +439,6 @@ def reclassify_job(limit: int = 100):
     finally:
         if client:
             client.disconnect()
-        job_lock.release()
 
 def _resolve_correction(trained_found, is_verified, current_local):
     """
@@ -504,10 +502,6 @@ def check_corrections_job(limit: int = 200):
     Background job to check for label corrections from the server (IMAP).
     Checks emails based on a gliding scale of age.
     """
-    if not job_lock.acquire(blocking=False):
-        logger.warning("Job already running. Skipping check_corrections_job.")
-        return
-
     client = None
     try:
         logger.info("Starting check_corrections_job...")
@@ -608,7 +602,6 @@ def check_corrections_job(limit: int = 200):
     finally:
         if client:
             client.disconnect()
-        job_lock.release()
 
 def force_check_corrections_job():
     """
@@ -622,10 +615,6 @@ def force_check_corrections_job():
     of regular scheduled operation — use check_corrections_job instead.
     """
     BATCH_SIZE = 200
-
-    if not job_lock.acquire(blocking=False):
-        logger.warning("Job already running. Skipping force_check_corrections_job.")
-        return
 
     client = None
     try:
@@ -773,7 +762,6 @@ def force_check_corrections_job():
     finally:
         if client:
             client.disconnect()
-        job_lock.release()
 
 def backfill_training_data_job():
     """
@@ -829,35 +817,20 @@ class AckRequest(BaseModel):
 
 class RunResponse(BaseModel):
     status: str
-    processed_count: int
-    details: List[dict]
+    message: str
 
 # Endpoints
 @app.post("/run", response_model=RunResponse, dependencies=[Depends(get_api_key)])
-def run_classification(background_tasks: BackgroundTasks, limit: int = Query(20, description="Limit the number of emails to process")):
+def run_classification(limit: int = Query(20, description="Limit the number of emails to process")):
     """
     Manually trigger the classification job immediately.
     Optionally limit the number of emails processed (default: 20).
-    Returns 'skipped' status if a job is already in progress.
     """
-    # classification_job returns a list if successful, or a dict if skipped/error structure logic changes
-    # We need to adapt the return type handling since classification_job now might return a dict for 'skipped'
-
-    output = classification_job(limit=limit)
-
-    if isinstance(output, dict) and output.get("status") == "skipped":
-        return {
-            "status": "skipped",
-            "processed_count": 0,
-            "details": []
-        }
-
-    # If output is list (results), it was successful
-    return {
-        "status": "success",
-        "processed_count": len(output),
-        "details": output
-    }
+    accepted = job_queue.enqueue("classification", classification_job, limit=limit)
+    if accepted:
+        return {"status": "accepted", "message": "Classification job queued."}
+    else:
+        return {"status": "already_queued", "message": "Classification job is already running or queued."}
 
 @app.get("/stats", response_model=StatsResponse, dependencies=[Depends(get_api_key)])
 def get_stats(
@@ -986,46 +959,52 @@ def trigger_push_training_data():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/reclassify", dependencies=[Depends(get_api_key)])
-def trigger_reclassify(background_tasks: BackgroundTasks, limit: int = Query(100, description="Limit emails to re-check")):
+def trigger_reclassify(limit: int = Query(100, description="Limit emails to re-check")):
     """
     Trigger the re-classification process for existing logs.
     """
-    # Run in background to avoid timeout
-    background_tasks.add_task(reclassify_job, limit=limit)
-    return {"status": "accepted", "message": "Re-classification started in background."}
+    accepted = job_queue.enqueue("reclassify", reclassify_job, limit=limit)
+    if accepted:
+        return {"status": "accepted", "message": "Re-classification queued."}
+    return {"status": "already_queued", "message": "Job already queued or running."}
 
 @app.post("/admin/check-corrections", dependencies=[Depends(get_api_key)])
-def trigger_check_corrections(background_tasks: BackgroundTasks):
+def trigger_check_corrections():
     """
     Trigger the check corrections process for existing logs.
     """
-    # Run in background to avoid timeout
-    background_tasks.add_task(check_corrections_job)
-    return {"status": "accepted", "message": "Check corrections started in background."}
+    accepted = job_queue.enqueue("recheck", check_corrections_job)
+    if accepted:
+        return {"status": "accepted", "message": "Check corrections queued."}
+    return {"status": "already_queued", "message": "Job already queued or running."}
 
 # WARNING: This endpoint is expensive and should ONLY be used when you have
 # manually re-labelled emails in Gmail and need to pick up those corrections
 # immediately (e.g. to update training data before a model retrain).
 # Do NOT use this for regular periodic checks — use /admin/check-corrections instead.
 @app.post("/admin/force-check-corrections", dependencies=[Depends(get_api_key)])
-def trigger_force_check_corrections(background_tasks: BackgroundTasks):
+def trigger_force_check_corrections():
     """
     Force re-check ALL emails for label corrections, bypassing the gliding
     scale schedule. Use this after manually re-labelling emails in Gmail to
     update training data.
     """
-    background_tasks.add_task(force_check_corrections_job)
-    return {"status": "accepted", "message": "Force check corrections started in background."}
+    accepted = job_queue.enqueue("force_recheck", force_check_corrections_job)
+    if accepted:
+        return {"status": "accepted", "message": "Force check corrections queued."}
+    return {"status": "already_queued", "message": "Job already queued or running."}
 
 @app.post("/admin/backfill-training-data", dependencies=[Depends(get_api_key)])
-def trigger_backfill_training_data(background_tasks: BackgroundTasks):
+def trigger_backfill_training_data():
     """
     Rebuild training data files from all corrected entries in the database.
     Use this to recover training data if the training data directory was
     accidentally emptied or lost.
     """
-    background_tasks.add_task(backfill_training_data_job)
-    return {"status": "accepted", "message": "Backfill training data started in background."}
+    accepted = job_queue.enqueue("backfill", backfill_training_data_job)
+    if accepted:
+        return {"status": "accepted", "message": "Backfill training data queued."}
+    return {"status": "already_queued", "message": "Job already queued or running."}
 
 @app.post("/admin/trigger-update", dependencies=[Depends(get_api_key)])
 def trigger_update(background_tasks: BackgroundTasks):
