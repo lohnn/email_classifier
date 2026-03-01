@@ -1,8 +1,9 @@
+import datetime
+import os
 import pytest
+import sys
 import threading
 import time
-import os
-import sys
 
 # Add the brain directory to sys.path to resolve imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -138,8 +139,6 @@ def test_status_idle(queue):
 
 def test_status_queued(queue):
     """Enqueued-but-not-yet-started jobs appear in queued list."""
-    import datetime
-
     # Stop the worker so jobs don't get picked up immediately
     queue._stop.set()
     queue._has_work.set()
@@ -160,8 +159,6 @@ def test_status_queued(queue):
 
 def test_status_running(queue):
     """The currently running job appears in status['running'] with started_at set."""
-    import datetime
-
     evt_started = threading.Event()
     evt_finish = threading.Event()
 

@@ -106,15 +106,19 @@ class JobQueue:
             # the loop will terminate after this drain.
             self._drain()
 
+    def _reset_running_status(self) -> None:
+        """Clear the running job's state. Must be called while holding ``_lock``."""
+        self._running = None
+        self._running_enqueued_at = None
+        self._running_started_at = None
+
     def _drain(self) -> None:
         """Process all queued jobs. Protected internally by the same lock."""
         while True:
             with self._lock:
                 if not self._queue:
                     self._has_work.clear()
-                    self._running = None
-                    self._running_enqueued_at = None
-                    self._running_started_at = None
+                    self._reset_running_status()
                     return
                 # Pop the oldest job
                 name, (fn, args, kwargs, enqueued_at) = self._queue.popitem(last=False)
@@ -128,6 +132,4 @@ class JobQueue:
                 logger.exception(f"Job '{name}' failed with an exception.")
             finally:
                 with self._lock:
-                    self._running = None
-                    self._running_enqueued_at = None
-                    self._running_started_at = None
+                    self._reset_running_status()

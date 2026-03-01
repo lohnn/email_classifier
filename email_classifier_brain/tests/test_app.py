@@ -298,8 +298,6 @@ def test_jobs_status_requires_auth(client):
 
 def test_jobs_status_with_queued_job(client):
     """After enqueuing a job (worker stopped), it appears in the queued list."""
-    import datetime
-
     def noop():
         pass
 
@@ -315,7 +313,7 @@ def test_jobs_status_with_queued_job(client):
         assert entry["enqueued_at"] is not None
         assert entry["started_at"] is None
         # enqueued_at should be a valid ISO 8601 timestamp
-        datetime.datetime.fromisoformat(entry["enqueued_at"])
+        datetime.fromisoformat(entry["enqueued_at"])
     finally:
         with job_queue._lock:
             job_queue._queue.clear()
