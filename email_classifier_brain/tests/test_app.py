@@ -201,3 +201,78 @@ def test_get_labels(client, mock_classify):
     response = client.get("/labels", headers={"X-API-Key": "testkey"})
     assert response.status_code == 200
     assert response.json() == expected_labels
+
+
+# --- Health check tests ---
+
+def test_health_model_not_loaded(client):
+    """TESTING=true sets classify._model = None, so the health check reports model not_loaded → 503."""
+    response = client.get("/health")
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["checks"]["model"]["status"] == "not_loaded"
+    assert data["checks"]["database"]["status"] == "ok"
+
+
+def test_health_ok_when_model_loaded(client):
+    """When model is loaded and DB is accessible the endpoint returns 200 ok."""
+    with patch("classify._model", new=MagicMock()):
+        response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["checks"]["database"]["status"] == "ok"
+    assert data["checks"]["model"]["status"] == "ok"
+    assert "imap" not in data["checks"]
+
+
+def test_health_db_error(client):
+    """A DB failure marks the check as error and returns 503."""
+    with patch("classify._model", new=MagicMock()):
+        with patch("database.get_db_connection", side_effect=Exception("db unavailable")):
+            response = client.get("/health")
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["checks"]["database"]["status"] == "error"
+    assert "db unavailable" in data["checks"]["database"]["detail"]
+
+
+def test_health_imap_not_configured(client):
+    """When check_imap=true but no IMAP credentials are set, reports not_configured."""
+    with patch("classify._model", new=MagicMock()):
+        with patch.dict(os.environ, {}, clear=False):
+            # Ensure IMAP env vars are absent
+            os.environ.pop("IMAP_USER", None)
+            os.environ.pop("IMAP_PASSWORD", None)
+            os.environ.pop("MY_EMAIL", None)
+            response = client.get("/health?check_imap=true")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["checks"]["imap"]["status"] == "not_configured"
+
+
+def test_health_imap_ok(client, mock_imap_client):
+    """When check_imap=true and IMAP connects successfully, reports ok."""
+    with patch("classify._model", new=MagicMock()):
+        with patch.dict(os.environ, {"IMAP_USER": "user@example.com", "IMAP_PASSWORD": "secret"}):
+            response = client.get("/health?check_imap=true")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["checks"]["imap"]["status"] == "ok"
+
+
+def test_health_imap_error_is_degraded(client, mock_imap_client):
+    """An IMAP failure results in degraded (HTTP 200) not a hard error."""
+    mock_imap_client.return_value.connect.side_effect = Exception("IMAP unreachable")
+    with patch("classify._model", new=MagicMock()):
+        with patch.dict(os.environ, {"IMAP_USER": "user@example.com", "IMAP_PASSWORD": "secret"}):
+            response = client.get("/health?check_imap=true")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "degraded"
+    assert data["checks"]["imap"]["status"] == "error"
+    assert "IMAP unreachable" in data["checks"]["imap"]["detail"]
