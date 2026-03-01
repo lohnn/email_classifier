@@ -896,16 +896,25 @@ def get_ambiguous_logs():
     return database.get_ambiguous_logs()
 
 @app.get("/health")
-def health_check(check_imap: bool = Query(False, description="Also verify IMAP connectivity")):
+def health_check(
+    check_imap: bool = Query(False, description="Also verify IMAP connectivity (requires X-API-Key)"),
+    api_key: str = Security(api_key_scheme),
+):
     """
     Health check endpoint.
 
     Always verifies DB connectivity and model load state.
-    Pass ?check_imap=true to also probe IMAP reachability.
+    Pass ?check_imap=true to also probe IMAP reachability (requires X-API-Key header).
 
     Returns HTTP 200 when healthy or degraded (optional IMAP failure only).
     Returns HTTP 503 when a critical component (DB or model) is unavailable.
     """
+    # IMAP check is gated behind authentication to prevent unauthenticated DoS
+    if check_imap:
+        expected_key = os.getenv("ADMIN_API_KEY")
+        if not expected_key or api_key != expected_key:
+            raise HTTPException(status_code=401, detail="X-API-Key required to use check_imap")
+
     checks: dict = {}
     critical_ok = True
     degraded = False
@@ -917,7 +926,8 @@ def health_check(check_imap: bool = Query(False, description="Also verify IMAP c
         conn.close()
         checks["database"] = {"status": "ok"}
     except Exception as e:
-        checks["database"] = {"status": "error", "detail": str(e)}
+        logger.error(f"Health check DB error: {e}")
+        checks["database"] = {"status": "error", "detail": "Database connectivity error"}
         critical_ok = False
 
     # --- Model loaded state ---
@@ -927,23 +937,23 @@ def health_check(check_imap: bool = Query(False, description="Also verify IMAP c
         checks["model"] = {"status": "not_loaded"}
         critical_ok = False
 
-    # --- IMAP reachability (optional) ---
+    # --- IMAP reachability (optional, authenticated) ---
     if check_imap:
-        imap_user = os.getenv("IMAP_USER") or (os.getenv("MY_EMAIL") or "").split(",")[0].strip()
-        if not imap_user or not os.getenv("IMAP_PASSWORD"):
+        client = None
+        try:
+            client = imap_client.GmailClient()
+            client.connect()
+            checks["imap"] = {"status": "ok"}
+        except ValueError:
+            # GmailClient.connect() raises ValueError when credentials are not configured
             checks["imap"] = {"status": "not_configured"}
-        else:
-            client = None
-            try:
-                client = imap_client.GmailClient()
-                client.connect()
-                checks["imap"] = {"status": "ok"}
-            except Exception as e:
-                checks["imap"] = {"status": "error", "detail": str(e)}
-                degraded = True
-            finally:
-                if client:
-                    client.disconnect()
+        except Exception as e:
+            logger.error(f"Health check IMAP error: {e}")
+            checks["imap"] = {"status": "error", "detail": "IMAP connectivity error"}
+            degraded = True
+        finally:
+            if client:
+                client.disconnect()
 
     if not critical_ok:
         overall = "error"
