@@ -10,6 +10,7 @@ from pathlib import Path
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Depends, Security
+from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -895,11 +896,76 @@ def get_ambiguous_logs():
     return database.get_ambiguous_logs()
 
 @app.get("/health")
-def health_check():
+def health_check(
+    check_imap: bool = Query(False, description="Also verify IMAP connectivity (requires X-API-Key)"),
+    api_key: str = Security(api_key_scheme),
+):
     """
-    Simple health check endpoint.
+    Health check endpoint.
+
+    Always verifies DB connectivity and model load state.
+    Pass ?check_imap=true to also probe IMAP reachability (requires X-API-Key header).
+
+    Returns HTTP 200 when healthy or degraded (optional IMAP failure only).
+    Returns HTTP 503 when a critical component (DB or model) is unavailable.
     """
-    return {"status": "ok"}
+    # IMAP check is gated behind authentication to prevent unauthenticated DoS
+    if check_imap:
+        expected_key = os.getenv("ADMIN_API_KEY")
+        if not expected_key or api_key != expected_key:
+            raise HTTPException(status_code=401, detail="X-API-Key required to use check_imap")
+
+    checks: dict = {}
+    critical_ok = True
+    degraded = False
+
+    # --- DB connectivity ---
+    try:
+        conn = database.get_db_connection()
+        conn.execute("SELECT 1")
+        conn.close()
+        checks["database"] = {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Health check DB error: {e}")
+        checks["database"] = {"status": "error", "detail": "Database connectivity error"}
+        critical_ok = False
+
+    # --- Model loaded state ---
+    if classify._model is not None:
+        checks["model"] = {"status": "ok"}
+    else:
+        checks["model"] = {"status": "not_loaded"}
+        critical_ok = False
+
+    # --- IMAP reachability (optional, authenticated) ---
+    if check_imap:
+        client = None
+        try:
+            client = imap_client.GmailClient()
+            client.connect()
+            checks["imap"] = {"status": "ok"}
+        except ValueError:
+            # GmailClient.connect() raises ValueError when credentials are not configured
+            checks["imap"] = {"status": "not_configured"}
+        except Exception as e:
+            logger.error(f"Health check IMAP error: {e}")
+            checks["imap"] = {"status": "error", "detail": "IMAP connectivity error"}
+            degraded = True
+        finally:
+            if client:
+                client.disconnect()
+
+    if not critical_ok:
+        overall = "error"
+        http_status = 503
+    elif degraded:
+        overall = "degraded"
+        http_status = 200
+    else:
+        overall = "ok"
+        http_status = 200
+
+    return JSONResponse(status_code=http_status, content={"status": overall, "checks": checks})
 
 @app.post("/logs/{log_id}/correction", dependencies=[Depends(get_api_key)])
 def correct_label(log_id: str, req: CorrectionRequest):

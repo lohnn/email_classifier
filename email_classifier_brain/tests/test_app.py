@@ -201,3 +201,81 @@ def test_get_labels(client, mock_classify):
     response = client.get("/labels", headers={"X-API-Key": "testkey"})
     assert response.status_code == 200
     assert response.json() == expected_labels
+
+
+# --- Health check tests ---
+
+def test_health_model_not_loaded(client):
+    """TESTING=true sets classify._model = None, so the health check reports model not_loaded → 503."""
+    response = client.get("/health")
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["checks"]["model"]["status"] == "not_loaded"
+    assert data["checks"]["database"]["status"] == "ok"
+
+
+def test_health_ok_when_model_loaded(client):
+    """When model is loaded and DB is accessible the endpoint returns 200 ok."""
+    with patch("classify._model", new=MagicMock()):
+        response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["checks"]["database"]["status"] == "ok"
+    assert data["checks"]["model"]["status"] == "ok"
+    assert "imap" not in data["checks"]
+
+
+def test_health_db_error(client):
+    """A DB failure marks the check as error and returns 503 with a generic message."""
+    with patch("classify._model", new=MagicMock()):
+        with patch("database.get_db_connection", side_effect=Exception("db unavailable")):
+            response = client.get("/health")
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["checks"]["database"]["status"] == "error"
+    # Generic message — raw exception detail must not be exposed
+    assert data["checks"]["database"]["detail"] == "Database connectivity error"
+
+
+def test_health_imap_requires_auth(client):
+    """check_imap=true without a valid API key returns 401."""
+    with patch("classify._model", new=MagicMock()):
+        response = client.get("/health?check_imap=true")
+    assert response.status_code == 401
+
+
+def test_health_imap_not_configured(client, mock_imap_client):
+    """When check_imap=true but no IMAP credentials are set, reports not_configured."""
+    mock_imap_client.return_value.connect.side_effect = ValueError("IMAP_USER (or MY_EMAIL) and IMAP_PASSWORD must be set in .env")
+    with patch("classify._model", new=MagicMock()):
+        response = client.get("/health?check_imap=true", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["checks"]["imap"]["status"] == "not_configured"
+
+
+def test_health_imap_ok(client, mock_imap_client):
+    """When check_imap=true and IMAP connects successfully, reports ok."""
+    with patch("classify._model", new=MagicMock()):
+        response = client.get("/health?check_imap=true", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["checks"]["imap"]["status"] == "ok"
+
+
+def test_health_imap_error_is_degraded(client, mock_imap_client):
+    """An IMAP failure results in degraded (HTTP 200) with a generic error message."""
+    mock_imap_client.return_value.connect.side_effect = Exception("IMAP unreachable")
+    with patch("classify._model", new=MagicMock()):
+        response = client.get("/health?check_imap=true", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "degraded"
+    assert data["checks"]["imap"]["status"] == "error"
+    # Generic message — raw exception detail must not be exposed
+    assert data["checks"]["imap"]["detail"] == "IMAP connectivity error"
