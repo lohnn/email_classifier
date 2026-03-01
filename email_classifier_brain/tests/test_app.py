@@ -140,6 +140,51 @@ def test_run_concurrently(client):
         with job_queue._lock:
             job_queue._running = None
 
+def test_cancel_idle(client):
+    """POST /jobs/cancel on an idle queue returns status 'idle'."""
+    response = client.post("/jobs/cancel", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "idle"
+    assert data["cancelled_job"] is None
+    assert data["cleared_queue"] == []
+
+def test_cancel_clears_pending_jobs(client):
+    """POST /jobs/cancel removes queued-but-not-started jobs."""
+    # Enqueue a couple of jobs without running them (worker is stopped by autouse fixture)
+    job_queue.enqueue("job_a", lambda: None)
+    job_queue.enqueue("job_b", lambda: None)
+
+    response = client.post("/jobs/cancel", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "cleared"
+    assert data["cancelled_job"] is None
+    assert set(data["cleared_queue"]) == {"job_a", "job_b"}
+    assert len(job_queue._queue) == 0
+
+def test_cancel_signals_running_job(client):
+    """POST /jobs/cancel returns 'cancelling' when a job is in progress."""
+    with job_queue._lock:
+        job_queue._running = "reclassify"
+
+    try:
+        response = client.post("/jobs/cancel", headers={"X-API-Key": "testkey"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "cancelling"
+        assert data["cancelled_job"] == "reclassify"
+        assert data["cleared_queue"] == []
+    finally:
+        job_queue._cancel.clear()
+        with job_queue._lock:
+            job_queue._running = None
+
+def test_cancel_requires_api_key(client):
+    """POST /jobs/cancel is protected by the API key."""
+    response = client.post("/jobs/cancel")
+    assert response.status_code == 403
+
 def test_pop_notifications(client, mock_imap_client, mock_classify):
 
     mock_instance = mock_imap_client.return_value
