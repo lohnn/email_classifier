@@ -817,6 +817,15 @@ class RunResponse(BaseModel):
     status: str
     message: str
 
+class JobStatusEntry(BaseModel):
+    name: str
+    enqueued_at: Optional[str]
+    started_at: Optional[str]
+
+class JobStatusResponse(BaseModel):
+    running: Optional[JobStatusEntry]
+    queued: List[JobStatusEntry]
+
 # Endpoints
 @app.post("/run", response_model=RunResponse, dependencies=[Depends(get_api_key)])
 def run_classification(limit: int = Query(20, description="Limit the number of emails to process")):
@@ -829,6 +838,17 @@ def run_classification(limit: int = Query(20, description="Limit the number of e
         return {"status": "accepted", "message": "Classification job queued."}
     else:
         return {"status": "already_queued", "message": "Classification job is already running or queued."}
+
+@app.get("/jobs/status", response_model=JobStatusResponse, dependencies=[Depends(get_api_key)])
+def get_jobs_status():
+    """
+    Return the current job queue state: what is running and what is waiting.
+
+    Each entry includes ``name``, ``enqueued_at``, and ``started_at`` (ISO 8601 UTC).
+    ``started_at`` is only set for the currently running job.
+    """
+    snapshot = job_queue.status()
+    return snapshot
 
 @app.get("/stats", response_model=StatsResponse, dependencies=[Depends(get_api_key)])
 def get_stats(
