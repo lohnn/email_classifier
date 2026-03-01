@@ -138,10 +138,13 @@ def get_api_key(api_key: str = Security(api_key_scheme)):
     return api_key
 
 # Job
-def classification_job(limit: int = 20):
+def classification_job(limit: int = 20, trigger: str = "scheduled"):
     logger.info("Starting classification job...")
+    run_id = database.start_job_run("classification", trigger)
     results = []
     client = None
+    emails_processed = 0
+    error_count = 0
     try:
         # Connect to IMAP
         client = imap_client.GmailClient()
@@ -152,6 +155,7 @@ def classification_job(limit: int = 20):
         # Fetch emails, stopping early once we have enough
         emails = client.fetch_unprocessed_emails(known_labels, limit=limit)
         logger.info(f"Fetched {len(emails)} unprocessed emails (limit={limit}).")
+        emails_processed = len(emails)
 
         for e_id, msg in emails:
             try:
@@ -209,12 +213,15 @@ def classification_job(limit: int = 20):
                 })
             except Exception as e_inner:
                 logger.error(f"Error processing email {e_id}: {e_inner}")
+                error_count += 1
 
         logger.info("Classification job finished.")
+        database.finish_job_run(run_id, "success", emails_processed=emails_processed, emails_updated=len(results), error_count=error_count)
         return results
 
     except Exception as e:
         logger.error(f"Error in classification job: {e}")
+        database.finish_job_run(run_id, "error", emails_processed=emails_processed, error_count=error_count, error_message=str(e))
         return []
     finally:
         if client:
@@ -228,17 +235,20 @@ def shutdown_server():
     time.sleep(2)
     os.kill(os.getpid(), signal.SIGTERM)
 
-def scheduled_update_job():
+def scheduled_update_job(trigger: str = "scheduled"):
     """
     Scheduled job to trigger the daily update.
     """
     logger.info("Scheduled update job triggering...")
+    run_id = database.start_job_run("auto_update", trigger)
     try:
         push_training_data_to_git()
         Path(".update_request").touch()
+        database.finish_job_run(run_id, "success")
         shutdown_server()
     except Exception as e:
         logger.error(f"Error in scheduled update job: {e}")
+        database.finish_job_run(run_id, "error", error_message=str(e))
 
 def add_to_training_data(log_entry: dict, corrected_category: str):
     """
@@ -328,14 +338,15 @@ def push_training_data_to_git():
     except Exception as e:
         logger.error(f"Unexpected error while pushing training data: {e}")
 
-def reclassify_job(limit: int = 100):
+def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
     """
     Background job to re-classify existing logs.
     """
     client = None
     updated_count = 0
     errors = 0
-    
+    run_id = database.start_job_run("reclassify", trigger)
+
     try:
         logger.info("Starting re-classification job...")
         logs = database.get_logs_for_reclassification(limit=limit)
@@ -427,15 +438,17 @@ def reclassify_job(limit: int = 100):
                 errors += 1
 
         logger.info(f"Re-classification finished. Updated {updated_count} emails.")
+        database.finish_job_run(run_id, "success", emails_processed=len(logs), emails_updated=updated_count, error_count=errors)
         return {
-            "status": "success", 
-            "processed": len(logs), 
+            "status": "success",
+            "processed": len(logs),
             "updated": updated_count,
             "errors": errors
         }
 
     except Exception as e:
         logger.error(f"Error in re-classification job: {e}")
+        database.finish_job_run(run_id, "error", error_message=str(e))
         return {"status": "error", "message": str(e)}
     finally:
         if client:
@@ -498,12 +511,13 @@ def _resolve_correction(trained_found, is_verified, current_local):
         "verified_candidate": verified_candidate,
     }
 
-def check_corrections_job(limit: int = 200):
+def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
     """
     Background job to check for label corrections from the server (IMAP).
     Checks emails based on a gliding scale of age.
     """
     client = None
+    run_id = database.start_job_run("recheck", trigger)
     try:
         logger.info("Starting check_corrections_job...")
 
@@ -511,6 +525,7 @@ def check_corrections_job(limit: int = 200):
         candidates = database.get_candidate_logs_for_recheck(limit)
         if not candidates:
             logger.info("No candidates for re-check.")
+            database.finish_job_run(run_id, "success", emails_processed=0, emails_updated=0)
             return
 
         logger.info(f"Checking {len(candidates)} emails for external corrections...")
@@ -597,14 +612,16 @@ def check_corrections_job(limit: int = 200):
                 database.update_recheck_status(gid, ambiguous_labels=None)
 
         logger.info(f"Re-check finished. Updates: {updates_count}, Ambiguous: {ambiguous_count}")
+        database.finish_job_run(run_id, "success", emails_processed=len(candidates), emails_updated=updates_count)
 
     except Exception as e:
         logger.error(f"Error in check_corrections_job: {e}")
+        database.finish_job_run(run_id, "error", error_message=str(e))
     finally:
         if client:
             client.disconnect()
 
-def force_check_corrections_job():
+def force_check_corrections_job(trigger: str = "scheduled"):
     """
     Force re-check ALL emails for label corrections, bypassing the gliding
     scale schedule. Also imports any labeled emails from IMAP that are
@@ -618,6 +635,9 @@ def force_check_corrections_job():
     BATCH_SIZE = 200
 
     client = None
+    run_id = database.start_job_run("force_recheck", trigger)
+    total_processed = 0
+    import_count = 0
     try:
         logger.info("Starting force_check_corrections_job (bypassing schedule)...")
 
@@ -696,6 +716,7 @@ def force_check_corrections_job():
                 break
 
             batch_num += 1
+            total_processed += len(batch)
             logger.info(f"Phase 1: Processing batch {batch_num} ({len(batch)} emails)...")
 
             batch_ids = [c['id'] for c in batch]
@@ -754,14 +775,16 @@ def force_check_corrections_job():
             logger.info(f"Batch {batch_num} done. Running totals — Updates: {updates_count}, Ambiguous: {ambiguous_count}")
 
         logger.info(f"Force re-check finished. Total updates: {updates_count}, Total ambiguous: {ambiguous_count}")
+        database.finish_job_run(run_id, "success", emails_processed=import_count + total_processed, emails_updated=import_count + updates_count)
 
     except Exception as e:
         logger.error(f"Error in force_check_corrections_job: {e}")
+        database.finish_job_run(run_id, "error", emails_processed=import_count + total_processed, error_message=str(e))
     finally:
         if client:
             client.disconnect()
 
-def backfill_training_data_job():
+def backfill_training_data_job(trigger: str = "scheduled"):
     """
     Rebuild training data files from all corrected entries in the database.
     Use this to recover training data if the training data directory was
@@ -771,10 +794,12 @@ def backfill_training_data_job():
     if some entries already exist. The training pipeline should handle dedup.
     """
     logger.info("Starting backfill_training_data_job...")
+    run_id = database.start_job_run("backfill", trigger)
 
     corrected_logs = database.get_all_corrected_logs()
     if not corrected_logs:
         logger.info("No corrected logs found in database. Nothing to backfill.")
+        database.finish_job_run(run_id, "success", emails_processed=0, emails_updated=0)
         return
 
     logger.info(f"Backfilling training data from {len(corrected_logs)} corrected entries...")
@@ -791,6 +816,7 @@ def backfill_training_data_job():
             error_count += 1
 
     logger.info(f"Backfill finished. Success: {success_count}, Errors: {error_count}")
+    database.finish_job_run(run_id, "success", emails_processed=len(corrected_logs), emails_updated=success_count, error_count=error_count)
 
 
 # Models
@@ -826,6 +852,19 @@ class JobStatusResponse(BaseModel):
     running: Optional[JobStatusEntry]
     queued: List[JobStatusEntry]
 
+class JobRunEntry(BaseModel):
+    id: int
+    job_name: str
+    trigger: str
+    started_at: str
+    finished_at: Optional[str]
+    duration_seconds: Optional[float]
+    status: str
+    emails_processed: Optional[int]
+    emails_updated: Optional[int]
+    error_count: int
+    error_message: Optional[str]
+
 # Endpoints
 @app.post("/run", response_model=RunResponse, dependencies=[Depends(get_api_key)])
 def run_classification(limit: int = Query(20, description="Limit the number of emails to process")):
@@ -833,7 +872,7 @@ def run_classification(limit: int = Query(20, description="Limit the number of e
     Manually trigger the classification job immediately.
     Optionally limit the number of emails processed (default: 20).
     """
-    accepted = job_queue.enqueue("classification", classification_job, limit=limit)
+    accepted = job_queue.enqueue("classification", classification_job, limit=limit, trigger="manual")
     if accepted:
         return {"status": "accepted", "message": "Classification job queued."}
     else:
@@ -849,6 +888,20 @@ def get_jobs_status():
     """
     snapshot = job_queue.status()
     return snapshot
+
+@app.get("/jobs/history", response_model=List[JobRunEntry], dependencies=[Depends(get_api_key)])
+def get_jobs_history(
+    limit: int = Query(50, description="Maximum number of records to return"),
+    job_name: Optional[str] = Query(None, description="Filter by job name (e.g. 'classification', 'recheck')")
+):
+    """
+    Return per-run metadata for completed and in-progress jobs.
+
+    Fields: ``job_name``, ``trigger`` (scheduled/manual), ``started_at``,
+    ``finished_at``, ``duration_seconds``, ``status``, ``emails_processed``,
+    ``emails_updated``, ``error_count``, ``error_message``.
+    """
+    return database.get_job_runs(limit=limit, job_name=job_name)
 
 @app.get("/stats", response_model=StatsResponse, dependencies=[Depends(get_api_key)])
 def get_stats(
@@ -1046,7 +1099,7 @@ def trigger_reclassify(limit: int = Query(100, description="Limit emails to re-c
     """
     Trigger the re-classification process for existing logs.
     """
-    accepted = job_queue.enqueue("reclassify", reclassify_job, limit=limit)
+    accepted = job_queue.enqueue("reclassify", reclassify_job, limit=limit, trigger="manual")
     if accepted:
         return {"status": "accepted", "message": "Re-classification queued."}
     return {"status": "already_queued", "message": "Job already queued or running."}
@@ -1056,7 +1109,7 @@ def trigger_check_corrections():
     """
     Trigger the check corrections process for existing logs.
     """
-    accepted = job_queue.enqueue("recheck", check_corrections_job)
+    accepted = job_queue.enqueue("recheck", check_corrections_job, trigger="manual")
     if accepted:
         return {"status": "accepted", "message": "Check corrections queued."}
     return {"status": "already_queued", "message": "Job already queued or running."}
@@ -1072,7 +1125,7 @@ def trigger_force_check_corrections():
     scale schedule. Use this after manually re-labelling emails in Gmail to
     update training data.
     """
-    accepted = job_queue.enqueue("force_recheck", force_check_corrections_job)
+    accepted = job_queue.enqueue("force_recheck", force_check_corrections_job, trigger="manual")
     if accepted:
         return {"status": "accepted", "message": "Force check corrections queued."}
     return {"status": "already_queued", "message": "Job already queued or running."}
@@ -1084,7 +1137,7 @@ def trigger_backfill_training_data():
     Use this to recover training data if the training data directory was
     accidentally emptied or lost.
     """
-    accepted = job_queue.enqueue("backfill", backfill_training_data_job)
+    accepted = job_queue.enqueue("backfill", backfill_training_data_job, trigger="manual")
     if accepted:
         return {"status": "accepted", "message": "Backfill training data queued."}
     return {"status": "already_queued", "message": "Job already queued or running."}
