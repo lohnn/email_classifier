@@ -205,12 +205,14 @@ def test_cancel_signals_running_job(queue):
     """cancel() sets the cancellation flag while a job is running."""
     evt_started = threading.Event()
     evt_finish = threading.Event()
+    evt_job_finished = threading.Event()
     cancel_seen = []
 
     def slow_job():
         evt_started.set()
         evt_finish.wait()
         cancel_seen.append(queue.is_cancelled())
+        evt_job_finished.set()
 
     queue.enqueue("slow", slow_job)
     evt_started.wait(timeout=2)
@@ -220,7 +222,7 @@ def test_cancel_signals_running_job(queue):
     assert queue.is_cancelled() is True
 
     evt_finish.set()
-    time.sleep(0.1)
+    assert evt_job_finished.wait(timeout=2), "Job did not finish in time"
     queue._drain()
 
     assert cancel_seen == [True]
@@ -232,10 +234,12 @@ def test_cancel_resets_flag_after_job(queue):
     """The cancel flag is cleared once the cancelled job finishes."""
     evt_started = threading.Event()
     evt_finish = threading.Event()
+    evt_job_finished = threading.Event()
 
     def slow_job():
         evt_started.set()
         evt_finish.wait()
+        evt_job_finished.set()
 
     queue.enqueue("slow", slow_job)
     evt_started.wait(timeout=2)
@@ -243,7 +247,7 @@ def test_cancel_resets_flag_after_job(queue):
     assert queue.is_cancelled() is True
 
     evt_finish.set()
-    time.sleep(0.1)
+    assert evt_job_finished.wait(timeout=2), "Job did not finish in time"
     queue._drain()
 
     assert queue.is_cancelled() is False

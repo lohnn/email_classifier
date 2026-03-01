@@ -5,7 +5,7 @@ import json
 import time
 import datetime
 import subprocess
-from typing import List, Optional, Any, Dict
+from typing import List, Literal, Optional, Any, Dict
 from pathlib import Path
 
 from contextlib import asynccontextmanager
@@ -157,9 +157,11 @@ def classification_job(limit: int = 20, trigger: str = "scheduled"):
         logger.info(f"Fetched {len(emails)} unprocessed emails (limit={limit}).")
         emails_processed = len(emails)
 
+        was_cancelled = False
         for e_id, msg in emails:
             if job_queue.is_cancelled():
                 logger.info("Classification job cancelled.")
+                was_cancelled = True
                 break
             try:
                 # Extract full info
@@ -219,7 +221,7 @@ def classification_job(limit: int = 20, trigger: str = "scheduled"):
                 error_count += 1
 
         logger.info("Classification job finished.")
-        final_status = "cancelled" if job_queue.is_cancelled() else "success"
+        final_status = "cancelled" if was_cancelled else "success"
         database.finish_job_run(run_id, final_status, emails_processed=emails_processed, emails_updated=len(results), error_count=error_count)
         return results
 
@@ -359,9 +361,11 @@ def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
         # Connect to IMAP
         client = imap_client.GmailClient()
 
+        was_cancelled = False
         for log in logs:
             if job_queue.is_cancelled():
                 logger.info("Reclassify job cancelled.")
+                was_cancelled = True
                 break
             gmail_id = log['id']
             current_label = log['predicted_category']
@@ -446,7 +450,7 @@ def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
                 errors += 1
 
         logger.info(f"Re-classification finished. Updated {updated_count} emails.")
-        final_status = "cancelled" if job_queue.is_cancelled() else "success"
+        final_status = "cancelled" if was_cancelled else "success"
         database.finish_job_run(run_id, final_status, emails_processed=len(logs), emails_updated=updated_count, error_count=errors)
         return {
             "status": "success",
@@ -552,9 +556,11 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
         updates_count = 0
         ambiguous_count = 0
 
+        was_cancelled = False
         for log in candidates:
             if job_queue.is_cancelled():
                 logger.info("Check corrections job cancelled.")
+                was_cancelled = True
                 break
             gid = log['id']
             # If fetch failed or email deleted, we might not have it in map
@@ -626,7 +632,7 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
                 database.update_recheck_status(gid, ambiguous_labels=None)
 
         logger.info(f"Re-check finished. Updates: {updates_count}, Ambiguous: {ambiguous_count}")
-        final_status = "cancelled" if job_queue.is_cancelled() else "success"
+        final_status = "cancelled" if was_cancelled else "success"
         database.finish_job_run(run_id, final_status, emails_processed=len(candidates), emails_updated=updates_count)
 
     except Exception as e:
@@ -723,9 +729,11 @@ def force_check_corrections_job(trigger: str = "scheduled"):
         ambiguous_count = 0
         batch_num = 0
 
+        was_cancelled = False
         while True:
             if job_queue.is_cancelled():
                 logger.info("Force check corrections job cancelled.")
+                was_cancelled = True
                 break
             batch = database.get_all_logs_for_recheck(limit=BATCH_SIZE, offset=batch_num * BATCH_SIZE)
             if not batch:
@@ -793,7 +801,7 @@ def force_check_corrections_job(trigger: str = "scheduled"):
             logger.info(f"Batch {batch_num} done. Running totals — Updates: {updates_count}, Ambiguous: {ambiguous_count}")
 
         logger.info(f"Force re-check finished. Total updates: {updates_count}, Total ambiguous: {ambiguous_count}")
-        final_status = "cancelled" if job_queue.is_cancelled() else "success"
+        final_status = "cancelled" if was_cancelled else "success"
         database.finish_job_run(run_id, final_status, emails_processed=import_count + total_processed, emails_updated=import_count + updates_count)
 
     except Exception as e:
@@ -827,9 +835,11 @@ def backfill_training_data_job(trigger: str = "scheduled"):
         success_count = 0
         error_count = 0
 
+        was_cancelled = False
         for log in corrected_logs:
             if job_queue.is_cancelled():
                 logger.info("Backfill training data job cancelled.")
+                was_cancelled = True
                 break
             try:
                 add_to_training_data(log, log['corrected_category'])
@@ -839,7 +849,7 @@ def backfill_training_data_job(trigger: str = "scheduled"):
                 error_count += 1
 
         logger.info(f"Backfill finished. Success: {success_count}, Errors: {error_count}")
-        final_status = "cancelled" if job_queue.is_cancelled() else "success"
+        final_status = "cancelled" if was_cancelled else "success"
         database.finish_job_run(run_id, final_status, emails_processed=len(corrected_logs), emails_updated=success_count, error_count=error_count)
 
     except Exception as e:
@@ -881,7 +891,7 @@ class JobStatusResponse(BaseModel):
     queued: List[JobStatusEntry]
 
 class CancelResponse(BaseModel):
-    status: str  # "cancelling" | "cleared" | "idle"
+    status: Literal["cancelling", "cleared", "idle"]
     cancelled_job: Optional[str]
     cleared_queue: List[str]
 
