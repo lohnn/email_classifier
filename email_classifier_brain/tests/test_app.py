@@ -279,3 +279,43 @@ def test_health_imap_error_is_degraded(client, mock_imap_client):
     assert data["checks"]["imap"]["status"] == "error"
     # Generic message — raw exception detail must not be exposed
     assert data["checks"]["imap"]["detail"] == "IMAP connectivity error"
+
+
+def test_jobs_status_empty(client):
+    """When no jobs are running or queued, status returns nulls/empty list."""
+    response = client.get("/jobs/status", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["running"] is None
+    assert data["queued"] == []
+
+
+def test_jobs_status_requires_auth(client):
+    """GET /jobs/status is protected by API key."""
+    response = client.get("/jobs/status")
+    assert response.status_code == 403
+
+
+def test_jobs_status_with_queued_job(client):
+    """After enqueuing a job (worker stopped), it appears in the queued list."""
+    import datetime
+
+    def noop():
+        pass
+
+    job_queue.enqueue("test_job", noop)
+    try:
+        response = client.get("/jobs/status", headers={"X-API-Key": "testkey"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["running"] is None
+        assert len(data["queued"]) == 1
+        entry = data["queued"][0]
+        assert entry["name"] == "test_job"
+        assert entry["enqueued_at"] is not None
+        assert entry["started_at"] is None
+        # enqueued_at should be a valid ISO 8601 timestamp
+        datetime.datetime.fromisoformat(entry["enqueued_at"])
+    finally:
+        with job_queue._lock:
+            job_queue._queue.clear()

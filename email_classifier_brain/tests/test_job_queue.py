@@ -129,3 +129,60 @@ def test_shutdown(queue):
     # Just verify shutdown method works without hanging
     queue.shutdown(timeout=0.5)
     assert not queue._worker.is_alive()
+
+def test_status_idle(queue):
+    """Status with nothing queued/running returns empty state."""
+    s = queue.status()
+    assert s["running"] is None
+    assert s["queued"] == []
+
+def test_status_queued(queue):
+    """Enqueued-but-not-yet-started jobs appear in queued list."""
+    import datetime
+
+    # Stop the worker so jobs don't get picked up immediately
+    queue._stop.set()
+    queue._has_work.set()
+    queue._worker.join()
+
+    queue.enqueue("job_a", lambda: None)
+    queue.enqueue("job_b", lambda: None)
+
+    s = queue.status()
+    assert s["running"] is None
+    assert len(s["queued"]) == 2
+    assert s["queued"][0]["name"] == "job_a"
+    assert s["queued"][1]["name"] == "job_b"
+    for entry in s["queued"]:
+        assert entry["enqueued_at"] is not None
+        assert entry["started_at"] is None
+        datetime.datetime.fromisoformat(entry["enqueued_at"])
+
+def test_status_running(queue):
+    """The currently running job appears in status['running'] with started_at set."""
+    import datetime
+
+    evt_started = threading.Event()
+    evt_finish = threading.Event()
+
+    def slow_job():
+        evt_started.set()
+        evt_finish.wait()
+
+    queue.enqueue("slow", slow_job)
+    evt_started.wait(timeout=2)
+
+    s = queue.status()
+    assert s["running"] is not None
+    assert s["running"]["name"] == "slow"
+    assert s["running"]["enqueued_at"] is not None
+    assert s["running"]["started_at"] is not None
+    datetime.datetime.fromisoformat(s["running"]["started_at"])
+    assert s["queued"] == []
+
+    evt_finish.set()
+    time.sleep(0.05)
+    queue._drain()
+
+    s2 = queue.status()
+    assert s2["running"] is None

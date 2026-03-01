@@ -13,9 +13,10 @@ skipped jobs when the lock was held by another job.
 """
 
 import collections
+import datetime
 import logging
 import threading
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +27,13 @@ class JobQueue:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         # Ordered dict so we process in enqueue order
-        self._queue: collections.OrderedDict[str, Tuple[Callable, tuple, dict]] = (
+        # Values: (fn, args, kwargs, enqueued_at)
+        self._queue: collections.OrderedDict[str, Tuple[Callable, tuple, dict, datetime.datetime]] = (
             collections.OrderedDict()
         )
         self._running: Optional[str] = None
+        self._running_enqueued_at: Optional[datetime.datetime] = None
+        self._running_started_at: Optional[datetime.datetime] = None
         self._stop = threading.Event()
         self._has_work = threading.Event()
         self._worker = threading.Thread(target=self._run, daemon=True, name="job-queue-worker")
@@ -49,10 +53,35 @@ class JobQueue:
             if name == self._running or name in self._queue:
                 logger.info(f"Job '{name}' already queued or running — skipping.")
                 return False
-            self._queue[name] = (fn, args, kwargs)
+            self._queue[name] = (fn, args, kwargs, datetime.datetime.now(datetime.timezone.utc))
             logger.info(f"Job '{name}' enqueued (queue depth: {len(self._queue)}).")
             self._has_work.set()
             return True
+
+    def status(self) -> Dict[str, Any]:
+        """Return a snapshot of the current queue state.
+
+        Returns a dict with:
+          - ``running``: info about the currently executing job, or ``None``
+          - ``queued``: list of waiting jobs in order
+        """
+        with self._lock:
+            running = None
+            if self._running is not None:
+                running = {
+                    "name": self._running,
+                    "enqueued_at": self._running_enqueued_at.isoformat() if self._running_enqueued_at else None,
+                    "started_at": self._running_started_at.isoformat() if self._running_started_at else None,
+                }
+            queued = [
+                {
+                    "name": name,
+                    "enqueued_at": enqueued_at.isoformat(),
+                    "started_at": None,
+                }
+                for name, (_fn, _args, _kwargs, enqueued_at) in self._queue.items()
+            ]
+            return {"running": running, "queued": queued}
 
     def shutdown(self, timeout: float = 60) -> None:
         """Signal the worker to stop and wait for it to finish."""
@@ -84,11 +113,15 @@ class JobQueue:
                 if not self._queue:
                     self._has_work.clear()
                     self._running = None
+                    self._running_enqueued_at = None
+                    self._running_started_at = None
                     return
                 # Pop the oldest job
-                name, (fn, args, kwargs) = self._queue.popitem(last=False)
+                name, (fn, args, kwargs, enqueued_at) = self._queue.popitem(last=False)
                 self._running = name
-            
+                self._running_enqueued_at = enqueued_at
+                self._running_started_at = datetime.datetime.now(datetime.timezone.utc)
+
             try:
                 fn(*args, **kwargs)
             except Exception:
@@ -96,3 +129,5 @@ class JobQueue:
             finally:
                 with self._lock:
                     self._running = None
+                    self._running_enqueued_at = None
+                    self._running_started_at = None
