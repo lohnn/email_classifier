@@ -317,3 +317,108 @@ def test_jobs_status_with_queued_job(client):
     finally:
         with job_queue._lock:
             job_queue._queue.clear()
+
+
+# ---------------------------------------------------------------------------
+# /jobs/history tests
+# ---------------------------------------------------------------------------
+
+def test_jobs_history_empty(client):
+    """GET /jobs/history returns an empty list when no jobs have run."""
+    response = client.get("/jobs/history", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_jobs_history_requires_auth(client):
+    """GET /jobs/history is protected by API key."""
+    response = client.get("/jobs/history")
+    assert response.status_code == 403
+
+
+def test_jobs_history_records_classification_run(client, mock_imap_client, mock_classify):
+    """After a classification job runs, /jobs/history contains one record."""
+    mock_instance = mock_imap_client.return_value
+    from email.message import Message
+    mock_msg = Message()
+    mock_msg["From"] = "sender@test.com"
+    mock_msg["To"] = "recipient@test.com"
+    mock_msg["Subject"] = "History Test"
+    mock_msg["Date"] = "Wed, 02 Oct 2024 10:00:00 -0000"
+    mock_instance.fetch_unprocessed_emails.return_value = [("msg1", mock_msg)]
+
+    mock_classify.extract_email_info.return_value = {
+        "sender": "sender@test.com",
+        "to": "recipient@test.com",
+        "cc": "",
+        "subject": "History Test",
+        "body": "Body",
+        "mass_mail": False,
+        "attachment_types": [],
+    }
+    mock_classify.predict_email.return_value = ("FOCUS", 0.9)
+    mock_classify.get_available_categories.return_value = ["FOCUS"]
+
+    client.post("/run", headers={"X-API-Key": "testkey"})
+    job_queue._drain()
+
+    response = client.get("/jobs/history", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    runs = response.json()
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["job_name"] == "classification"
+    assert run["trigger"] == "manual"
+    assert run["status"] == "success"
+    assert run["emails_processed"] == 1
+    assert run["emails_updated"] == 1
+    assert run["error_count"] == 0
+    assert run["finished_at"] is not None
+    assert run["duration_seconds"] is not None
+    assert run["duration_seconds"] >= 0
+
+
+def test_jobs_history_filter_by_job_name(client, mock_imap_client, mock_classify):
+    """GET /jobs/history?job_name= filters results correctly."""
+    mock_instance = mock_imap_client.return_value
+    mock_instance.fetch_unprocessed_emails.return_value = []
+    mock_classify.get_available_categories.return_value = []
+
+    # Run two different job types
+    client.post("/run", headers={"X-API-Key": "testkey"})
+    job_queue._drain()
+    client.post("/reclassify", headers={"X-API-Key": "testkey"})
+    job_queue._drain()
+
+    # Filter to classification only
+    response = client.get("/jobs/history?job_name=classification", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    runs = response.json()
+    assert all(r["job_name"] == "classification" for r in runs)
+
+    # Filter to reclassify only
+    response2 = client.get("/jobs/history?job_name=reclassify", headers={"X-API-Key": "testkey"})
+    assert response2.status_code == 200
+    runs2 = response2.json()
+    assert all(r["job_name"] == "reclassify" for r in runs2)
+
+
+def test_jobs_history_direct_db(client):
+    """start_job_run / finish_job_run round-trip via database functions."""
+    run_id = database.start_job_run("test_job", "manual")
+    assert isinstance(run_id, int)
+
+    database.finish_job_run(run_id, "success", emails_processed=5, emails_updated=3, error_count=1)
+
+    runs = database.get_job_runs(job_name="test_job")
+    assert len(runs) == 1
+    r = runs[0]
+    assert r["id"] == run_id
+    assert r["job_name"] == "test_job"
+    assert r["trigger"] == "manual"
+    assert r["status"] == "success"
+    assert r["emails_processed"] == 5
+    assert r["emails_updated"] == 3
+    assert r["error_count"] == 1
+    assert r["finished_at"] is not None
+    assert r["duration_seconds"] >= 0

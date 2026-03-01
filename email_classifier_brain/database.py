@@ -76,8 +76,89 @@ def init_db() -> None:
     except Exception as e:
         print(f"Error migrating schema: {e}")
 
+    # Create job_runs table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS job_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_name TEXT NOT NULL,
+            trigger TEXT NOT NULL DEFAULT 'scheduled',
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            duration_seconds REAL,
+            status TEXT NOT NULL DEFAULT 'running',
+            emails_processed INTEGER,
+            emails_updated INTEGER,
+            error_count INTEGER DEFAULT 0,
+            error_message TEXT
+        )
+    ''')
+
     conn.commit()
     conn.close()
+
+def start_job_run(job_name: str, trigger: str = "scheduled") -> int:
+    """Insert a new job run record in 'running' state. Returns the run id."""
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO job_runs (job_name, trigger, started_at, status) VALUES (?, ?, ?, 'running')",
+            (job_name, trigger, datetime.datetime.now(datetime.timezone.utc).isoformat())
+        )
+        run_id = c.lastrowid
+        conn.commit()
+        return run_id
+    finally:
+        conn.close()
+
+def finish_job_run(
+    run_id: int,
+    status: str,
+    emails_processed: Optional[int] = None,
+    emails_updated: Optional[int] = None,
+    error_count: int = 0,
+    error_message: Optional[str] = None,
+) -> None:
+    """Update a job run record with its final state."""
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        finished_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        c.execute(
+            '''UPDATE job_runs
+               SET finished_at = ?,
+                   status = ?,
+                   emails_processed = ?,
+                   emails_updated = ?,
+                   error_count = ?,
+                   error_message = ?,
+                   duration_seconds = (
+                       CAST((julianday(?) - julianday(started_at)) * 86400 AS REAL)
+                   )
+               WHERE id = ?''',
+            (finished_at, status, emails_processed, emails_updated, error_count, error_message,
+             finished_at, run_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_job_runs(limit: int = 50, job_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return recent job run records, newest first."""
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        if job_name:
+            c.execute(
+                "SELECT * FROM job_runs WHERE job_name = ? ORDER BY started_at DESC LIMIT ?",
+                (job_name, limit)
+            )
+        else:
+            c.execute("SELECT * FROM job_runs ORDER BY started_at DESC LIMIT ?", (limit,))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 def add_log(
     id: str,
