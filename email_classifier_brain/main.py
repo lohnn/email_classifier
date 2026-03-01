@@ -343,6 +343,7 @@ def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
     Background job to re-classify existing logs.
     """
     client = None
+    logs = []
     updated_count = 0
     errors = 0
     run_id = database.start_job_run("reclassify", trigger)
@@ -448,7 +449,7 @@ def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
 
     except Exception as e:
         logger.error(f"Error in re-classification job: {e}")
-        database.finish_job_run(run_id, "error", error_message=str(e))
+        database.finish_job_run(run_id, "error", emails_processed=len(logs), error_count=errors, error_message=str(e))
         return {"status": "error", "message": str(e)}
     finally:
         if client:
@@ -517,6 +518,8 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
     Checks emails based on a gliding scale of age.
     """
     client = None
+    candidates = []
+    updates_count = 0
     run_id = database.start_job_run("recheck", trigger)
     try:
         logger.info("Starting check_corrections_job...")
@@ -616,7 +619,7 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
 
     except Exception as e:
         logger.error(f"Error in check_corrections_job: {e}")
-        database.finish_job_run(run_id, "error", error_message=str(e))
+        database.finish_job_run(run_id, "error", emails_processed=len(candidates), emails_updated=updates_count, error_message=str(e))
     finally:
         if client:
             client.disconnect()
@@ -796,27 +799,32 @@ def backfill_training_data_job(trigger: str = "scheduled"):
     logger.info("Starting backfill_training_data_job...")
     run_id = database.start_job_run("backfill", trigger)
 
-    corrected_logs = database.get_all_corrected_logs()
-    if not corrected_logs:
-        logger.info("No corrected logs found in database. Nothing to backfill.")
-        database.finish_job_run(run_id, "success", emails_processed=0, emails_updated=0)
-        return
+    try:
+        corrected_logs = database.get_all_corrected_logs()
+        if not corrected_logs:
+            logger.info("No corrected logs found in database. Nothing to backfill.")
+            database.finish_job_run(run_id, "success", emails_processed=0, emails_updated=0)
+            return
 
-    logger.info(f"Backfilling training data from {len(corrected_logs)} corrected entries...")
+        logger.info(f"Backfilling training data from {len(corrected_logs)} corrected entries...")
 
-    success_count = 0
-    error_count = 0
+        success_count = 0
+        error_count = 0
 
-    for log in corrected_logs:
-        try:
-            add_to_training_data(log, log['corrected_category'])
-            success_count += 1
-        except Exception as e:
-            logger.error(f"Error backfilling training data for {log['id']}: {e}")
-            error_count += 1
+        for log in corrected_logs:
+            try:
+                add_to_training_data(log, log['corrected_category'])
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Error backfilling training data for {log['id']}: {e}")
+                error_count += 1
 
-    logger.info(f"Backfill finished. Success: {success_count}, Errors: {error_count}")
-    database.finish_job_run(run_id, "success", emails_processed=len(corrected_logs), emails_updated=success_count, error_count=error_count)
+        logger.info(f"Backfill finished. Success: {success_count}, Errors: {error_count}")
+        database.finish_job_run(run_id, "success", emails_processed=len(corrected_logs), emails_updated=success_count, error_count=error_count)
+
+    except Exception as e:
+        logger.error(f"Error in backfill_training_data_job: {e}")
+        database.finish_job_run(run_id, "error", error_message=str(e))
 
 
 # Models

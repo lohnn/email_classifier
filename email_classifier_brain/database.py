@@ -99,15 +99,17 @@ def init_db() -> None:
 def start_job_run(job_name: str, trigger: str = "scheduled") -> int:
     """Insert a new job run record in 'running' state. Returns the run id."""
     conn = get_db_connection()
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO job_runs (job_name, trigger, started_at, status) VALUES (?, ?, ?, 'running')",
-        (job_name, trigger, datetime.datetime.now(datetime.timezone.utc).isoformat())
-    )
-    run_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return run_id
+    try:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO job_runs (job_name, trigger, started_at, status) VALUES (?, ?, ?, 'running')",
+            (job_name, trigger, datetime.datetime.now(datetime.timezone.utc).isoformat())
+        )
+        run_id = c.lastrowid
+        conn.commit()
+        return run_id
+    finally:
+        conn.close()
 
 def finish_job_run(
     run_id: int,
@@ -119,40 +121,44 @@ def finish_job_run(
 ) -> None:
     """Update a job run record with its final state."""
     conn = get_db_connection()
-    c = conn.cursor()
-    finished_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    c.execute(
-        '''UPDATE job_runs
-           SET finished_at = ?,
-               status = ?,
-               emails_processed = ?,
-               emails_updated = ?,
-               error_count = ?,
-               error_message = ?,
-               duration_seconds = (
-                   CAST((julianday(?) - julianday(started_at)) * 86400 AS REAL)
-               )
-           WHERE id = ?''',
-        (finished_at, status, emails_processed, emails_updated, error_count, error_message,
-         finished_at, run_id)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        finished_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        c.execute(
+            '''UPDATE job_runs
+               SET finished_at = ?,
+                   status = ?,
+                   emails_processed = ?,
+                   emails_updated = ?,
+                   error_count = ?,
+                   error_message = ?,
+                   duration_seconds = (
+                       CAST((julianday(?) - julianday(started_at)) * 86400 AS REAL)
+                   )
+               WHERE id = ?''',
+            (finished_at, status, emails_processed, emails_updated, error_count, error_message,
+             finished_at, run_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_job_runs(limit: int = 50, job_name: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return recent job run records, newest first."""
     conn = get_db_connection()
-    c = conn.cursor()
-    if job_name:
-        c.execute(
-            "SELECT * FROM job_runs WHERE job_name = ? ORDER BY started_at DESC LIMIT ?",
-            (job_name, limit)
-        )
-    else:
-        c.execute("SELECT * FROM job_runs ORDER BY started_at DESC LIMIT ?", (limit,))
-    rows = c.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    try:
+        c = conn.cursor()
+        if job_name:
+            c.execute(
+                "SELECT * FROM job_runs WHERE job_name = ? ORDER BY started_at DESC LIMIT ?",
+                (job_name, limit)
+            )
+        else:
+            c.execute("SELECT * FROM job_runs ORDER BY started_at DESC LIMIT ?", (limit,))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 def add_log(
     id: str,
