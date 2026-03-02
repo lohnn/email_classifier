@@ -23,9 +23,9 @@ def test_health_check():
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
-@patch("main.os.getenv")
-@patch("main.Path")
-@patch("main.shutdown_server")
+@patch("api.security.os.getenv")
+@patch("api.routes.admin.Path")
+@patch("api.routes.admin.shutdown_server")
 def test_trigger_update_missing_config(mock_shutdown, mock_path, mock_getenv):
     # Setup mock Path
     mock_file = MagicMock()
@@ -44,9 +44,9 @@ def test_trigger_update_missing_config(mock_shutdown, mock_path, mock_getenv):
     assert response.status_code == 500
     assert "ADMIN_API_KEY not set" in response.json()["detail"]
 
-@patch("main.os.getenv")
-@patch("main.Path")
-@patch("main.shutdown_server")
+@patch("api.security.os.getenv")
+@patch("api.routes.admin.Path")
+@patch("api.routes.admin.shutdown_server")
 def test_trigger_update_with_auth(mock_shutdown, mock_path, mock_getenv):
     # Setup mock for env var
     def getenv_side_effect(key, default=None):
@@ -80,8 +80,8 @@ def test_trigger_update_with_auth(mock_shutdown, mock_path, mock_getenv):
     # TestClient runs background tasks automatically.
     mock_shutdown.assert_called_once()
 
-@patch("main.os.getenv")
-@patch("main.Path")
+@patch("api.security.os.getenv")
+@patch("api.routes.admin.Path")
 def test_get_update_errors_no_file(mock_path, mock_getenv):
     # Setup mock for env var
     def getenv_side_effect(key, default=None):
@@ -98,9 +98,9 @@ def test_get_update_errors_no_file(mock_path, mock_getenv):
     assert response.status_code == 200
     assert response.json() == []
 
-@patch("main.os.getenv")
+@patch("api.security.os.getenv")
 @patch("builtins.open", new_callable=MagicMock)
-@patch("main.Path")
+@patch("api.routes.admin.Path")
 def test_get_update_errors_with_content(mock_path, mock_open, mock_getenv):
     # Setup mock for env var
     def getenv_side_effect(key, default=None):

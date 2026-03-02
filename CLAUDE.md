@@ -37,13 +37,35 @@ pytest tests/test_app.py::test_function_name
 
 ### Architecture
 
-- **`main.py`** — FastAPI app, all API endpoints, background job functions, and the `APScheduler` scheduler
+- **`main.py`** — FastAPI app entry point; registers routers and the `APScheduler` scheduler; exports `job_queue` singleton
 - **`config.py`** — All configuration loaded from `.env`; also the single source of truth for `format_model_input()` — both training and inference must use this to keep inputs consistent
 - **`classify.py`** — SetFit inference engine; `predict_email()` and `predict_raw_email()`
 - **`train.py`** — SetFit training script; reads `.jsonl` files from `TrainingData/` to discover categories dynamically
 - **`database.py`** — SQLite persistence via `storage/email_history.db`; handles schema migration inline
 - **`imap_client.py`** — Gmail/IMAP integration (fetch, label, scan)
-- **`job_queue.py`** — Sequential `JobQueue` that prevents concurrent background jobs from overlapping
+- **`job_queue.py`** — Sequential `JobQueue` class + module-level `job_queue` singleton
+
+#### `jobs/` — Background Job Functions
+
+| Module | Contents |
+|--------|----------|
+| `jobs/classification.py` | `classification_job` — fetch, classify, label, log |
+| `jobs/correction.py` | `check_corrections_job`, `force_check_corrections_job`, `_resolve_correction` |
+| `jobs/reclassify.py` | `reclassify_job` — re-run predictions on existing logs |
+| `jobs/training_data.py` | `add_to_training_data`, `push_training_data_to_git`, `backfill_training_data_job` |
+| `jobs/update.py` | `scheduled_update_job`, `shutdown_server` |
+
+#### `api/` — HTTP API Layer
+
+| Module | Contents |
+|--------|----------|
+| `api/models.py` | Pydantic request/response models |
+| `api/security.py` | `get_api_key` dependency, `api_key_scheme` |
+| `api/routes/classification.py` | `POST /run`, `POST /reclassify`, `GET /labels` |
+| `api/routes/jobs.py` | `GET /jobs/status`, `POST /jobs/cancel`, `GET /jobs/history` |
+| `api/routes/notifications.py` | `GET /notifications`, `POST /notifications/ack`, `POST /notifications/pop`, `GET /notifications/read` |
+| `api/routes/admin.py` | `POST /logs/{id}/correction`, `GET /logs/ambiguous`, all `/admin/*` endpoints |
+| `api/routes/health.py` | `GET /health`, `GET /stats` |
 
 ### Background Jobs (APScheduler → JobQueue)
 
