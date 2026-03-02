@@ -21,12 +21,28 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
 
 ```
 .
-├── main.py                # FastAPI microservice & background jobs
+├── main.py                # FastAPI entry point: registers routers & scheduler
 ├── database.py            # SQLite schema & persistence logic
 ├── imap_client.py         # Gmail/IMAP integration
 ├── config.py              # Shared configuration & input formatting
+├── job_queue.py           # Sequential JobQueue class + module-level singleton
 ├── train.py               # SetFit training script
 ├── classify.py            # Inference engine
+├── api/                   # HTTP API layer
+│   ├── models.py          # Pydantic request/response models
+│   ├── security.py        # API key authentication
+│   └── routes/
+│       ├── classification.py  # POST /run, POST /reclassify, GET /labels
+│       ├── jobs.py            # GET /jobs/status, POST /jobs/cancel, GET /jobs/history
+│       ├── notifications.py   # GET/POST /notifications/*
+│       ├── admin.py           # POST /logs/{id}/correction, GET /logs/ambiguous, /admin/*
+│       └── health.py          # GET /health, GET /stats
+├── jobs/                  # Background job functions
+│   ├── classification.py  # classification_job
+│   ├── correction.py      # check_corrections_job, force_check_corrections_job
+│   ├── reclassify.py      # reclassify_job
+│   ├── training_data.py   # add_to_training_data, push_training_data_to_git, backfill_training_data_job
+│   └── update.py          # scheduled_update_job, shutdown_server
 ├── retrain.sh             # Trainer workflow (pull → train → upload)
 ├── run_service.sh         # Production service wrapper with auto-upgrade
 ├── setup.sh               # Venv & dependency bootstrap
@@ -226,13 +242,18 @@ Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
 | Method | Endpoint                         | Description                                          |
 | :----- | :------------------------------- | :--------------------------------------------------- |
 | `POST` | `/run`                           | Manually trigger the classification job immediately. |
+| `POST` | `/reclassify`                    | Re-predict categories for existing logs.             |
+| `GET`  | `/labels`                        | List all supported classification categories.        |
 | `GET`  | `/stats`                         | Get classification counts per category.              |
+| `GET`  | `/jobs/status`                   | Return current job queue state (running + waiting).  |
+| `POST` | `/jobs/cancel`                   | Cancel the running job and clear the pending queue.  |
+| `GET`  | `/jobs/history`                  | Per-run metadata for completed and in-progress jobs. |
 | `GET`  | `/notifications`                 | Get unread classification logs for the UI.           |
 | `POST` | `/notifications/ack`             | Mark specific (or all) notifications as read.        |
 | `POST` | `/notifications/pop`             | Fetch and mark unread notifications as read.         |
-| `GET`  | `/labels`                        | List all supported classification categories.        |
+| `GET`  | `/notifications/read`            | Get already-read notifications within a time range.  |
 | `POST` | `/logs/{id}/correction`          | Submit a category correction for a logged email.     |
-| `POST` | `/reclassify`                    | Re-predict categories for existing logs.             |
+| `GET`  | `/logs/ambiguous`                | Get logs flagged with multiple conflicting labels.   |
 | `POST` | `/admin/check-corrections`       | Discovery job for external label changes.            |
 | `POST` | `/admin/force-check-corrections` | Exhaustive re-check of all history labels.           |
 | `POST` | `/admin/backfill-training-data`  | Rebuild JSONL from database corrections.             |
