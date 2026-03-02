@@ -35,6 +35,7 @@ class JobQueue:
         self._running_enqueued_at: Optional[datetime.datetime] = None
         self._running_started_at: Optional[datetime.datetime] = None
         self._stop = threading.Event()
+        self._cancel = threading.Event()
         self._has_work = threading.Event()
         self._worker = threading.Thread(target=self._run, daemon=True, name="job-queue-worker")
         self._worker.start()
@@ -82,6 +83,30 @@ class JobQueue:
                 for name, (_fn, _args, _kwargs, enqueued_at) in self._queue.items()
             ]
             return {"running": running, "queued": queued}
+
+    def cancel(self) -> Dict[str, Any]:
+        """Cancel the currently running job and clear all pending jobs.
+
+        Sets a cancellation flag that long-running jobs should check via
+        ``is_cancelled()``. The running job will not be forcefully stopped —
+        it must cooperate by checking ``is_cancelled()`` and exiting early.
+
+        Returns a dict with:
+          - ``cancelled_job``: name of the job that was signalled, or ``None``
+          - ``cleared_queue``: list of job names that were removed from the queue
+        """
+        with self._lock:
+            cleared = list(self._queue.keys())
+            self._queue.clear()
+            running = self._running
+            if running:
+                self._cancel.set()
+        logger.info(f"Cancel requested. Running job: {running!r}. Cleared queue: {cleared}.")
+        return {"cancelled_job": running, "cleared_queue": cleared}
+
+    def is_cancelled(self) -> bool:
+        """Return True if cancellation has been requested for the current job."""
+        return self._cancel.is_set()
 
     def shutdown(self, timeout: float = 60) -> None:
         """Signal the worker to stop and wait for it to finish."""
@@ -131,5 +156,6 @@ class JobQueue:
             except Exception:
                 logger.exception(f"Job '{name}' failed with an exception.")
             finally:
+                self._cancel.clear()  # Reset cancellation flag for the next job
                 with self._lock:
                     self._reset_running_status()
