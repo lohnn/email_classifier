@@ -7,6 +7,7 @@ sync them to the local database and training data.
 """
 
 import logging
+from email.utils import parsedate_to_datetime
 
 import classify
 import config
@@ -219,7 +220,6 @@ def force_check_corrections_job(trigger: str = "scheduled"):
             label = trained_labels[0]
 
             try:
-                from email.utils import parsedate_to_datetime
                 info = classify.extract_email_info(msg)
 
                 date_str = msg.get("Date")

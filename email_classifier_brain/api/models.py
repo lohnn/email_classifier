@@ -5,7 +5,7 @@ api/models.py — Pydantic Request/Response Models
 Shared data models for all API endpoints.
 """
 
-from typing import Any, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -26,7 +26,7 @@ class Notification(BaseModel):
     subject: Optional[str]
     predicted_category: Optional[str]
     confidence_score: Optional[float]
-    is_read: Any
+    is_read: bool
 
 
 class AckRequest(BaseModel):
