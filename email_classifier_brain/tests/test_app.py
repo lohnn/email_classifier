@@ -84,7 +84,7 @@ def test_run_classification(client, mock_imap_client, mock_classify):
         "mass_mail": False,
         "attachment_types": []
     }
-    mock_classify.predict_email.return_value = ("URGENT", 0.95)
+    mock_classify.predict_email.return_value = ("URGENT", 0.95, False)
     mock_classify.get_available_categories.return_value = ["URGENT", "FOCUS"]
 
     response = client.post("/run", headers={"X-API-Key": "testkey"})
@@ -101,6 +101,78 @@ def test_run_classification(client, mock_imap_client, mock_classify):
     stats_response = client.get("/stats", headers={"X-API-Key": "testkey"})
     assert stats_response.json()["stats"]["URGENT"] == 1
 
+def test_run_classification_unsure_label_applied(client, mock_imap_client, mock_classify):
+    """When the classifier is unsure, the UNSURE_CLASSIFICATION label is applied alongside the primary label."""
+    mock_instance = mock_imap_client.return_value
+    from email.message import Message
+    mock_msg = Message()
+    mock_msg["From"] = "sender@test.com"
+    mock_msg["To"] = "recipient@test.com"
+    mock_msg["Subject"] = "Ambiguous Subject"
+    mock_msg["Date"] = "Wed, 02 Oct 2024 10:00:00 -0000"
+
+    mock_instance.fetch_unprocessed_emails.return_value = [("456", mock_msg)]
+
+    mock_classify.extract_email_info.return_value = {
+        "sender": "sender@test.com",
+        "to": "recipient@test.com",
+        "cc": "",
+        "subject": "Ambiguous Subject",
+        "body": "Could be anything",
+        "mass_mail": False,
+        "attachment_types": []
+    }
+    # is_unsure=True simulates low confidence or close scores
+    mock_classify.predict_email.return_value = ("FOCUS", 0.55, True)
+    mock_classify.get_available_categories.return_value = ["FOCUS", "REFERENCE"]
+
+    response = client.post("/run", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+
+    job_queue._drain()
+
+    from unittest.mock import call
+    import config
+    mock_instance.apply_label.assert_any_call("456", "FOCUS")
+    mock_instance.apply_label.assert_any_call("456", config.UNSURE_LABEL)
+
+
+def test_run_classification_confident_no_unsure_label(client, mock_imap_client, mock_classify):
+    """When the classifier is confident, no UNSURE_CLASSIFICATION label is applied."""
+    mock_instance = mock_imap_client.return_value
+    from email.message import Message
+    mock_msg = Message()
+    mock_msg["From"] = "sender@test.com"
+    mock_msg["To"] = "recipient@test.com"
+    mock_msg["Subject"] = "Confident Subject"
+    mock_msg["Date"] = "Wed, 02 Oct 2024 10:00:00 -0000"
+
+    mock_instance.fetch_unprocessed_emails.return_value = [("789", mock_msg)]
+
+    mock_classify.extract_email_info.return_value = {
+        "sender": "sender@test.com",
+        "to": "recipient@test.com",
+        "cc": "",
+        "subject": "Confident Subject",
+        "body": "Clearly urgent",
+        "mass_mail": False,
+        "attachment_types": []
+    }
+    mock_classify.predict_email.return_value = ("URGENT", 0.92, False)
+    mock_classify.get_available_categories.return_value = ["URGENT", "FOCUS"]
+
+    response = client.post("/run", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+
+    job_queue._drain()
+
+    import config
+    # Only the primary label should be applied; UNSURE_LABEL must not appear
+    calls = [c for c in mock_instance.apply_label.call_args_list if c == ((("789", config.UNSURE_LABEL),), {})]
+    assert len(calls) == 0
+    mock_instance.apply_label.assert_called_once_with("789", "URGENT")
+
+
 def test_run_classification_limit(client, mock_imap_client, mock_classify):
 
     mock_instance = mock_imap_client.return_value
@@ -112,7 +184,7 @@ def test_run_classification_limit(client, mock_imap_client, mock_classify):
     mock_classify.extract_email_info.return_value = {
         "sender": "s@t.com", "to": "r@t.com", "cc": "", "subject": "S", "body": "B", "mass_mail": False, "attachment_types": []
     }
-    mock_classify.predict_email.return_value = ("NOISE", 0.1)
+    mock_classify.predict_email.return_value = ("NOISE", 0.1, True)
     mock_classify.get_available_categories.return_value = ["NOISE"]
 
     response = client.post("/run", headers={"X-API-Key": "testkey"})
@@ -197,12 +269,12 @@ def test_pop_notifications(client, mock_imap_client, mock_classify):
     mock_classify.extract_email_info.return_value = {
         "sender": "sender@test.com", "to": "r@t.com", "cc": "", "subject": "Test Pop", "body": "B", "mass_mail": False, "attachment_types": []
     }
-    mock_classify.predict_email.return_value = ("URGENT", 0.95)
+    mock_classify.predict_email.return_value = ("URGENT", 0.95, False)
     mock_classify.get_available_categories.return_value = ["URGENT"]
 
     client.post("/run", headers={"X-API-Key": "testkey"})
     job_queue._drain()
-    
+
     response = client.get("/notifications", headers={"X-API-Key": "testkey"})
     assert len(response.json()) == 1
 
@@ -226,7 +298,7 @@ def test_get_read_notifications(client, mock_imap_client, mock_classify):
     mock_classify.extract_email_info.return_value = {
         "sender": "s@t.com", "to": "r@t.com", "cc": "", "subject": "Test Read", "body": "B", "mass_mail": False, "attachment_types": []
     }
-    mock_classify.predict_email.return_value = ("URGENT", 0.95)
+    mock_classify.predict_email.return_value = ("URGENT", 0.95, False)
 
     client.post("/run", headers={"X-API-Key": "testkey"})
     job_queue._drain()
@@ -401,7 +473,7 @@ def test_jobs_history_records_classification_run(client, mock_imap_client, mock_
         "mass_mail": False,
         "attachment_types": [],
     }
-    mock_classify.predict_email.return_value = ("FOCUS", 0.9)
+    mock_classify.predict_email.return_value = ("FOCUS", 0.9, False)
     mock_classify.get_available_categories.return_value = ["FOCUS"]
 
     client.post("/run", headers={"X-API-Key": "testkey"})
