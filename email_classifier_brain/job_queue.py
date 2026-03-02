@@ -159,3 +159,7 @@ class JobQueue:
                 self._cancel.clear()  # Reset cancellation flag for the next job
                 with self._lock:
                     self._reset_running_status()
+
+
+# Module-level singleton — shared across all importers
+job_queue = JobQueue()

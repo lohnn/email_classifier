@@ -54,7 +54,12 @@ def mock_imap_client():
 
 @pytest.fixture
 def mock_classify():
-    with patch("main.classify") as mock:
+    mock = MagicMock()
+    with patch("jobs.classification.classify", mock), \
+         patch("jobs.reclassify.classify", mock), \
+         patch("jobs.correction.classify", mock), \
+         patch("api.routes.classification.classify", mock), \
+         patch("api.routes.health.classify", mock):
         yield mock
 
 def test_get_stats_empty(client):

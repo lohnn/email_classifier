@@ -26,7 +26,9 @@ import database
 
 @pytest.fixture
 def mock_classify():
-    with patch("main.classify") as mock:
+    mock = MagicMock()
+    with patch("api.routes.admin.classify", mock), \
+         patch("jobs.correction.classify", mock):
         yield mock
 
 @pytest.fixture
@@ -36,7 +38,7 @@ def client():
         os.makedirs(temp_data_dir)
 
     with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
-        with patch("database.DB_FILE", tmp.name), patch("main.TRAINING_DATA_DIR", temp_data_dir):
+        with patch("database.DB_FILE", tmp.name), patch("jobs.training_data.TRAINING_DATA_DIR", temp_data_dir):
             database.init_db()
             with TestClient(app) as c:
                 yield c
