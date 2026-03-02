@@ -460,3 +460,10 @@ class GmailClient:
                 logger.warning(f"Error fetching labeled emails batch: {e}")
 
         return results
+
+
+# Module-level singleton — shared across all background jobs so that a single
+# persistent SSL connection is reused instead of opening and closing one on
+# every job invocation.  connect() is called lazily inside each method and
+# already handles reconnection (via NOOP) when the server has dropped the link.
+gmail_client = GmailClient()

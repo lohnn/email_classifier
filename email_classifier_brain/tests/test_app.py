@@ -49,8 +49,11 @@ def client():
 
 @pytest.fixture
 def mock_imap_client():
-    with patch("imap_client.GmailClient") as mock:
-        yield mock
+    mock_instance = MagicMock()
+    with patch("imap_client.GmailClient") as MockClass, \
+         patch("imap_client.gmail_client", mock_instance):
+        MockClass.return_value = mock_instance
+        yield MockClass
 
 @pytest.fixture
 def mock_classify():

@@ -8,6 +8,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import config
 import database
+import imap_client
 from job_queue import job_queue  # re-exported for backward compat with tests
 from jobs.classification import classification_job
 from jobs.correction import check_corrections_job
@@ -88,7 +89,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     scheduler.shutdown()
     job_queue.shutdown()
-    logger.info("Scheduler and JobQueue shutdown.")
+    imap_client.gmail_client.disconnect()
+    logger.info("Scheduler, JobQueue, and IMAP connection shutdown.")
 
 
 app = FastAPI(title="Email Classifier Microservice", lifespan=lifespan)

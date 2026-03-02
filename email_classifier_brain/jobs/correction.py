@@ -82,7 +82,6 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
     Background job to check for label corrections from the server (IMAP).
     Checks emails based on a gliding scale of age.
     """
-    client = None
     candidates = []
     updates_count = 0
     run_id = database.start_job_run("recheck", trigger)
@@ -97,7 +96,7 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
 
         logger.info(f"Checking {len(candidates)} emails for external corrections...")
 
-        client = imap_client.GmailClient()
+        client = imap_client.gmail_client
         candidate_ids = [c['id'] for c in candidates]
 
         current_labels_map = client.get_labels_for_emails(candidate_ids)
@@ -170,9 +169,6 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
     except Exception as e:
         logger.error(f"Error in check_corrections_job: {e}")
         database.finish_job_run(run_id, "error", emails_processed=len(candidates), emails_updated=updates_count, error_message=str(e))
-    finally:
-        if client:
-            client.disconnect()
 
 
 def force_check_corrections_job(trigger: str = "scheduled"):
@@ -188,14 +184,13 @@ def force_check_corrections_job(trigger: str = "scheduled"):
     """
     BATCH_SIZE = 200
 
-    client = None
     run_id = database.start_job_run("force_recheck", trigger)
     total_processed = 0
     import_count = 0
     try:
         logger.info("Starting force_check_corrections_job (bypassing schedule)...")
 
-        client = imap_client.GmailClient()
+        client = imap_client.gmail_client
         known_categories_list = classify.get_available_categories()
         known_categories = set(known_categories_list)
 
@@ -331,6 +326,3 @@ def force_check_corrections_job(trigger: str = "scheduled"):
     except Exception as e:
         logger.error(f"Error in force_check_corrections_job: {e}")
         database.finish_job_run(run_id, "error", emails_processed=import_count + total_processed, error_message=str(e))
-    finally:
-        if client:
-            client.disconnect()
