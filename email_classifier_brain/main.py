@@ -88,9 +88,12 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     scheduler.shutdown()
-    job_queue.shutdown()
-    imap_client.gmail_client.disconnect()
-    logger.info("Scheduler, JobQueue, and IMAP connection shutdown.")
+    worker_stopped = job_queue.shutdown()
+    if worker_stopped:
+        imap_client.gmail_client.disconnect()
+    else:
+        logger.warning("Skipping IMAP disconnect — job worker still running after timeout.")
+    logger.info("Scheduler and JobQueue shutdown.")
 
 
 app = FastAPI(title="Email Classifier Microservice", lifespan=lifespan)
