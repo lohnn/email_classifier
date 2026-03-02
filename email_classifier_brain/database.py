@@ -11,7 +11,7 @@ DB_FILE = config.DB_PATH
 
 def get_db_connection() -> sqlite3.Connection:
     """Create a database connection to the SQLite database."""
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=10.0)
     conn.row_factory = sqlite3.Row
     return conn
 

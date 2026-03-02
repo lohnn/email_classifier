@@ -16,6 +16,7 @@ import config
 import database
 from config import TRAINING_DATA_DIR
 from job_queue import job_queue
+from retry import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,16 @@ def push_training_data_to_git():
                 "-m", f"Auto-update training data: {datetime.datetime.now().isoformat()}"
             ], cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
             logger.info("Pushing to remote...")
-            subprocess.run(["git", "push"], cwd=TRAINING_DATA_DIR, check=True, capture_output=True)
+            with_retry(
+                subprocess.run,
+                ["git", "push"],
+                cwd=TRAINING_DATA_DIR,
+                check=True,
+                capture_output=True,
+                retries=3,
+                backoff=5.0,
+                exceptions=(subprocess.CalledProcessError, OSError),
+            )
             logger.info("Training data pushed successfully.")
         else:
             logger.info("No changes to push in training data.")
