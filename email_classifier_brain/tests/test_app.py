@@ -166,10 +166,7 @@ def test_run_classification_confident_no_unsure_label(client, mock_imap_client, 
 
     job_queue._drain()
 
-    import config
-    # Only the primary label should be applied; UNSURE_LABEL must not appear
-    calls = [c for c in mock_instance.apply_label.call_args_list if c == ((("789", config.UNSURE_LABEL),), {})]
-    assert len(calls) == 0
+    # Only the primary label should be applied; assert_called_once_with also verifies no other calls were made
     mock_instance.apply_label.assert_called_once_with("789", "URGENT")
 
 

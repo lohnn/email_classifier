@@ -13,6 +13,9 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
 - **E5 prefix** — `"passage: "` handled automatically everywhere
 - **Raw email parsing** — `predict_raw_email()` extracts headers from
   `email.message.Message` objects
+- **Uncertainty detection** — Applies a configurable `UNSURE_CLASSIFICATION`
+  Gmail label when the classifier's confidence is low or when the gap between
+  the top-two class probabilities is too small
 
 ## Project Structure
 
@@ -81,6 +84,9 @@ cp .env.example .env
 | `ENABLE_RECLASSIFY_JOB`      | Set to `false` to disable periodic re-classification. |
 | `RECLASSIFY_INTERVAL_HOURS`  | Frequency of re-classification (default: re-check).   |
 | `VERIFICATION_LABEL`         | Gmail label used for explicit verification.           |
+| `UNSURE_LABEL`               | Gmail label applied when confidence is low (default: `UNSURE_CLASSIFICATION`). |
+| `UNSURE_CONFIDENCE_THRESHOLD`| Top-class probability below which the unsure label is applied (default: `0.65`). |
+| `UNSURE_DELTA_THRESHOLD`     | Min gap between top-two class probabilities; below this the unsure label is applied (default: `0.10`). |
 | `MODEL_DIR`                  | Path to trained model artifacts.                      |
 | `TRAINING_DATA_DIR`          | Path to JSONL training files.                         |
 | `GDRIVE_REMOTE`              | Rclone remote name (e.g. `gdrive`).                   |
