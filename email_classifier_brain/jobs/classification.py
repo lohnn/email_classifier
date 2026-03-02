@@ -22,12 +22,10 @@ def classification_job(limit: int = 20, trigger: str = "scheduled"):
     logger.info("Starting classification job...")
     run_id = database.start_job_run("classification", trigger)
     results = []
-    client = None
     emails_processed = 0
     error_count = 0
     try:
-        # Connect to IMAP
-        client = imap_client.GmailClient()
+        client = imap_client.gmail_client
 
         # Get known categories to skip
         known_labels = classify.get_available_categories()
@@ -112,6 +110,3 @@ def classification_job(limit: int = 20, trigger: str = "scheduled"):
         logger.error(f"Error in classification job: {e}")
         database.finish_job_run(run_id, "error", emails_processed=emails_processed, error_count=error_count, error_message=str(e))
         return []
-    finally:
-        if client:
-            client.disconnect()

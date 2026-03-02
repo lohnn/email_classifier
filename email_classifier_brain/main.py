@@ -8,6 +8,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import config
 import database
+import imap_client
 from job_queue import job_queue  # re-exported for backward compat with tests
 from jobs.classification import classification_job
 from jobs.correction import check_corrections_job
@@ -87,7 +88,11 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     scheduler.shutdown()
-    job_queue.shutdown()
+    worker_stopped = job_queue.shutdown()
+    if worker_stopped:
+        imap_client.gmail_client.disconnect()
+    else:
+        logger.warning("Skipping IMAP disconnect — job worker still running after timeout.")
     logger.info("Scheduler and JobQueue shutdown.")
 
 

@@ -23,7 +23,6 @@ def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
     """
     Background job to re-classify existing logs.
     """
-    client = None
     logs = []
     updated_count = 0
     errors = 0
@@ -33,7 +32,7 @@ def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
         logger.info("Starting re-classification job...")
         logs = database.get_logs_for_reclassification(limit=limit)
 
-        client = imap_client.GmailClient()
+        client = imap_client.gmail_client
 
         was_cancelled = False
         for log in logs:
@@ -120,6 +119,3 @@ def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
         logger.error(f"Error in re-classification job: {e}")
         database.finish_job_run(run_id, "error", emails_processed=len(logs), error_count=errors, error_message=str(e))
         return {"status": "error", "message": str(e)}
-    finally:
-        if client:
-            client.disconnect()

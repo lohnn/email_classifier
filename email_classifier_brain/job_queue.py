@@ -108,14 +108,20 @@ class JobQueue:
         """Return True if cancellation has been requested for the current job."""
         return self._cancel.is_set()
 
-    def shutdown(self, timeout: float = 60) -> None:
-        """Signal the worker to stop and wait for it to finish."""
+    def shutdown(self, timeout: float = 60) -> bool:
+        """Signal the worker to stop and wait for it to finish.
+
+        Returns True if the worker stopped within the timeout, False if it
+        timed out and the worker is still alive.
+        """
         logger.info("JobQueue shutdown requested.")
         self._stop.set()
         self._has_work.set()  # wake worker so it can see the stop flag
         self._worker.join(timeout=timeout)
         if self._worker.is_alive():
             logger.warning("JobQueue worker did not stop within timeout.")
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Internal
