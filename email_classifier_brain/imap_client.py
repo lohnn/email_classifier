@@ -27,6 +27,17 @@ LABEL_TOKEN_PATTERN = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|([^"\s()]+)')
 # Transient errors that warrant a retry (network drops, protocol aborts)
 _IMAP_ERRORS = (imaplib.IMAP4.error, OSError)
 
+
+def _imap_quote_label(label: str) -> str:
+    """Return label properly quoted and escaped for use in IMAP commands.
+
+    Escapes backslashes and double quotes so that a label value cannot
+    inject additional IMAP tokens or commands.
+    """
+    escaped = label.replace('\\', '\\\\').replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 class GmailClient:
     def __init__(self):
         # Prefer IMAP_USER, fallback to first email in MY_EMAIL
@@ -232,14 +243,13 @@ class GmailClient:
         Apply a label to the email using UID STORE +X-GM-LABELS.
         Accepts gmail_id (X-GM-MSGID).
         """
-        # Quote label if it has spaces
-        label_to_send = f'"{label}"' if " " in label else label
+        label_to_send = _imap_quote_label(label)
 
         def _do():
             self.connect()
             uid = self._search_by_gmail_id(gmail_id)
             if not uid:
-                print(f"Could not find email with Gmail ID {gmail_id} to apply label.")
+                logger.warning(f"Could not find email with Gmail ID {gmail_id} to apply label.")
                 return
             typ, data = self.connection.uid('STORE', uid, '+X-GM-LABELS', f'({label_to_send})')
             if typ != 'OK':
@@ -254,21 +264,20 @@ class GmailClient:
                 on_retry=lambda exc, _: self._reset_connection(),
             )
         except Exception as e:
-            print(f"Error applying label {label} to {gmail_id}: {e}")
+            logger.error(f"Error applying label {label} to {gmail_id}: {e}")
 
     def remove_label(self, gmail_id: str, label: str):
         """
         Remove a label from the email using UID STORE -X-GM-LABELS.
         Accepts gmail_id (X-GM-MSGID).
         """
-        # Quote label if it has spaces
-        label_to_send = f'"{label}"' if " " in label else label
+        label_to_send = _imap_quote_label(label)
 
         def _do():
             self.connect()
             uid = self._search_by_gmail_id(gmail_id)
             if not uid:
-                print(f"Could not find email with Gmail ID {gmail_id} to remove label.")
+                logger.warning(f"Could not find email with Gmail ID {gmail_id} to remove label.")
                 return
             typ, data = self.connection.uid('STORE', uid, '-X-GM-LABELS', f'({label_to_send})')
             if typ != 'OK':
@@ -283,7 +292,7 @@ class GmailClient:
                 on_retry=lambda exc, _: self._reset_connection(),
             )
         except Exception as e:
-            print(f"Error removing label {label} from {gmail_id}: {e}")
+            logger.error(f"Error removing label {label} from {gmail_id}: {e}")
 
     def fetch_email_by_gmail_id(self, gmail_id: str) -> Message:
         """
@@ -314,7 +323,7 @@ class GmailClient:
                 on_retry=lambda exc, _: self._reset_connection(),
             )
         except Exception as e:
-            print(f"Error fetching email {gmail_id}: {e}")
+            logger.error(f"Error fetching email {gmail_id}: {e}")
             return None
 
     def get_labels_for_emails(self, gmail_ids: List[str]) -> Dict[str, List[str]]:
@@ -423,7 +432,7 @@ class GmailClient:
                 on_retry=lambda exc, _: self._reset_connection(),
             )
         except Exception as e:
-            print(f"Error fetching labels batch: {e}")
+            logger.error(f"Error fetching labels batch: {e}")
             return {}
 
     def scan_labeled_emails(self, known_labels: List[str]) -> Dict[str, Tuple[List[str], Message]]:
@@ -442,8 +451,8 @@ class GmailClient:
 
             # Search for each known label
             for label in known_labels:
-                # X-GM-LABELS requires the label to be quoted
-                criteria = f'X-GM-LABELS "{label}"'
+                # X-GM-LABELS requires the label to be quoted and escaped
+                criteria = f'X-GM-LABELS {_imap_quote_label(label)}'
                 typ, data = self.connection.uid('SEARCH', None, criteria)
                 if typ == 'OK' and data[0]:
                     found_uids = data[0].split()
