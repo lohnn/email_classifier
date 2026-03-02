@@ -49,6 +49,24 @@ except ValueError:
 # Label used to explicitly verify a classification
 VERIFICATION_LABEL = os.getenv("VERIFICATION_LABEL") or "VERIFIED"
 
+# Label applied alongside the primary category when the classifier is unsure
+UNSURE_LABEL = os.getenv("UNSURE_LABEL") or "UNSURE_CLASSIFICATION"
+
+def _get_float_env(var_name: str, default: float) -> float:
+    try:
+        return float(os.getenv(var_name) or str(default))
+    except ValueError:
+        return default
+
+
+# Confidence score below which classification is considered unsure (0.0–1.0)
+# If the top class probability is below this threshold, the UNSURE_LABEL is applied.
+UNSURE_CONFIDENCE_THRESHOLD = _get_float_env("UNSURE_CONFIDENCE_THRESHOLD", 0.65)
+
+# Probability gap between top-2 predictions below which classification is considered unsure
+# If top1_prob - top2_prob < this delta, the model cannot clearly distinguish between categories.
+UNSURE_DELTA_THRESHOLD = _get_float_env("UNSURE_DELTA_THRESHOLD", 0.10)
+
 # Comma-separated list of your email addresses.
 # Used to determine your role in an email:
 #   - "Direct" if any of your addresses is in the "To" field

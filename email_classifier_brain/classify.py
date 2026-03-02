@@ -41,9 +41,9 @@ import os
 from setfit import SetFitModel
 
 try:
-    from config import MODEL_OUTPUT_DIR, format_model_input, clean_subject, clean_body
+    from config import MODEL_OUTPUT_DIR, format_model_input, clean_subject, clean_body, UNSURE_CONFIDENCE_THRESHOLD, UNSURE_DELTA_THRESHOLD
 except ImportError:
-    from classifier_brain.config import MODEL_OUTPUT_DIR, format_model_input, clean_subject, clean_body
+    from classifier_brain.config import MODEL_OUTPUT_DIR, format_model_input, clean_subject, clean_body, UNSURE_CONFIDENCE_THRESHOLD, UNSURE_DELTA_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +90,35 @@ else:
 # Public API
 # ---------------------------------------------------------------------------
 
+def is_unsure_classification(probs) -> bool:
+    """
+    Determine whether a classification result should be flagged as uncertain.
+
+    Returns True if either of the following conditions holds:
+    - The top class probability is below UNSURE_CONFIDENCE_THRESHOLD (low overall confidence), OR
+    - The gap between the top-two class probabilities is below UNSURE_DELTA_THRESHOLD
+      (the model cannot clearly distinguish between two categories).
+
+    Args:
+        probs: Array-like of per-class probabilities from predict_proba.
+
+    Returns:
+        True if the classification is uncertain, False otherwise.
+    """
+    sorted_probs = sorted((float(p) for p in probs), reverse=True)
+    top_score = sorted_probs[0]
+
+    if top_score < UNSURE_CONFIDENCE_THRESHOLD:
+        return True
+
+    if len(sorted_probs) >= 2:
+        delta = top_score - sorted_probs[1]
+        if delta < UNSURE_DELTA_THRESHOLD:
+            return True
+
+    return False
+
+
 def predict_email(
     subject: str,
     body: str,
@@ -99,7 +128,7 @@ def predict_email(
     mass_mail: bool = False,
     attachment_types: list[str] | None = None,
     return_score: bool = False,
-) -> str | tuple[str, float]:
+) -> str | tuple[str, float, bool]:
     """
     Classify an email and return the predicted category label.
 
@@ -115,12 +144,14 @@ def predict_email(
         mass_mail: Whether the email has a List-Unsubscribe header.
         attachment_types: List of file extensions (e.g. ["PDF", "ICS"]).
                           None or [] means no attachments.
-        return_score: If True, returns a tuple (label, confidence_score).
+        return_score: If True, returns a tuple (label, confidence_score, is_unsure).
 
     Returns:
         A category string (e.g. "URGENT", "FOCUS", "REFERENCE", "NOISE"),
         or any custom category discovered during training.
-        If return_score is True, returns a tuple (category, score).
+        If return_score is True, returns a tuple (category, score, is_unsure) where
+        is_unsure indicates the classifier has low confidence or two categories are
+        very close in probability.
     """
     model_input = format_model_input(
         subject=subject,
@@ -140,7 +171,8 @@ def predict_email(
         score = float(probs[predicted_index])
 
         label = _label_mapping.get(predicted_index, f"UNKNOWN({predicted_index})")
-        return label, score
+        unsure = is_unsure_classification(probs)
+        return label, score, unsure
 
     prediction = _model.predict([model_input])
 
@@ -219,7 +251,7 @@ def extract_email_info(msg: email.message.Message) -> dict:
     }
 
 
-def predict_raw_email(msg: email.message.Message, return_score: bool = False) -> str | tuple[str, float]:
+def predict_raw_email(msg: email.message.Message, return_score: bool = False) -> str | tuple[str, float, bool]:
     """
     Classify a raw email.message.Message by auto-extracting headers.
 
@@ -228,10 +260,10 @@ def predict_raw_email(msg: email.message.Message, return_score: bool = False) ->
 
     Args:
         msg: A Python email.message.Message (e.g. from email.message_from_file).
-        return_score: If True, returns a tuple (label, confidence_score).
+        return_score: If True, returns a tuple (label, confidence_score, is_unsure).
 
     Returns:
-        A category string or tuple (category, score).
+        A category string or tuple (category, score, is_unsure).
     """
     info = extract_email_info(msg)
 

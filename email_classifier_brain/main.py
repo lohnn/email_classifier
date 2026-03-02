@@ -168,7 +168,7 @@ def classification_job(limit: int = 20, trigger: str = "scheduled"):
                 info = classify.extract_email_info(msg)
 
                 # Predict
-                label, score = classify.predict_email(
+                label, score, is_unsure = classify.predict_email(
                     subject=info["subject"],
                     body=info["body"],
                     sender=info["sender"],
@@ -178,10 +178,14 @@ def classification_job(limit: int = 20, trigger: str = "scheduled"):
                     attachment_types=info["attachment_types"],
                     return_score=True
                 )
-                logger.info(f"Classified email {e_id}: {label} ({score:.2f})")
+                logger.info(f"Classified email {e_id}: {label} ({score:.2f}){' [UNSURE]' if is_unsure else ''}")
 
-                # Apply label
+                # Apply primary label
                 client.apply_label(e_id, label)
+
+                # Apply unsure label if classifier is not confident
+                if is_unsure:
+                    client.apply_label(e_id, config.UNSURE_LABEL)
 
                 # Extract date
                 date_str = msg.get("Date")
@@ -385,7 +389,7 @@ def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
                     continue
 
                 # 2. Re-predict
-                label, score = classify.predict_email(
+                label, score, is_unsure = classify.predict_email(
                     subject=info["subject"],
                     body=info["body"],
                     sender=info["sender"],
@@ -395,34 +399,26 @@ def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
                     attachment_types=info["attachment_types"],
                     return_score=True
                 )
-                
+
                 # 3. Check if changed
                 if label != current_label:
-                    logger.info(f"Re-classification change for {gmail_id}: {current_label} -> {label} ({score:.2f})")
-                    
+                    logger.info(f"Re-classification change for {gmail_id}: {current_label} -> {label} ({score:.2f}){' [UNSURE]' if is_unsure else ''}")
+
                     # 4. Update Gmail Labels
                     # Remove old label
                     if current_label:
                         client.remove_label(gmail_id, current_label)
                     # Apply new label
                     client.apply_label(gmail_id, label)
-                    
+
                     # 5. Update Database
-                    # We accept specific 'update_log_prediction' but currently 'add_log' handles updates via upsert/duplicate check logic we added? 
-                    # Actually I added logic to update if exists in add_log.
-                    # So calling add_log with same ID should update it.
-                    
-                    # Re-extract timestamp to be safe or keep original? 
-                    # We should probably keep original timestamp.
-                    # add_log uses 'timestamp' arg.
-                    
                     orig_ts = None
                     if log['timestamp']:
                         try:
                             orig_ts = datetime.datetime.fromisoformat(log['timestamp'])
                         except:
                             pass
-                            
+
                     database.add_log(
                         id=gmail_id,
                         sender=info["sender"],
@@ -437,10 +433,12 @@ def reclassify_job(limit: int = 100, trigger: str = "scheduled"):
                         attachment_types=info["attachment_types"]
                     )
                     updated_count += 1
+
+                # 6. Sync UNSURE label regardless of whether primary label changed
+                if is_unsure:
+                    client.apply_label(gmail_id, config.UNSURE_LABEL)
                 else:
-                    # Update score/metadata even if label same? 
-                    # Maybe useful if model confidence changed.
-                    pass
+                    client.remove_label(gmail_id, config.UNSURE_LABEL)
 
                 # Stamp as reclassified so rotation moves to next batch
                 database.update_reclassified_at(gmail_id)

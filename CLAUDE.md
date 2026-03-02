@@ -111,3 +111,13 @@ The `.env` file is declared as a Flutter asset in `pubspec.yaml` and loaded at s
 - **`lib/ui/theme.dart`** — Dark theme definition
 
 State is managed with Riverpod `FutureProvider.autoDispose`. After mutations (run, reclassify, correct), providers are invalidated with `ref.invalidate()` to trigger a refresh.
+
+---
+
+## Documentation Guidelines
+
+When submitting a PR that changes user-facing behavior, adds new configuration options, or modifies the API, update the relevant README files:
+
+- **`email_classifier_brain/README.md`** — Update when changing environment variables, API endpoints, background jobs, or inference behavior.
+- **`email_classifier_ui/README.md`** — Update when changing UI configuration or Flutter setup.
+- **Root `README.md`** — Update when adding top-level features visible to all users of the monorepo.
