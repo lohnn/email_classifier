@@ -33,3 +33,6 @@ storage/
 
 *.db
 .python-version
+
+update_history.json
+startup.log
