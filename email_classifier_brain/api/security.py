@@ -33,6 +33,14 @@ def is_trusted_ip(ip: str) -> bool:
         return False
 
 
+def is_valid_admin_key(api_key: str | None) -> bool:
+    """Check if the provided API key matches ADMIN_API_KEY from the environment."""
+    expected_key = os.getenv("ADMIN_API_KEY")
+    if not expected_key:
+        return False
+    return api_key == expected_key
+
+
 def get_api_key(
     request: Request,
     api_key: str = Security(api_key_scheme),

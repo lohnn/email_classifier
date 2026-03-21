@@ -7,7 +7,6 @@ Health check endpoint and classification statistics.
 
 import datetime
 import logging
-import os
 from typing import Optional
 
 import classify
@@ -17,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security
 from fastapi.responses import JSONResponse
 
 from api.models import StatsResponse
-from api.security import api_key_scheme, get_api_key, is_trusted_ip
+from api.security import api_key_scheme, get_api_key, is_trusted_ip, is_valid_admin_key
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +42,8 @@ def health_check(
     if check_imap:
         client_ip = request.client.host if request.client else None
         trusted = client_ip and is_trusted_ip(client_ip)
-        if not trusted:
-            expected_key = os.getenv("ADMIN_API_KEY")
-            if not expected_key or api_key != expected_key:
-                raise HTTPException(status_code=401, detail="X-API-Key required to use check_imap")
+        if not trusted and not is_valid_admin_key(api_key):
+            raise HTTPException(status_code=401, detail="X-API-Key required to use check_imap")
 
     checks: dict = {}
     critical_ok = True
