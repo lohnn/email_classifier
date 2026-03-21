@@ -7,17 +7,16 @@ Health check endpoint and classification statistics.
 
 import datetime
 import logging
-import os
 from typing import Optional
 
 import classify
 import database
 import imap_client
-from fastapi import APIRouter, Depends, HTTPException, Query, Security
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security
 from fastapi.responses import JSONResponse
 
 from api.models import StatsResponse
-from api.security import api_key_scheme, get_api_key
+from api.security import api_key_scheme, get_api_key, is_trusted_ip, is_valid_admin_key
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +25,7 @@ router = APIRouter()
 
 @router.get("/health")
 def health_check(
+    request: Request,
     check_imap: bool = Query(False, description="Also verify IMAP connectivity (requires X-API-Key)"),
     api_key: str = Security(api_key_scheme),
 ):
@@ -40,8 +40,9 @@ def health_check(
     """
     # IMAP check is gated behind authentication to prevent unauthenticated DoS
     if check_imap:
-        expected_key = os.getenv("ADMIN_API_KEY")
-        if not expected_key or api_key != expected_key:
+        client_ip = request.client.host if request.client else None
+        trusted = client_ip and is_trusted_ip(client_ip)
+        if not trusted and not is_valid_admin_key(api_key):
             raise HTTPException(status_code=401, detail="X-API-Key required to use check_imap")
 
     checks: dict = {}
