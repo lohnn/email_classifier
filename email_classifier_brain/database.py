@@ -52,6 +52,8 @@ def init_db() -> None:
             is_read BOOLEAN DEFAULT 0,
             last_recheck TEXT,
             ambiguous_labels TEXT,
+            candidate_labels TEXT,
+            last_label_change TEXT,
             last_reclassified_at TEXT
         )
     ''')
@@ -68,6 +70,14 @@ def init_db() -> None:
         if 'ambiguous_labels' not in existing_cols:
             print("Migrating DB: Adding ambiguous_labels column")
             c.execute("ALTER TABLE logs ADD COLUMN ambiguous_labels TEXT")
+
+        if 'candidate_labels' not in existing_cols:
+            print("Migrating DB: Adding candidate_labels column")
+            c.execute("ALTER TABLE logs ADD COLUMN candidate_labels TEXT")
+
+        if 'last_label_change' not in existing_cols:
+            print("Migrating DB: Adding last_label_change column")
+            c.execute("ALTER TABLE logs ADD COLUMN last_label_change TEXT")
 
         if 'last_reclassified_at' not in existing_cols:
             print("Migrating DB: Adding last_reclassified_at column")
@@ -191,9 +201,10 @@ def add_log(
     c.execute('''
         INSERT INTO logs (
             id, timestamp, sender, recipient, cc, subject, body,
-            mass_mail, attachment_types, predicted_category, confidence_score, is_read
+            mass_mail, attachment_types, predicted_category, confidence_score, is_read,
+            last_label_change
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         ON CONFLICT(id) DO UPDATE SET
             timestamp=excluded.timestamp,
             sender=excluded.sender,
@@ -204,10 +215,12 @@ def add_log(
             mass_mail=excluded.mass_mail,
             attachment_types=excluded.attachment_types,
             predicted_category=excluded.predicted_category,
-            confidence_score=excluded.confidence_score
+            confidence_score=excluded.confidence_score,
+            last_label_change=excluded.last_label_change
     ''', (
         id, ts_str, sender, recipient, cc, subject, body,
-        int(mass_mail), att_types_str, predicted_category, confidence_score
+        int(mass_mail), att_types_str, predicted_category, confidence_score,
+        datetime.datetime.now().isoformat()
     ))
     conn.commit()
 
@@ -223,14 +236,19 @@ def get_log_by_id(log_id: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 def update_log_correction(log_id: str, corrected_category: str) -> None:
-    """Update a log entry with the corrected category."""
+    """Update a log entry with the corrected category.
+
+    Also stamps last_label_change — a correction is the local system learning
+    that this email's label was changed (used for recheck prioritisation).
+    """
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('''
         UPDATE logs
-        SET corrected_category = ?
+        SET corrected_category = ?,
+            last_label_change = ?
         WHERE id = ?
-    ''', (corrected_category, log_id))
+    ''', (corrected_category, datetime.datetime.now().isoformat(), log_id))
     conn.commit()
     conn.close()
 
@@ -347,7 +365,18 @@ def update_reclassified_at(log_id: str) -> None:
 def get_candidate_logs_for_recheck(limit: int = 200) -> List[Dict[str, Any]]:
     """
     Get logs eligible for re-check based on the gliding scale logic.
-    Prioritizes newer emails.
+
+    Ordering (fix for manual-tag-update latency, priority order):
+      1. Ambiguous rows first — they are blocked and need resolution,
+         and they only recover once the user removes one of the labels.
+      2. Most recent label-touch first (last_label_change, stamped on
+         classification/correction/re-classification; falls back to the
+         email timestamp). Known limitation: external Gmail tag edits are
+         invisible to the DB until this job fetches labels, so rows the
+         user just re-tagged manually only surface via (3).
+      3. Least-recently-checked first (round-robin among rows due at the
+         same priority) — prevents the newest-first bias from permanently
+         starving old but still-due rows under the LIMIT cap.
     """
     conn = get_db_connection()
     c = conn.cursor()
@@ -385,7 +414,11 @@ def get_candidate_logs_for_recheck(limit: int = 200) -> List[Dict[str, Any]]:
             OR
             -- Case 4: > 30 days old
             (timestamp <= ? AND (last_recheck IS NULL OR last_recheck < ?))
-        ORDER BY timestamp DESC
+        ORDER BY
+            (ambiguous_labels IS NOT NULL) DESC,
+            COALESCE(last_label_change, timestamp) DESC,
+            COALESCE(last_recheck, '') ASC,
+            timestamp DESC
         LIMIT ?
     '''
 
@@ -438,10 +471,35 @@ def get_all_corrected_logs() -> List[Dict[str, Any]]:
     finally:
         conn.close()
 
-def update_recheck_status(log_id: str, ambiguous_labels: Optional[List[str]] = None) -> None:
+def has_correction_since(since_iso: str) -> bool:
     """
-    Update the last_recheck timestamp and ambiguous_labels for a log.
-    If ambiguous_labels is None or empty, it sets the column to NULL.
+    True if any recheck / force_recheck job run recorded at least one
+    correction since the given ISO timestamp. Used by the daily update
+    job's zero-correction-streak health signal.
+    """
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        c.execute(
+            '''SELECT 1 FROM job_runs
+               WHERE job_name IN ('recheck', 'force_recheck')
+                 AND started_at >= ?
+                 AND COALESCE(emails_updated, 0) > 0
+               LIMIT 1''',
+            (since_iso,)
+        )
+        return c.fetchone() is not None
+    finally:
+        conn.close()
+
+def update_recheck_status(
+    log_id: str,
+    ambiguous_labels: Optional[List[str]] = None,
+    candidate_labels: Optional[List[str]] = None,
+) -> None:
+    """
+    Update the last_recheck timestamp, ambiguous_labels, and candidate_labels
+    for a log. Passing None or an empty list for either label field clears it.
     """
     conn = get_db_connection()
     c = conn.cursor()
@@ -449,13 +507,15 @@ def update_recheck_status(log_id: str, ambiguous_labels: Optional[List[str]] = N
     now_str = datetime.datetime.now().isoformat()
 
     amb_str = json.dumps(ambiguous_labels) if ambiguous_labels else None
+    cand_str = json.dumps(candidate_labels) if candidate_labels else None
 
     c.execute('''
         UPDATE logs
         SET last_recheck = ?,
-            ambiguous_labels = ?
+            ambiguous_labels = ?,
+            candidate_labels = ?
         WHERE id = ?
-    ''', (now_str, amb_str, log_id))
+    ''', (now_str, amb_str, cand_str, log_id))
 
     conn.commit()
     conn.close()
@@ -468,3 +528,30 @@ def get_ambiguous_logs() -> List[Dict[str, Any]]:
     rows = c.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+def get_candidate_category_logs() -> List[Dict[str, Any]]:
+    """Get logs flagged as carrying unknown Gmail labels (candidate new categories)."""
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM logs WHERE candidate_labels IS NOT NULL ORDER BY timestamp DESC"
+        )
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+def clear_candidate_labels(log_id: str) -> bool:
+    """Clear candidate_labels on a log (accept/discard resolution). Returns True if a row was updated."""
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE logs SET candidate_labels = NULL WHERE id = ? AND candidate_labels IS NOT NULL",
+            (log_id,)
+        )
+        conn.commit()
+        return c.rowcount > 0
+    finally:
+        conn.close()

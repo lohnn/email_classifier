@@ -11,12 +11,16 @@ Copy `.env.example` to `.env` and fill in your values.
 """
 
 import email.header
+import logging
 import os
 import re
+import threading
 from html.parser import HTMLParser
 from io import StringIO
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -67,6 +71,12 @@ UNSURE_CONFIDENCE_THRESHOLD = _get_float_env("UNSURE_CONFIDENCE_THRESHOLD", 0.65
 # If top1_prob - top2_prob < this delta, the model cannot clearly distinguish between categories.
 UNSURE_DELTA_THRESHOLD = _get_float_env("UNSURE_DELTA_THRESHOLD", 0.10)
 
+# Daily-update health knob: how many days without any recorded label correction
+# (while mail volume is non-zero) before the auto-update job warns about a
+# possibly-stalled correction→training-data loop in update_history.json.
+# The recheck cadence itself stays at RECHECK_INTERVAL_HOURS below.
+ZERO_CORRECTION_WARN_DAYS = int(os.getenv("ZERO_CORRECTION_WARN_DAYS") or 14)
+
 # Comma-separated list of your email addresses.
 # Used to determine your role in an email:
 #   - "Direct" if any of your addresses is in the "To" field
@@ -88,6 +98,101 @@ TRAINING_DATA_DIR = os.getenv("TRAINING_DATA_DIR") or "TrainingData"
 STORAGE_DIR = os.getenv("STORAGE_DIR") or "storage"
 DB_PATH = os.getenv("DB_PATH") or os.path.join(STORAGE_DIR, "email_history.db")
 E5_PREFIX = "passage: "
+
+# ---------------------------------------------------------------------------
+# Context-window budget (intfloat/multilingual-e5-small)
+# ---------------------------------------------------------------------------
+#
+# multilingual-e5-small accepts at most 512 tokens (including special tokens).
+# The tokenizer truncates silently from the end, which would silently eat body
+# text for long emails (newsletters, reply chains). To make truncation
+# deterministic and identical between training and inference, the body is
+# capped HERE, inside format_model_input(), before the string is built.
+#
+# Measured with AutoTokenizer.from_pretrained(BASE_MODEL) against the real
+# training data (2026-08-24):
+#   - bare template (all fields empty):           41 tokens
+#   - typical metadata prefix (real data, p90):   ~65 tokens
+#   - worst-case plausible prefix (long From/To/CC/Subject/attachments): 161 tokens
+#   - English prose ratio: ~4.7 chars/token (UTF-8 bytes ≈ chars here)
+#
+# Budget: 512 - 161 (worst prefix) - 31 (safety margin for tokenization
+# variance and multilingual expansion) = 320 tokens for the body.
+# At a conservative 4.0 chars/token (vs. measured 4.7) that is 1280 chars.
+MODEL_MAX_TOKENS = 512
+BODY_TOKEN_BUDGET = 320
+
+# Conservative characters-per-token ratio used to convert the token budget
+# into a character cap without shipping a tokenizer in the formatting path.
+_CHARS_PER_TOKEN = 4.0
+
+# Marker inserted between the kept head and tail when a body is truncated.
+# Pure ASCII so it never interacts with encoding edge cases.
+TRUNCATION_MARKER = " [...] "
+
+# Maximum body length in characters (derived from the token budget above).
+MAX_BODY_CHARS = int(BODY_TOKEN_BUDGET * _CHARS_PER_TOKEN)
+
+
+class _TruncationStats:
+    """Process-global counters for body truncation events.
+
+    Thread-safe: the classification/reclassification jobs run on the
+    single JobQueue worker thread while the API is served from the main
+    thread, so both can touch these counters.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._total = 0
+        self._truncated = 0
+
+    def record(self, truncated: bool) -> None:
+        with self._lock:
+            self._total += 1
+            if truncated:
+                self._truncated += 1
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "model_inputs_total": self._total,
+                "model_inputs_truncated": self._truncated,
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._total = 0
+            self._truncated = 0
+
+
+truncation_stats = _TruncationStats()
+
+
+def _truncate_body(body: str, max_chars: int = MAX_BODY_CHARS) -> tuple[str, bool]:
+    """
+    Deterministically cap a body to fit the E5 context-window budget.
+
+    Keeps the first half and the last half of the allowed character window,
+    joined by TRUNCATION_MARKER, so signatures and closing paragraphs survive
+    (they often carry class-relevant signal). Purely character-based and
+    side-effect-free, so training and inference always produce byte-identical
+    output for the same input.
+
+    Args:
+        body: The cleaned email body.
+        max_chars: Character cap derived from BODY_TOKEN_BUDGET.
+
+    Returns:
+        (possibly_truncated_body, was_truncated)
+    """
+    if len(body) <= max_chars:
+        return body, False
+
+    marker_len = len(TRUNCATION_MARKER)
+    head_len = (max_chars - marker_len) // 2
+    tail_len = max_chars - marker_len - head_len
+    return body[:head_len] + TRUNCATION_MARKER + body[-tail_len:], True
 
 # Regex to match long tracking/marketing URLs (common in newsletter emails)
 _TRACKING_URL_PATTERN = re.compile(
@@ -286,11 +391,22 @@ def format_model_input(
                           None or [] means no attachments.
 
     Returns:
-        A prefixed, structured string ready for model input.
+        A prefixed, structured string ready for model input. The body is
+        deterministically capped (see _truncate_body) so the result fits
+        within the E5 context window (MODEL_MAX_TOKENS tokens).
     """
     role = determine_role(to, cc)
     mass_mail_str = "Yes" if mass_mail else "No"
     att_types_str = format_attachment_types(attachment_types or [])
+
+    original_body_len = len(body)
+    body, was_truncated = _truncate_body(body)
+    truncation_stats.record(was_truncated)
+    if was_truncated:
+        logger.info(
+            "Body truncated to fit E5 context window: subject=%r, original_chars=%d, cap=%d",
+            subject, original_body_len, MAX_BODY_CHARS,
+        )
 
     structured = (
         f"Role: {role} | "

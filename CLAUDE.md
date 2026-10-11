@@ -25,6 +25,9 @@ python main.py  # or: uvicorn main:app --host 0.0.0.0 --port 8008
 # Train the model
 python train.py
 
+# Evaluate via stratified k-fold cross-validation (writes MODEL_EVAL.json)
+python evaluate.py
+
 # Run all tests
 pytest tests/
 
@@ -41,6 +44,7 @@ pytest tests/test_app.py::test_function_name
 - **`config.py`** — All configuration loaded from `.env`; also the single source of truth for `format_model_input()` — both training and inference must use this to keep inputs consistent
 - **`classify.py`** — SetFit inference engine; `predict_email()` and `predict_raw_email()`
 - **`train.py`** — SetFit training script; reads `.jsonl` files from `TrainingData/` to discover categories dynamically
+- **`evaluate.py`** — Stratified k-fold cross-validation harness (k=5); prints accuracy, per-class P/R/F1, confusion matrix, and unsure rate (via `classify.is_unsure_classification()`), and writes `MODEL_EVAL.json` (quality score of the training-data snapshot, not of a saved model) next to `MODEL_INFO.json`
 - **`database.py`** — SQLite persistence via `storage/email_history.db`; handles schema migration inline
 - **`imap_client.py`** — Gmail/IMAP integration (fetch, label, scan)
 - **`job_queue.py`** — Sequential `JobQueue` class + module-level `job_queue` singleton
@@ -64,7 +68,7 @@ pytest tests/test_app.py::test_function_name
 | `api/routes/classification.py` | `POST /run`, `POST /reclassify`, `GET /labels` |
 | `api/routes/jobs.py` | `GET /jobs/status`, `POST /jobs/cancel`, `GET /jobs/history` |
 | `api/routes/notifications.py` | `GET /notifications`, `POST /notifications/ack`, `POST /notifications/pop`, `GET /notifications/read` |
-| `api/routes/admin.py` | `POST /logs/{id}/correction`, `GET /logs/ambiguous`, all `/admin/*` endpoints |
+| `api/routes/admin.py` | `POST /logs/{id}/correction` (move-not-append), `GET /logs/ambiguous`, `/logs/candidate-categories` (+ accept/discard), all `/admin/*` endpoints (`/admin/retrain-status`) |
 | `api/routes/health.py` | `GET /health`, `GET /stats` |
 
 ### Background Jobs (APScheduler → JobQueue)

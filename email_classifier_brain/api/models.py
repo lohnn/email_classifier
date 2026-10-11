@@ -14,8 +14,15 @@ class CorrectionRequest(BaseModel):
     corrected_category: str
 
 
+class CandidateCategoryRequest(BaseModel):
+    """A user-proposed new category for a log flagged with unknown Gmail labels."""
+    category: str
+
+
 class StatsResponse(BaseModel):
     stats: dict
+    model_inputs_total: int = 0
+    model_inputs_truncated: int = 0
 
 
 class Notification(BaseModel):

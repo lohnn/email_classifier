@@ -56,6 +56,7 @@ import torch
 from datasets import Dataset
 from setfit import SetFitModel, Trainer, TrainingArguments
 
+import config
 from config import (
     BASE_MODEL,
     MODEL_OUTPUT_DIR,
@@ -80,11 +81,59 @@ class EmailSample:
     cc: str = ""
     mass_mail: bool = False
     attachment_types: list[str] = field(default_factory=list)
+    # Provenance for duplicate resolution (which file / which line fed this)
+    source_path: str = ""
+    source_line: int = 0
 
 
 # ---------------------------------------------------------------------------
 # 2. Data Loader
 # ---------------------------------------------------------------------------
+
+def _resolve_duplicates(samples: list[EmailSample], file_mtimes: dict) -> tuple[list[EmailSample], list[dict]]:
+    """
+    Resolve duplicate (subject, body) examples across the corpus: the same
+    email must train under exactly ONE label.
+
+    The winner is the LATEST write (recency rank: file mtime → line position
+    → file path as deterministic tiebreak for fresh checkouts where git
+    pull equalises mtimes). Resolution is LOUD, never silent: every conflict
+    is printed so a stale dual-labelled corpus (the pre-move append-era
+    artifact) cannot hide inside training.
+
+    Returns (deduplicated_samples, resolution_records).
+    """
+    seen: dict[tuple, tuple] = {}  # key -> (rank, sample)
+    resolutions: list[dict] = []
+
+    for sample in samples:
+        key = (sample.subject, sample.body)
+        rank = (
+            file_mtimes.get(sample.source_path, 0.0),
+            sample.source_line,
+            sample.source_path,
+        )
+        if key not in seen:
+            seen[key] = (rank, sample)
+            continue
+
+        prev_rank, prev = seen[key]
+        if rank > prev_rank:
+            seen[key] = (rank, sample)
+            resolutions.append({
+                "key": key,
+                "kept": sample,
+                "discarded": prev,
+            })
+        else:
+            resolutions.append({
+                "key": key,
+                "kept": prev,
+                "discarded": sample,
+            })
+
+    return [s for _, s in seen.values()], resolutions
+
 
 def load_training_data(data_dir: str) -> list[EmailSample]:
     """
@@ -93,6 +142,11 @@ def load_training_data(data_dir: str) -> list[EmailSample]:
     Recursively walks {data_dir} for .jsonl files. The label is derived
     from the path relative to {data_dir}, with the .jsonl extension
     stripped. Subdirectories become label hierarchy separated by '/'.
+
+    Duplicate (subject, body) examples — e.g. the same email appended to two
+    label files before corrections became moves — are resolved to their
+    latest version with a loud warning; the trainer never trains one email
+    under two labels.
 
     Examples:
         TrainingData/URGENT.jsonl          → label "URGENT"
@@ -103,9 +157,10 @@ def load_training_data(data_dir: str) -> list[EmailSample]:
         data_dir: Path to the root training data directory.
 
     Returns:
-        List of EmailSample instances.
+        List of EmailSample instances (deduplicated).
     """
     samples: list[EmailSample] = []
+    file_mtimes: dict[str, float] = {}
 
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(
@@ -123,9 +178,10 @@ def load_training_data(data_dir: str) -> list[EmailSample]:
             label_name = os.path.splitext(rel_path)[0].replace(os.sep, '/')
 
             filepath = os.path.join(dirpath, filename)
+            file_mtimes[filepath] = os.path.getmtime(filepath)
 
             with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
+                for line_no, line in enumerate(f, start=1):
                     line = line.strip()
                     if not line:
                         continue
@@ -140,9 +196,29 @@ def load_training_data(data_dir: str) -> list[EmailSample]:
                             cc=entry.get("cc", ""),
                             mass_mail=entry.get("mass_mail", False),
                             attachment_types=entry.get("attachment_types", []),
+                            source_path=filepath,
+                            source_line=line_no,
                         ))
                     except json.JSONDecodeError as e:
                         print(f"Warning: Skipping invalid JSON line in {filepath}: {e}")
+
+    samples, resolutions = _resolve_duplicates(samples, file_mtimes)
+
+    if resolutions:
+        print("=" * 70)
+        print(f"WARNING: {len(resolutions)} duplicate (subject, body) example(s) "
+              f"found across label files. Resolving to the LATEST version:")
+        for res in resolutions:
+            kept = res["kept"]
+            discarded = res["discarded"]
+            print(
+                f"  - subject={res['key'][0][:60]!r}\n"
+                f"      kept      {kept.label!r} ({kept.source_path}:{kept.source_line})\n"
+                f"      discarded {discarded.label!r} ({discarded.source_path}:{discarded.source_line})"
+            )
+        print("  If a discarded label is the CORRECT one, move the example file "
+              "into the right label file (corrections are moves) and retrain.")
+        print("=" * 70)
 
     if not samples:
         raise ValueError(
@@ -193,6 +269,16 @@ def build_dataset(
 
     print(f"Discovered {len(unique_labels)} categories: {unique_labels}")
     print(f"Dataset size: {len(dataset)} samples")
+
+    # Surface body-truncation prevalence for this dataset (observable signal,
+    # not just a log line): how many samples had their body capped to fit the
+    # E5 context window.
+    trunc = config.truncation_stats.snapshot()
+    print(
+        f"Body truncation: {trunc['model_inputs_truncated']}/{trunc['model_inputs_total']} "
+        f"samples exceeded {config.MAX_BODY_CHARS} body chars "
+        f"(E5 budget: {config.BODY_TOKEN_BUDGET} of {config.MODEL_MAX_TOKENS} tokens)"
+    )
 
     # Print a sample input for verification
     if texts:
