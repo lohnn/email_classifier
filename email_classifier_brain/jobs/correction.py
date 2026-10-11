@@ -19,6 +19,24 @@ from jobs.training_data import add_to_training_data
 logger = logging.getLogger(__name__)
 
 
+def _candidate_labels(found_labels: list, known_labels: set) -> list:
+    """
+    Labels on an email that the model has never trained on — i.e. potential
+    new categories the user tagged manually — excluding the system labels
+    (VERIFIED marker and the UNSURE flag, which are flags, not categories).
+
+    These become observable 'candidate new category' events the user can
+    admit or discard via the API, instead of manual tags being silently
+    dropped by the trained-labels filter.
+    """
+    return sorted(
+        lbl for lbl in found_labels
+        if lbl not in known_labels
+        and lbl != config.VERIFICATION_LABEL
+        and lbl != config.UNSURE_LABEL
+    )
+
+
 def _resolve_correction(trained_found, is_verified, current_local):
     """
     Determine correction action based on found IMAP labels vs local state.
@@ -123,6 +141,8 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
 
             is_verified = config.VERIFICATION_LABEL in found_labels
 
+            unknown_labels = _candidate_labels(found_labels, known_categories)
+
             current_local = log['corrected_category'] or log['predicted_category']
 
             result = _resolve_correction(trained_found, is_verified, current_local)
@@ -133,13 +153,17 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
 
             if is_ambiguous:
                 logger.info(f"Ambiguous labels for {gid}: {trained_found}")
-                database.update_recheck_status(gid, ambiguous_labels=trained_found)
+                database.update_recheck_status(
+                    gid,
+                    ambiguous_labels=trained_found,
+                    candidate_labels=(unknown_labels or None),
+                )
                 ambiguous_count += 1
             else:
                 if correction_candidate:
                     logger.info(f"Detected external correction for {gid}: {current_local} -> {correction_candidate}")
 
-                    add_to_training_data(log, correction_candidate)
+                    add_to_training_data(log, correction_candidate, previous_category=current_local)
                     database.update_log_correction(gid, correction_candidate)
 
                     if cleanup_needed:
@@ -160,7 +184,11 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
                         database.update_log_correction(gid, verified_candidate)
                         updates_count += 1
 
-                database.update_recheck_status(gid, ambiguous_labels=None)
+                database.update_recheck_status(
+                    gid,
+                    ambiguous_labels=None,
+                    candidate_labels=(unknown_labels or None),
+                )
 
         logger.info(f"Re-check finished. Updates: {updates_count}, Ambiguous: {ambiguous_count}")
         final_status = "cancelled" if was_cancelled else "success"
@@ -283,6 +311,8 @@ def force_check_corrections_job(trigger: str = "scheduled"):
 
                 is_verified = config.VERIFICATION_LABEL in found_labels
 
+                unknown_labels = _candidate_labels(found_labels, known_categories)
+
                 current_local = log['corrected_category'] or log['predicted_category']
 
                 result = _resolve_correction(trained_found, is_verified, current_local)
@@ -293,12 +323,16 @@ def force_check_corrections_job(trigger: str = "scheduled"):
 
                 if is_ambiguous:
                     logger.info(f"Ambiguous labels for {gid}: {trained_found}")
-                    database.update_recheck_status(gid, ambiguous_labels=trained_found)
+                    database.update_recheck_status(
+                        gid,
+                        ambiguous_labels=trained_found,
+                        candidate_labels=(unknown_labels or None),
+                    )
                     ambiguous_count += 1
                 else:
                     if correction_candidate:
                         logger.info(f"Detected external correction for {gid}: {current_local} -> {correction_candidate}")
-                        add_to_training_data(log, correction_candidate)
+                        add_to_training_data(log, correction_candidate, previous_category=current_local)
                         database.update_log_correction(gid, correction_candidate)
                         if cleanup_needed:
                             logger.info(f"Removing old label {current_local} from {gid}")
@@ -315,7 +349,11 @@ def force_check_corrections_job(trigger: str = "scheduled"):
                             database.update_log_correction(gid, verified_candidate)
                             updates_count += 1
 
-                    database.update_recheck_status(gid, ambiguous_labels=None)
+                    database.update_recheck_status(
+                        gid,
+                        ambiguous_labels=None,
+                        candidate_labels=(unknown_labels or None),
+                    )
 
             logger.info(f"Batch {batch_num} done. Running totals — Updates: {updates_count}, Ambiguous: {ambiguous_count}")
 

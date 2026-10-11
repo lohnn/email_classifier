@@ -10,6 +10,7 @@ import logging
 from typing import Optional
 
 import classify
+import config
 import database
 import imap_client
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security
@@ -105,6 +106,16 @@ def get_stats(
     """
     Get classification statistics (counts per category).
     Optionally filter by start_time and end_time (ISO format).
+
+    Also returns body-truncation prevalence: how many model inputs built in
+    this process had their body capped to fit the E5 context window
+    (config.MAX_BODY_CHARS). This is the observable signal for the silent
+    accuracy leak that over-long inputs used to cause.
     """
     stats = database.get_stats(start_time, end_time)
-    return {"stats": stats}
+    truncation = config.truncation_stats.snapshot()
+    return {
+        "stats": stats,
+        "model_inputs_total": truncation["model_inputs_total"],
+        "model_inputs_truncated": truncation["model_inputs_truncated"],
+    }

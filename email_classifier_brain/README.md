@@ -27,6 +27,7 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
 ├── config.py              # Shared configuration & input formatting
 ├── job_queue.py           # Sequential JobQueue class + module-level singleton
 ├── train.py               # SetFit training script
+├── evaluate.py            # Cross-validation evaluation harness
 ├── classify.py            # Inference engine
 ├── api/                   # HTTP API layer
 │   ├── models.py          # Pydantic request/response models
@@ -57,7 +58,8 @@ workstation and deploy for CPU inference on a **Raspberry Pi 4** (4 GB RAM).
     ├── model.safetensors
     ├── model_head.pkl
     ├── label_mapping.json
-    └── MODEL_INFO.json
+    ├── MODEL_INFO.json
+    └── MODEL_EVAL.json
 ├── storage/               # Persistent data
 │   └── email_history.db   # SQLite logs and notification state
 ```
@@ -151,6 +153,12 @@ Each line in the `.jsonl` file is a single JSON object:
 | `mass_mail`        | bool     | `true` if List-Unsubscribe header present      |
 | `attachment_types` | string[] | File extensions, e.g. `["PDF", "DOCX", "ICS"]` |
 
+One email must appear under exactly **one** label file. Corrections are
+moves (`jobs/training_data.py` removes the `(subject, body)` copy from the
+previous label's file when it writes the new one), and `train.py` resolves
+any legacy cross-file duplicates to their **latest** version with a loud
+printed warning — a stale double-labelled corpus cannot silently train.
+
 ## Model Input Format
 
 The structured string sent to the model looks like:
@@ -158,6 +166,30 @@ The structured string sent to the model looks like:
 ```
 passage: Role: Direct | Mass Mail: No | Attachment Types: [PDF] | From: ops@company.com | To: me@company.com | Subject: Server is down | Body: All services offline...
 ```
+
+### Context-window cap (body truncation)
+
+`intfloat/multilingual-e5-small` accepts at most **512 tokens**; the tokenizer
+truncates silently from the end, which would silently eat body text on long
+newsletters and reply chains. To prevent that silent accuracy leak,
+`config.format_model_input()` caps the body itself before building the string:
+
+- The cap is **`config.MAX_BODY_CHARS` (1280 chars ≈ 320 tokens)** — the
+  512-token window minus the worst measured metadata prefix (161 tokens,
+  measured with the real tokenizer) minus a safety margin.
+- Long bodies keep the **first half and the last half** of the window, joined
+  by a ` [...] ` marker, so signatures and closing paragraphs survive.
+- The cap is purely character-based and deterministic — training and
+  inference always produce byte-identical inputs for the same email.
+
+Prevalence is observable, not just logged (a log line is only read when
+someone already suspects a problem):
+
+- `GET /stats` returns `model_inputs_total` and `model_inputs_truncated`
+  counters for the running process.
+- `python evaluate.py` prints a `Body truncation: N/M inputs (x%)` line and
+  records a `body_truncation` block in `MODEL_EVAL.json`.
+- `train.py` prints the same count when building the dataset.
 
 ## Quick Start
 
@@ -225,6 +257,48 @@ label = predict_raw_email(msg)
 
 `classify.py` picks up new labels automatically from `model/label_mapping.json`.
 
+**Via a manual Gmail tag:** if you tag an email with a label the model has
+never heard of, the re-check job records it as a *candidate new category*
+(visible via `GET /logs/candidate-categories`). Accepting it
+(`POST /logs/candidate-categories/{id}/accept`) writes the training file and
+records the correction; the category only takes effect for classification
+after the next retrain. Discarding it just clears the flag.
+
+## Evaluating the Model
+
+Training prints "Training complete" and nothing else — with a tiny dataset
+there is no way to tell whether a retrain helped or hurt. `evaluate.py`
+answers that with stratified k-fold cross-validation over the current
+`TrainingData/` snapshot:
+
+```bash
+python evaluate.py            # k=5 (default)
+python evaluate.py --folds 3  # fewer folds (faster, noisier)
+```
+
+Every example is held out exactly once: k throwaway models are trained on
+k-1 folds and validated on the held-out fold. The pooled out-of-fold
+predictions produce:
+
+- **Overall accuracy**
+- **Per-class precision / recall / F1** (with support)
+- **Confusion matrix** (printed as a readable table)
+- **Unsure rate** — fraction of held-out predictions that would get the
+  `UNSURE_LABEL` (uses the same `is_unsure_classification()` thresholds as
+  inference)
+- **Body truncation rate** — how many inputs hit the E5 context-window body
+  cap during formatting (see "Context-window cap" below)
+
+The report is saved as `MODEL_EVAL.json` next to `MODEL_INFO.json` in the
+model directory (`MODEL_DIR`). Note the semantics: cross-validation does
+**not** produce or modify the saved model — `MODEL_EVAL.json` is the quality
+score of the *current training-data snapshot*, and it records the training
+data's git repo/commit so you can compare scores across retrains.
+
+Each category needs at least k examples (one held out per fold). With tiny
+datasets the metrics are high-variance — treat them as a signal, not a
+guarantee.
+
 ## Microservice API
 
 The brain runs a FastAPI microservice for inference, monitoring, and feedback.
@@ -252,14 +326,18 @@ Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
 | `POST` | `/notifications/ack`             | Mark specific (or all) notifications as read.        |
 | `POST` | `/notifications/pop`             | Fetch and mark unread notifications as read.         |
 | `GET`  | `/notifications/read`            | Get already-read notifications within a time range.  |
-| `POST` | `/logs/{id}/correction`          | Submit a category correction for a logged email.     |
+| `POST` | `/logs/{id}/correction`          | Submit a category correction for a logged email. Correction is a **move**: the example is written to the new category's file and removed from the previous one. |
 | `GET`  | `/logs/ambiguous`                | Get logs flagged with multiple conflicting labels.   |
+| `GET`  | `/logs/candidate-categories`     | Get logs carrying Gmail labels the model has never trained on (candidate new categories). |
+| `POST` | `/logs/candidate-categories/{id}/accept`  | Admit a candidate category: writes the training file, records the correction, marks the email VERIFIED. Takes effect for classification after the next retrain. |
+| `POST` | `/logs/candidate-categories/{id}/discard` | Discard a candidate new-category flag (no training-data or Gmail changes). |
 | `POST` | `/admin/check-corrections`       | Discovery job for external label changes.            |
 | `POST` | `/admin/force-check-corrections` | Exhaustive re-check of all history labels.           |
 | `POST` | `/admin/backfill-training-data`  | Rebuild JSONL from database corrections.             |
 | `POST` | `/admin/trigger-update`          | Pull code/model and restart service.                 |
 | `POST` | `/admin/push-training-data`      | Manually push `TrainingData/` to Git.                |
 | `GET`  | `/admin/update-errors`           | Get history of automated update failures.            |
+| `GET`  | `/admin/retrain-status`          | Whether training data is ahead of the deployed model (`retrain_worthwhile` + both commit ids). |
 
 ## Google Drive — Model Storage
 
@@ -296,10 +374,27 @@ The service uses `APScheduler` to handle recurring tasks:
 | **Classification** | 5 mins           | `ENABLE_AUTO_CLASSIFICATION` (on/off)                | Fetches unprocessed emails from Gmail and applies labels.   |
 | **Re-check**       | 12 hrs           | `RECHECK_INTERVAL_HOURS`, `ENABLE_RECHECK_JOB`       | Discovers label changes made manually on the server.        |
 | **Re-classify**    | 12 hrs           | `RECLASSIFY_INTERVAL_HOURS`, `ENABLE_RECLASSIFY_JOB` | Updates local history labels if the model has improved.     |
-| **Auto-Update**    | 1 day            | —                                                    | Pushes training data to Git and triggers a service refresh. |
+| **Auto-Update**    | 1 day            | `ZERO_CORRECTION_WARN_DAYS` (warn threshold)         | Pushes training data to Git, emits loop-health signals, and triggers a service refresh. |
 
 The re-check job uses a "gliding scale" based on email age — checking newer
-emails more frequently than older ones to optimize performance.
+emails more frequently than older ones to optimize performance. Among the
+rows that are due, ordering prioritises (1) ambiguous rows, (2) rows whose
+label changed most recently, (3) rows checked longest ago — so a manual
+re-tag is picked up on the next pass instead of waiting behind a
+newest-first queue.
+
+### Daily health signals (update_history.json)
+
+The daily auto-update job appends to `update_history.json` (the same file
+`run_service.sh` writes) whenever the correction→training-data loop shows
+failure signatures — push failures, training-data commits that never
+reached the remote, or a `ZERO_CORRECTION_WARN_DAYS`-day stretch with zero
+corrections while mail volume is non-zero (the March 2026 corpus-freeze
+signature). It also emits a one-time **"Retrain worthwhile"** entry when
+the training data contains commits the deployed model was never trained
+on; training itself is never automatic — `./retrain.sh` on the trainer
+machine stays the invocation path, and `GET /admin/retrain-status` exposes
+the same state.
 
 ## Retraining Workflow
 

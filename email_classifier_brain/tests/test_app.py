@@ -68,7 +68,28 @@ def mock_classify():
 def test_get_stats_empty(client):
     response = client.get("/stats", headers={"X-API-Key": "testkey"})
     assert response.status_code == 200
-    assert response.json() == {"stats": {}}
+    data = response.json()
+    assert data["stats"] == {}
+    # Truncation prevalence fields are always present (observable signal)
+    assert data["model_inputs_total"] >= 0
+    assert data["model_inputs_truncated"] >= 0
+
+def test_stats_surfaces_truncation_prevalence(client):
+    """GET /stats exposes body-truncation counts as an observable metric (W-022)."""
+    import config
+    config.truncation_stats.reset()
+    try:
+        # One short input (no truncation) and one over-long input (truncated)
+        config.format_model_input(subject="a", body="short", to="me@company.com")
+        config.format_model_input(subject="b", body="word " * 5000, to="me@company.com")
+
+        response = client.get("/stats", headers={"X-API-Key": "testkey"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model_inputs_total"] >= 2
+        assert data["model_inputs_truncated"] >= 1
+    finally:
+        config.truncation_stats.reset()
 
 def test_run_classification(client, mock_imap_client, mock_classify):
 
