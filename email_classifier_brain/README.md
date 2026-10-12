@@ -396,6 +396,48 @@ on; training itself is never automatic — `./retrain.sh` on the trainer
 machine stays the invocation path, and `GET /admin/retrain-status` exposes
 the same state.
 
+### Corrections vs. archive & delete (known behaviors)
+
+- **Correct via the UI/API first, then archive or trash → safe.** The
+  correction endpoint writes the training-data line immediately from the
+  database copy — what Gmail does with the message afterwards never edits
+  or removes it.
+- **Re-label in Gmail, then remove it from the Inbox (archive/trash) before
+  a re-check runs → still picked up.** The label reader falls back to a
+  bounded out-of-inbox supplement: ids the INBOX pass missed are retried
+  with the same `X-GM-MSGID` search in `[Gmail]/All Mail` and, if still
+  missing, `[Gmail]/Trash` (batch ≤ 50, the session mailbox is always
+  restored to INBOX). **Spam is deliberately not searched** — repairing a
+  classification from inside Spam is not a supported flow, and searching
+  Spam could resurrect junk into training rankings. If a message is
+  permanently purged or sits in Spam, the recheck keeps the row pending;
+  the UI **Correct** button remains the universal fallback because it
+  rewrites the example from what the system already stored.
+- **Resolving a correction clears the classifier's UNSURE flag.** When a
+  correction resolves (re-check, force re-check, or the UI/API endpoint),
+  the brain removes the old category label **and** the
+  `UNSURE_CLASSIFICATION` flag from the email in Gmail, then applies
+  `VERIFIED` as before. Only classifier-owned labels are removed — your own
+  (unknown) labels are never touched and are surfaced as candidate new
+  categories instead.
+- **Confirming a correct prediction = add `VERIFIED`, not removing the UNSURE flag.**
+  When the re-check sees `VERIFIED` on an email whose single trained label
+  matches what the database already believes, it writes the confirmed
+  example into that category's `.jsonl`, marks the row as
+  confirmed-by-human (`corrected_category`) — which **excludes it from
+  re-classification**, so the model never second-guesses that email again —
+  and strips a leftover `UNSURE_CLASSIFICATION` flag automatically (a no-op
+  when the email doesn't carry it). Removing `UNSURE_CLASSIFICATION` alone
+  does nothing: no example is written, and while the row is still
+  unconfirmed the re-classify job may re-apply the flag (fresh model
+  confidence decides) or even re-label the email if its prediction has
+  changed. Works the same for archived and not-yet-purged trashed mail
+  (the out-of-inbox label supplement makes those readable).
+- **Deleting an email never removes its training example.** Nothing watches
+  Trash — a corrected example stays in its `.jsonl` and keeps teaching the
+  model even after the email is gone. Deleting mail is not a way to retract
+  a label: edit the training file (or correct the email again before deletion).
+
 ## Retraining Workflow
 
 On the trainer machine (workstation with GPU/MPS):

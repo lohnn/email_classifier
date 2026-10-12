@@ -61,6 +61,9 @@ def correct_label(log_id: str, req: CorrectionRequest):
         client.apply_label(log_id, req.corrected_category)
         if old_label and old_label != req.corrected_category:
             client.remove_label(log_id, old_label)
+        # A human has resolved the label — clear the classifier's UNSURE flag
+        # (classifier-owned only: the user's own labels are never touched)
+        client.remove_label(log_id, config.UNSURE_LABEL)
         client.apply_label(log_id, config.VERIFICATION_LABEL)
     except Exception as e:
         logger.error(f"Failed to update IMAP labels for {log_id}: {e}")
