@@ -411,6 +411,21 @@ label changed most recently, (3) rows checked longest ago — so a manual
 re-tag is picked up on the next pass instead of waiting behind a
 newest-first queue.
 
+**Cadence ≠ freshness guarantee — with one hardcoded exception.** The glide
+windows re-suppress rows: a label change on a fresh email is picked up on
+the first pass at least 12 h after that email's previous re-check (1–7
+days old: ≥ 24 h; 7–30 days: ≥ 7 days; older: ≥ 30 days), no matter how
+often the job runs — so a sub-12h `RECHECK_INTERVAL_HOURS` speeds up
+*scans*, not *row revisits*. The exception, hardcoded by choice: an email
+younger than **2 hours** (by its own Date header) is eligible on **every**
+pass — a correction made within an email's first 2 hours resolves on the
+next cadence pass. A correction made later in day 0 follows the 12 h
+suppression, counted from the last sub-2h stamp (e.g. an email re-labeled
+in the evening after a midday re-check resolves the next morning).
+Immediate pickup for a specific known edit remains
+`POST /admin/force-check-corrections` (the only path that bypasses the
+glide windows).
+
 ### Daily health signals (update_history.json)
 
 The daily auto-update job appends to `update_history.json` (the same file

@@ -385,6 +385,7 @@ def get_candidate_logs_for_recheck(limit: int = 200) -> List[Dict[str, Any]]:
 
     # Thresholds for 'timestamp'
     t_1d = (now - datetime.timedelta(days=1)).isoformat()
+    t_2h = (now - datetime.timedelta(hours=2)).isoformat()
     t_7d = (now - datetime.timedelta(days=7)).isoformat()
     t_30d = (now - datetime.timedelta(days=30)).isoformat()
 
@@ -395,16 +396,28 @@ def get_candidate_logs_for_recheck(limit: int = 200) -> List[Dict[str, Any]]:
     r_30d = (now - datetime.timedelta(days=30)).isoformat()
 
     # Logic:
-    # 1. < 1 day old: recheck if last_recheck < 12h ago (or null)
+    # 1. < 1 day old: recheck if younger than 2h (FRESH-MAIL FAST PATH,
+    #    hardcoded by user choice — brand-new mail re-labeled in Gmail
+    #    resolves on the next cadence pass) OR last_recheck < 12h ago
+    #    (or null). Stamp interaction: while a row is under 2h old every
+    #    pass stamps last_recheck; once it crosses 2h the age fast path
+    #    falls away and the 12h suppression clock counts from that last
+    #    sub-2h stamp. Reproducible boundary math: eligibility via the
+    #    12h arm resumes when now > last_stamp + 12h, and the comparison
+    #    is strict ('<'), so a run landing exactly at stamp+12h does NOT
+    #    fire — the next pass does.
     # 2. 1-7 days old: recheck if last_recheck < 24h ago (or null)
     # 3. 7-30 days old: recheck if last_recheck < 7d ago (or null)
     # 4. > 30 days old: recheck if last_recheck < 30d ago (or null)
+    #
+    # Age uses the existing 'timestamp' column (the email's own Date
+    # header), consistent with the cohort logic above.
 
     query = '''
         SELECT * FROM logs
         WHERE
-            -- Case 1: < 1 day old
-            (timestamp > ? AND (last_recheck IS NULL OR last_recheck < ?))
+            -- Case 1: < 1 day old (with <2h fresh-mail fast path)
+            (timestamp > ? AND (timestamp > ? OR last_recheck IS NULL OR last_recheck < ?))
             OR
             -- Case 2: 1-7 days old
             (timestamp <= ? AND timestamp > ? AND (last_recheck IS NULL OR last_recheck < ?))
@@ -423,7 +436,7 @@ def get_candidate_logs_for_recheck(limit: int = 200) -> List[Dict[str, Any]]:
     '''
 
     params = (
-        t_1d, r_12h,           # Case 1
+        t_1d, t_2h, r_12h,     # Case 1 (fast path = age < 2h)
         t_1d, t_7d, r_24h,     # Case 2
         t_7d, t_30d, r_7d,     # Case 3
         t_30d, r_30d,          # Case 4
