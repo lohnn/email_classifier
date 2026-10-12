@@ -22,18 +22,28 @@ logger = logging.getLogger(__name__)
 def _candidate_labels(found_labels: list, known_labels: set) -> list:
     """
     Labels on an email that the model has never trained on — i.e. potential
-    new categories the user tagged manually — excluding the system labels
-    (VERIFIED marker and the UNSURE flag, which are flags, not categories).
+    new categories the user tagged manually — excluding:
+    - system labels: the VERIFIED marker and the UNSURE flag (flags, not
+      categories), and
+    - Gmail SYSTEM artifacts: backslash-prefixed IMAP system flags
+      ('\\Important', '\\Inbox', ...) and the user's own addresses, which
+      Gmail auto-applies to their own alias/outbound mail (config.MY_EMAILS,
+      already imported for role detection). Neither is ever a candidate —
+      they appear on nearly every email and would flood the queue.
 
-    These become observable 'candidate new category' events the user can
-    admit or discard via the API, instead of manual tags being silently
-    dropped by the trained-labels filter.
+    Applied per label BEFORE the list is stored, so a candidate_labels
+    column only ever contains genuine unknown tags. The filter returns ALL
+    qualifying unknown labels (the stored column is the fresh full set per
+    email each recheck — not first-only).
     """
+    my_emails = {addr.strip().lower() for addr in config.MY_EMAILS}
     return sorted(
         lbl for lbl in found_labels
         if lbl not in known_labels
         and lbl != config.VERIFICATION_LABEL
         and lbl != config.UNSURE_LABEL
+        and not lbl.startswith("\\")
+        and lbl.strip().lower() not in my_emails
     )
 
 

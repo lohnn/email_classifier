@@ -262,7 +262,14 @@ never heard of, the re-check job records it as a *candidate new category*
 (visible via `GET /logs/candidate-categories`). Accepting it
 (`POST /logs/candidate-categories/{id}/accept`) writes the training file and
 records the correction; the category only takes effect for classification
-after the next retrain. Discarding it just clears the flag.
+after the next retrain. Discarding it just clears the flag — it never
+touches your Gmail labels. Gmail **system artifacts never appear** in the
+queue: backslash-prefixed IMAP flags (`\Important`, `\Inbox`, …) and the
+auto-labels Gmail applies for your own addresses (`MY_EMAILS`) are filtered
+out before recording, so the queue is for genuine new tags only. Tags the
+model already knows never wait in the queue — they flow through the normal
+correction path (the candidate filter only sees labels OUTSIDE the trained
+set).
 
 ## Evaluating the Model
 
