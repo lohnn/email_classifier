@@ -198,3 +198,119 @@ def test_discard_endpoint_clears_flag(client):
         "/logs/candidate-categories/g1/discard", headers={"X-API-Key": "testkey"}
     )
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Wave G — the user's literal workflow: "add the correct label in Gmail,
+# then remove/archive the message", plus UNSURE-cleanup symmetry.
+# The out-of-inbox label *reading* itself is covered in test_imap_supplement;
+# here the recheck is fed the labels that reader produces.
+# ---------------------------------------------------------------------------
+
+def test_user_workflow_add_label_archive_then_recheck_moves_training_data(
+    client, mock_classify, mock_imap
+):
+    """User adds FOCUS to a NOISE-classified (and UNSURE-flagged) email and
+    archives it. The recheck must: resolve the correction, MOVE the training
+    example out of NOISE.jsonl into FOCUS.jsonl, clean up the classifier's
+    UNSURE flag and the old category label, apply VERIFIED, and never touch
+    the user's own labels or archive state."""
+    mock_classify.get_available_categories.return_value = ["NOISE", "URGENT", "FOCUS", "REFERENCE"]
+    _seed_log("g1", predicted="NOISE")
+    example = {"subject": "Seed g1", "body": "Body g1", "from": "s@x.com"}
+    with open(os.path.join(temp_data_dir, "NOISE.jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps(example) + "\n")
+
+    # Post-archive labels as the (supplemented) label reader returns them
+    mock_imap.get_labels_for_emails.side_effect = _labels_map(
+        {"g1": ["NOISE", "FOCUS", "UNSURE_CLASSIFICATION"]}
+    )
+
+    from jobs.correction import check_corrections_job
+    check_corrections_job(limit=10, trigger="manual")
+
+    # Training data MOVED, not appended
+    reads = {}
+    for label in ("NOISE", "FOCUS", "URGENT", "REFERENCE"):
+        path = os.path.join(temp_data_dir, f"{label}.jsonl")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                reads[label] = [json.loads(l) for l in f if l.strip()]
+    assert reads.get("NOISE") == []                     # old line GONE
+    assert [e["subject"] for e in reads.get("FOCUS", [])] == ["Seed g1"]
+
+    row = database.get_log_by_id("g1")
+    assert row["corrected_category"] == "FOCUS"         # resolved, NOT ambiguous
+    assert row["ambiguous_labels"] is None
+    assert row["candidate_labels"] is None              # UNSURE + VERIFIED never candidates
+
+    # Gmail tail: old category removed, UNSURE flag removed, VERIFIED applied;
+    # the user's FOCUS label is theirs — the brain must not re-apply it.
+    removed = [c.args for c in mock_imap.remove_label.call_args_list]
+    applied = [c.args for c in mock_imap.apply_label.call_args_list]
+    assert ("g1", "NOISE") in removed
+    assert ("g1", "UNSURE_CLASSIFICATION") in removed
+    assert all("FOCUS" not in args for args in applied)          # no re-applying the user's label
+    assert ("g1", "VERIFIED") in applied
+
+
+def test_prediction_plus_user_label_plus_unsure_resolves_not_ambiguous(
+    client, mock_classify, mock_imap
+):
+    """[predicted-P, user-added-R, UNSURE_CLASSIFICATION] must resolve to R:
+    the known-categories filter drops UNSURE (and VERIFIED) BEFORE the
+    exactly-2-trained-labels resolution — the whole user workflow hinges on
+    this not punting into ambiguous_labels."""
+    mock_classify.get_available_categories.return_value = ["NOISE", "URGENT", "FOCUS", "REFERENCE"]
+    _seed_log("g1", predicted="URGENT")
+    mock_imap.get_labels_for_emails.side_effect = _labels_map(
+        {"g1": ["URGENT", "FOCUS", "UNSURE_CLASSIFICATION"]}
+    )
+
+    from jobs.correction import check_corrections_job
+    check_corrections_job(limit=10, trigger="manual")
+
+    row = database.get_log_by_id("g1")
+    assert row["corrected_category"] == "FOCUS"
+    assert row["ambiguous_labels"] is None
+
+
+def test_cleanup_removes_unsure_but_never_user_labels(client, mock_classify, mock_imap):
+    """A correction that resolves while the user's own unknown tag sits on the
+    email: the UNSURE flag is cleared, the user's label is untouched (it is
+    recorded as a candidate new category instead)."""
+    mock_classify.get_available_categories.return_value = ["NOISE", "URGENT", "FOCUS", "REFERENCE"]
+    _seed_log("g1", predicted="NOISE")
+    mock_imap.get_labels_for_emails.side_effect = _labels_map(
+        {"g1": ["FOCUS", "MY_OWN_TAG", "UNSURE_CLASSIFICATION"]}
+    )
+
+    from jobs.correction import check_corrections_job
+    check_corrections_job(limit=10, trigger="manual")
+
+    row = database.get_log_by_id("g1")
+    assert row["corrected_category"] == "FOCUS"
+    assert json.loads(row["candidate_labels"]) == ["MY_OWN_TAG"]
+
+    removed = [c.args for c in mock_imap.remove_label.call_args_list]
+    assert ("g1", "UNSURE_CLASSIFICATION") in removed
+    assert all("MY_OWN_TAG" not in args for args in removed)
+
+
+def test_admin_correct_clears_unsure_flag(client, mock_classify, mock_imap):
+    mock_classify.get_available_categories.return_value = ["NOISE", "URGENT", "FOCUS", "REFERENCE"]
+    _seed_log("g1", predicted="NOISE")
+
+    response = client.post(
+        "/logs/g1/correction",
+        json={"corrected_category": "FOCUS"},
+        headers={"X-API-Key": "testkey"},
+    )
+    assert response.status_code == 200
+
+    removed = [c.args for c in mock_imap.remove_label.call_args_list]
+    assert ("g1", "NOISE") in removed
+    assert ("g1", "UNSURE_CLASSIFICATION") in removed
+    applied = [c.args for c in mock_imap.apply_label.call_args_list]
+    assert ("g1", "FOCUS") in applied
+    assert ("g1", "VERIFIED") in applied

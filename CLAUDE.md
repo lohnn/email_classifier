@@ -78,7 +78,7 @@ All recurring jobs are enqueued through `JobQueue` to run sequentially:
 | Job | Default | Description |
 |-----|---------|-------------|
 | Classification | every 5 min | Fetches unprocessed emails from IMAP, classifies, applies labels |
-| Re-check | every 12 hr | Detects manual label corrections in Gmail using a gliding-scale age priority |
+| Re-check | every 12 hr | Detects manual label corrections in Gmail using a gliding-scale age priority; label reads also cover out-of-inbox mail (All Mail/Trash supplement); resolving a correction clears the UNSURE flag |
 | Re-classify | every 12 hr (offset) | Re-runs predictions on existing logs with the current model |
 | Auto-update | every 1 day | Pushes training data to Git and restarts the service |
 

@@ -170,6 +170,12 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
                         logger.info(f"Removing old label {current_local} from {gid}")
                         client.remove_label(gid, current_local)
 
+                    # The classifier's UNSURE flag is meaningless once a human
+                    # has resolved this email's label — clear it alongside the
+                    # old category. Only classifier-owned labels are removed;
+                    # the user's own unknown labels (candidates) stay.
+                    client.remove_label(gid, config.UNSURE_LABEL)
+
                     if not is_verified:
                         logger.info(f"Adding {config.VERIFICATION_LABEL} to {gid}")
                         client.apply_label(gid, config.VERIFICATION_LABEL)
@@ -337,6 +343,9 @@ def force_check_corrections_job(trigger: str = "scheduled"):
                         if cleanup_needed:
                             logger.info(f"Removing old label {current_local} from {gid}")
                             client.remove_label(gid, current_local)
+                        # Same classifier-owned cleanup as the scheduled loop:
+                        # clear the stale UNSURE flag once a human resolved it
+                        client.remove_label(gid, config.UNSURE_LABEL)
                         if not is_verified:
                             logger.info(f"Adding {config.VERIFICATION_LABEL} to {gid}")
                             client.apply_label(gid, config.VERIFICATION_LABEL)

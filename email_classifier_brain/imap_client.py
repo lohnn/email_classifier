@@ -330,6 +330,15 @@ class GmailClient:
         """
         Fetch current labels for a list of Gmail IDs (X-GM-MSGID).
         Returns {gmail_id: [label1, label2, ...]}
+
+        The primary pass searches the selected INBOX mailbox. Gmail ids not
+        found there (archived, or trashed but not yet purged — the user's
+        "label it, then remove it from the inbox" workflow) are retried in a
+        bounded out-of-inbox supplement (_supplement_labels): the same
+        X-GM-MSGID OR-search executed in [Gmail]/All Mail and, for what is
+        still missing, [Gmail]/Trash. The session mailbox is always restored
+        to INBOX afterwards. Spam is deliberately NOT searched — repairing a
+        classification from inside Spam is not a supported flow.
         """
         def _do():
             self.connect()
@@ -381,45 +390,54 @@ class GmailClient:
                     if found_uids:
                         uids_to_fetch.extend(found_uids)
 
-            if not uids_to_fetch:
-                return results
+            if uids_to_fetch:
+                # Fetch in batches (re-using uids found from search)
+                # We fetch X-GM-MSGID again to map UID -> GmailID reliably
+                BATCH_SIZE = 50
+                for i in range(0, len(uids_to_fetch), BATCH_SIZE):
+                    batch_uids = uids_to_fetch[i:i+BATCH_SIZE]
+                    uid_str = b','.join(batch_uids)
 
-            # Fetch in batches (re-using uids found from search)
-            # We fetch X-GM-MSGID again to map UID -> GmailID reliably
-            BATCH_SIZE = 50
-            for i in range(0, len(uids_to_fetch), BATCH_SIZE):
-                batch_uids = uids_to_fetch[i:i+BATCH_SIZE]
-                uid_str = b','.join(batch_uids)
-
-                typ, data = self.connection.uid('FETCH', uid_str, '(X-GM-MSGID X-GM-LABELS)')
-                if typ != 'OK':
-                    continue
-
-                for response_part in data:
-                    if isinstance(response_part, tuple):
-                        metadata = response_part[0].decode('utf-8', errors='ignore')
-                    else:
-                        metadata = response_part.decode('utf-8', errors='ignore')
-
-                    # Extract X-GM-MSGID to map back to input
-                    msgid_match = X_GM_MSGID_PATTERN.search(metadata)
-                    if not msgid_match:
+                    typ, data = self.connection.uid('FETCH', uid_str, '(X-GM-MSGID X-GM-LABELS)')
+                    if typ != 'OK':
                         continue
-                    gid = msgid_match.group(1)
 
-                    # Extract labels
-                    labels = []
-                    match = X_GM_LABELS_PATTERN.search(metadata)
-                    if match:
-                        labels_str = match.group(1)
-                        # Parse labels taking quotes into account
-                        for m in LABEL_TOKEN_PATTERN.finditer(labels_str):
-                            if m.group(1):
-                                labels.append(m.group(1).replace('\\"', '"').replace('\\\\', '\\'))
-                            else:
-                                labels.append(m.group(2))
+                    for response_part in data:
+                        if isinstance(response_part, tuple):
+                            metadata = response_part[0].decode('utf-8', errors='ignore')
+                        else:
+                            metadata = response_part.decode('utf-8', errors='ignore')
 
-                    results[gid] = labels
+                        # Extract X-GM-MSGID to map back to input
+                        msgid_match = X_GM_MSGID_PATTERN.search(metadata)
+                        if not msgid_match:
+                            continue
+                        gid = msgid_match.group(1)
+
+                        # Extract labels
+                        labels = []
+                        match = X_GM_LABELS_PATTERN.search(metadata)
+                        if match:
+                            labels_str = match.group(1)
+                            # Parse labels taking quotes into account
+                            for m in LABEL_TOKEN_PATTERN.finditer(labels_str):
+                                if m.group(1):
+                                    labels.append(m.group(1).replace('\\"', '"').replace('\\\\', '\\'))
+                                else:
+                                    labels.append(m.group(2))
+
+                        results[gid] = labels
+
+            # Out-of-inbox supplement: retry only the ids the INBOX pass did
+            # not find (archived, or trashed but not purged). Bounded at the
+            # same SEARCH_BATCH; missing results simply stay absent from the
+            # returned dict — the recheck treats them the same as before
+            # (correction.py skips unknown ids).
+            missing = [g for g in gmail_ids if str(g) not in results]
+            if missing:
+                supplement = self._supplement_labels(missing)
+                if supplement:
+                    results.update(supplement)
 
             return results
 
@@ -434,6 +452,148 @@ class GmailClient:
         except Exception as e:
             logger.error(f"Error fetching labels batch: {e}")
             return {}
+
+    def _supplement_labels(self, missing: List[str]) -> Dict[str, List[str]]:
+        """
+        Bounded out-of-inbox label read for gmail ids the INBOX pass missed.
+
+        Re-runs the same X-GM-MSGID OR-search in [Gmail]/All Mail and, for
+        whatever is still missing, [Gmail]/Trash; the session mailbox is
+        restored to INBOX in all paths. Every failure degrades to today's
+        behaviour: no entries for the missing ids (the recheck's silent-skip
+        path). NOTE: we do NOT use `X-GM-RAW 'in:anywhere …'`, because
+        X-GM-MSGID is not a Gmail web-search operator and the raw search
+        would silently match nothing; a temporary mailbox selection with the
+        standard search key reaches the same messages.
+
+        Spam is skipped deliberately (see get_labels_for_emails docstring).
+        """
+        try:
+            if not self.connection:
+                return {}
+            return self._labels_search_in_mailboxes(missing, self._supplement_mailbox_names())
+        except Exception as e:
+            logger.info(f"Out-of-inbox label supplement unavailable ({e}); "
+                        f"missing ids stay unread")
+            return {}
+
+    def _supplement_mailbox_names(self) -> List[str]:
+        """
+        Resolve the special-use mailbox names to search for out-of-inbox
+        mail, newest-traffic first. Uses LIST + RFC 6154 special-use flags
+        (\\All, \\Trash) so localized Gmail UI languages still resolve;
+        falls back to the conventional [Gmail]/ names.
+        """
+        names: List[str] = []
+        all_mail_found = False
+        trash_found = False
+        try:
+            typ, data = self.connection.list('""', '*')
+            if typ == 'OK' and data:
+                for entry in data:
+                    text = entry.decode('utf-8', errors='ignore') if isinstance(entry, bytes) else str(entry)
+                    flags = text.split(')', 1)[0].lower()
+                    name = text.split(')', 1)[-1].split('/', 1)[-1].strip().strip('"')
+                    if '\\all' in flags:
+                        names.insert(0, name)   # All Mail first
+                        all_mail_found = True
+                    elif '\\trash' in flags:
+                        trash_found = True
+                        names.append(name)      # Trash after All Mail
+        except Exception as e:
+            logger.info(f"IMAP LIST for special mailboxes failed ({e}); using default names")
+
+        # Fallback: conventional (English) Gmail mailbox names — used when
+        # flag-based discovery found nothing (older/quirkier servers).
+        if not all_mail_found and "[Gmail]/All Mail" not in names:
+            names.insert(0, "[Gmail]/All Mail")
+        if not trash_found and "[Gmail]/Trash" not in names:
+            names.append("[Gmail]/Trash")
+        return names
+
+    def _labels_search_in_mailboxes(self, gmail_ids: List[str], mailbox_names: List[str]) -> Dict[str, List[str]]:
+        """
+        Search the given mailboxes for the gmail ids not yet resolved and
+        return {gmail_id: labels}. Always restores INBOX as the selected
+        mailbox before returning, and only ever issues batches of at most
+        SEARCH_BATCH (50) ids — same cost shape as the primary pass.
+        """
+        results: Dict[str, List[str]] = {}
+        remaining = list(gmail_ids)
+        SEARCH_BATCH = 50
+
+        for mailbox in mailbox_names:
+            if not remaining:
+                break
+            try:
+                typ, _ = self.connection.select(mailbox)
+                if typ != 'OK':
+                    continue
+            except Exception as e:
+                logger.info(f"Could not select {mailbox} for label supplement: {e}")
+                continue
+
+            still_missing: List[str] = []
+            fetch_uids: set = set()
+            for i in range(0, len(remaining), SEARCH_BATCH):
+                batch_gids = remaining[i:i + SEARCH_BATCH]
+                if len(batch_gids) == 1:
+                    criteria = f'X-GM-MSGID {batch_gids[0]}'
+                else:
+                    prefixes = "OR " * (len(batch_gids) - 1)
+                    keys = " ".join(f'X-GM-MSGID {gid}' for gid in batch_gids)
+                    criteria = f'{prefixes}{keys}'
+
+                typ, data = self.connection.uid('SEARCH', None, criteria)
+                if typ == 'OK' and data[0]:
+                    found_uids = data[0].split()
+                    fetch_uids.update(found_uids)
+                # Whatever this batch/bbox did not produce is retried in the
+                # next mailbox (or silently dropped if none left)
+                # (resolved ids are removed below after mapping)
+
+            for i in range(0, len(fetch_uids), SEARCH_BATCH):
+                batch_uids = sorted(fetch_uids)[i:i + SEARCH_BATCH]
+                uid_str = b','.join(batch_uids)
+                typ, data = self.connection.uid('FETCH', uid_str, '(X-GM-MSGID X-GM-LABELS)')
+                if typ != 'OK':
+                    continue
+                for response_part in data:
+                    if isinstance(response_part, tuple):
+                        metadata = response_part[0].decode('utf-8', errors='ignore')
+                    else:
+                        metadata = response_part.decode('utf-8', errors='ignore')
+
+                    msgid_match = X_GM_MSGID_PATTERN.search(metadata)
+                    if not msgid_match:
+                        continue
+                    gid = msgid_match.group(1)
+
+                    labels = []
+                    match = X_GM_LABELS_PATTERN.search(metadata)
+                    if match:
+                        labels_str = match.group(1)
+                        for m in LABEL_TOKEN_PATTERN.finditer(labels_str):
+                            if m.group(1):
+                                labels.append(m.group(1).replace('\\"', '"').replace('\\\\', '\\'))
+                            else:
+                                labels.append(m.group(2))
+
+                    # Even a zero-label entry counts as "seen" — an email
+                    # with all labels stripped should stop being retried in
+                    # later mailboxes.
+                    results[gid] = labels
+
+            remaining = [g for g in remaining if str(g) not in results]
+
+        # Restore the session mailbox: all other IMAP helpers expect INBOX
+        # (it is selected in connect(), imap_client.py connect()).
+        try:
+            self.connection.select("INBOX")
+        except Exception:
+            self.connection = None  # force a fresh (INBOX) connection next call
+
+        return results
 
     def scan_labeled_emails(self, known_labels: List[str]) -> Dict[str, Tuple[List[str], Message]]:
         """

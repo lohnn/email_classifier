@@ -402,15 +402,24 @@ the same state.
   correction endpoint writes the training-data line immediately from the
   database copy — what Gmail does with the message afterwards never edits
   or removes it.
-- **Re-label in Gmail, then archive/trash before a re-check runs → the
-  correction is missed, silently.** Label reads happen over IMAP with
-  `INBOX` selected (`imap_client.connect`), so labels on messages that are
-  no longer in the Inbox are invisible to the scheduled re-check AND to a
-  force re-check. The re-check simply keeps the row pending; as long as the
-  message is restored to the Inbox within Gmail's 30-day trash window, the
-  next re-check picks the change up. After permanent deletion (Gmail's
-  30-day trash purge) the label state is gone for the pipeline; re-labeling
-  restored mail or once more correcting via the UI both work.
+- **Re-label in Gmail, then remove it from the Inbox (archive/trash) before
+  a re-check runs → still picked up.** The label reader falls back to a
+  bounded out-of-inbox supplement: ids the INBOX pass missed are retried
+  with the same `X-GM-MSGID` search in `[Gmail]/All Mail` and, if still
+  missing, `[Gmail]/Trash` (batch ≤ 50, the session mailbox is always
+  restored to INBOX). **Spam is deliberately not searched** — repairing a
+  classification from inside Spam is not a supported flow, and searching
+  Spam could resurrect junk into training rankings. If a message is
+  permanently purged or sits in Spam, the recheck keeps the row pending;
+  the UI **Correct** button remains the universal fallback because it
+  rewrites the example from what the system already stored.
+- **Resolving a correction clears the classifier's UNSURE flag.** When a
+  correction resolves (re-check, force re-check, or the UI/API endpoint),
+  the brain removes the old category label **and** the
+  `UNSURE_CLASSIFICATION` flag from the email in Gmail, then applies
+  `VERIFIED` as before. Only classifier-owned labels are removed — your own
+  (unknown) labels are never touched and are surfaced as candidate new
+  categories instead.
 - **Deleting an email never removes its training example.** Nothing watches
   Trash — a corrected example stays in its `.jsonl` and keeps teaching the
   model even after the email is gone. Deleting mail is not a way to retract
