@@ -423,17 +423,16 @@ the same state.
 - **Confirming a correct prediction = add `VERIFIED`, not removing the UNSURE flag.**
   When the re-check sees `VERIFIED` on an email whose single trained label
   matches what the database already believes, it writes the confirmed
-  example into that category's `.jsonl` and marks the row as
-  confirmed-by-human (`corrected_category`), which **excludes it from
-  re-classification** — the model will never second-guess that email
-  again. Removing `UNSURE_CLASSIFICATION` alone does nothing: no example is
-  written, and while the row is still unconfirmed the re-classify job may
-  re-apply the flag (fresh model confidence decides) or even re-label the
-  email if its prediction has changed. The pipeline does not strip a
-  leftover `UNSURE_CLASSIFICATION` flag in the confirm path — it is
-  cosmetic (all confirm/candidate logic ignores it), so remove it yourself
-  when tidying up. Works the same for archived and not-yet-purged trashed
-  mail (the out-of-inbox label supplement makes those readable).
+  example into that category's `.jsonl`, marks the row as
+  confirmed-by-human (`corrected_category`) — which **excludes it from
+  re-classification**, so the model never second-guesses that email again —
+  and strips a leftover `UNSURE_CLASSIFICATION` flag automatically (a no-op
+  when the email doesn't carry it). Removing `UNSURE_CLASSIFICATION` alone
+  does nothing: no example is written, and while the row is still
+  unconfirmed the re-classify job may re-apply the flag (fresh model
+  confidence decides) or even re-label the email if its prediction has
+  changed. Works the same for archived and not-yet-purged trashed mail
+  (the out-of-inbox label supplement makes those readable).
 - **Deleting an email never removes its training example.** Nothing watches
   Trash — a corrected example stays in its `.jsonl` and keeps teaching the
   model even after the email is gone. Deleting mail is not a way to retract

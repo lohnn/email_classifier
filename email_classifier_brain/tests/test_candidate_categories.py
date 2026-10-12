@@ -314,3 +314,59 @@ def test_admin_correct_clears_unsure_flag(client, mock_classify, mock_imap):
     applied = [c.args for c in mock_imap.apply_label.call_args_list]
     assert ("g1", "FOCUS") in applied
     assert ("g1", "VERIFIED") in applied
+
+
+# ---------------------------------------------------------------------------
+# Verified-confirm gesture: "the predicted label was RIGHT" = add VERIFIED.
+# The confirmed example trains under the predicted category, the row freezes
+# against reclassify, and the leftover UNSURE flag is stripped.
+# ---------------------------------------------------------------------------
+
+def _confirm_with_labels(client, mock_classify, mock_imap, labels):
+    mock_classify.get_available_categories.return_value = ["NOISE", "URGENT", "FOCUS", "REFERENCE"]
+    _seed_log("g1", predicted="URGENT")
+    if labels is not None:
+        mock_imap.get_labels_for_emails.side_effect = _labels_map({"g1": labels})
+    from jobs.correction import check_corrections_job
+    check_corrections_job(limit=10, trigger="manual")
+
+
+def test_verified_confirm_writes_example_and_strips_unsure(client, mock_classify, mock_imap):
+    _confirm_with_labels(client, mock_classify, mock_imap,
+                         ["URGENT", "VERIFIED", "UNSURE_CLASSIFICATION"])
+
+    # Confirmed example trains under the predicted category
+    with open(os.path.join(temp_data_dir, "URGENT.jsonl"), encoding="utf-8") as f:
+        rows = [json.loads(l) for l in f if l.strip()]
+    assert [r["subject"] for r in rows] == ["Seed g1"]
+
+    row = database.get_log_by_id("g1")
+    assert row["corrected_category"] == "URGENT"
+
+    removed = [c.args for c in mock_imap.remove_label.call_args_list]
+    assert ("g1", "UNSURE_CLASSIFICATION") in removed
+    # No other label surgery in the verified path: nothing is re-applied
+    assert mock_imap.apply_label.call_count == 0
+
+
+def test_verified_confirm_without_unsure_makes_only_the_noop_removal(client, mock_classify, mock_imap):
+    _confirm_with_labels(client, mock_classify, mock_imap, ["URGENT", "VERIFIED"])
+
+    with open(os.path.join(temp_data_dir, "URGENT.jsonl"), encoding="utf-8") as f:
+        rows = [json.loads(l) for l in f if l.strip()]
+    assert [r["subject"] for r in rows] == ["Seed g1"]
+    assert database.get_log_by_id("g1")["corrected_category"] == "URGENT"
+    # remove_label no-ops on an absent label — exactly one removal attempt,
+    # and it targets only the classifier's own flag
+    removed = [c.args for c in mock_imap.remove_label.call_args_list]
+    assert removed == [("g1", "UNSURE_CLASSIFICATION")]
+
+
+def test_confirmed_row_excluded_from_reclassify(client, mock_classify, mock_imap):
+    _seed_log("g2", predicted="NOISE")  # stays unconfirmed
+    _confirm_with_labels(client, mock_classify, mock_imap,
+                         ["URGENT", "VERIFIED", "UNSURE_CLASSIFICATION"])
+
+    eligible_ids = [r["id"] for r in database.get_logs_for_reclassification(limit=100)]
+    assert "g1" not in eligible_ids       # confirmed row is frozen
+    assert "g2" in eligible_ids           # uncorrected rows remain eligible

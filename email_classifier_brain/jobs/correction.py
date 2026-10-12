@@ -188,6 +188,10 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
                     if not correction_candidate:
                         add_to_training_data(log, verified_candidate)
                         database.update_log_correction(gid, verified_candidate)
+                        # The human just declared this classification correct:
+                        # strip the classifier's stale UNSURE flag (a no-op
+                        # when the email doesn't carry it).
+                        client.remove_label(gid, config.UNSURE_LABEL)
                         updates_count += 1
 
                 database.update_recheck_status(
@@ -356,6 +360,9 @@ def force_check_corrections_job(trigger: str = "scheduled"):
                         if not correction_candidate:
                             add_to_training_data(log, verified_candidate)
                             database.update_log_correction(gid, verified_candidate)
+                            # Same confirmed-classification cleanup as the
+                            # scheduled loop: strip the stale UNSURE flag.
+                            client.remove_label(gid, config.UNSURE_LABEL)
                             updates_count += 1
 
                     database.update_recheck_status(
