@@ -411,6 +411,17 @@ label changed most recently, (3) rows checked longest ago — so a manual
 re-tag is picked up on the next pass instead of waiting behind a
 newest-first queue.
 
+**Cadence ≠ freshness guarantee.** The glide windows are a re-suppression
+rule: email younger than a day is eligible again only if its **last**
+re-check was ≥ 12 hours ago (1–7 days old: ≥ 24 h; 7–30 days: ≥ 7 days;
+older: ≥ 30 days — `database.get_candidate_logs_for_recheck`), no matter
+how often the job runs. So a sub-12h `RECHECK_INTERVAL_HOURS` speeds up
+*scans*, not *row revisits*: a label change on a fresh email is picked up
+on the first pass at least 12 h after that email's previous re-check
+(typically 12–14 h worst case with a 2 h cadence). Immediate pickup for a
+specific known edit stays with `POST /admin/force-check-corrections` (the
+only path that bypasses the glide windows).
+
 ### Daily health signals (update_history.json)
 
 The daily auto-update job appends to `update_history.json` (the same file
