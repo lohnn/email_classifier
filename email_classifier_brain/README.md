@@ -396,6 +396,26 @@ on; training itself is never automatic — `./retrain.sh` on the trainer
 machine stays the invocation path, and `GET /admin/retrain-status` exposes
 the same state.
 
+### Corrections vs. archive & delete (known behaviors)
+
+- **Correct via the UI/API first, then archive or trash → safe.** The
+  correction endpoint writes the training-data line immediately from the
+  database copy — what Gmail does with the message afterwards never edits
+  or removes it.
+- **Re-label in Gmail, then archive/trash before a re-check runs → the
+  correction is missed, silently.** Label reads happen over IMAP with
+  `INBOX` selected (`imap_client.connect`), so labels on messages that are
+  no longer in the Inbox are invisible to the scheduled re-check AND to a
+  force re-check. The re-check simply keeps the row pending; as long as the
+  message is restored to the Inbox within Gmail's 30-day trash window, the
+  next re-check picks the change up. After permanent deletion (Gmail's
+  30-day trash purge) the label state is gone for the pipeline; re-labeling
+  restored mail or once more correcting via the UI both work.
+- **Deleting an email never removes its training example.** Nothing watches
+  Trash — a corrected example stays in its `.jsonl` and keeps teaching the
+  model even after the email is gone. Deleting mail is not a way to retract
+  a label: edit the training file (or correct the email again before deletion).
+
 ## Retraining Workflow
 
 On the trainer machine (workstation with GPU/MPS):
