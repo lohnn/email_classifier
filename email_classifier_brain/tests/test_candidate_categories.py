@@ -370,3 +370,86 @@ def test_confirmed_row_excluded_from_reclassify(client, mock_classify, mock_imap
     eligible_ids = [r["id"] for r in database.get_logs_for_reclassification(limit=100)]
     assert "g1" not in eligible_ids       # confirmed row is frozen
     assert "g2" in eligible_ids           # uncorrected rows remain eligible
+
+
+# ---------------------------------------------------------------------------
+# Gmail SYSTEM artifacts never enter the candidate queue:
+# backslash-prefixed IMAP flags (\Important, \Inbox, ...) and the user's own
+# addresses (Gmail auto-labels own-alias mail). Genuine unknown tags only.
+# ---------------------------------------------------------------------------
+
+def test_imap_system_flag_never_candidate(client, mock_classify, mock_imap):
+    mock_classify.get_available_categories.return_value = ["NOISE", "URGENT"]
+    _seed_log("g1")
+    mock_imap.get_labels_for_emails.side_effect = _labels_map({"g1": ["\\Important"]})
+
+    from jobs.correction import check_corrections_job
+    check_corrections_job(limit=10, trigger="manual")
+
+    assert database.get_candidate_category_logs() == []          # NO row at all
+    assert database.get_log_by_id("g1")["candidate_labels"] is None
+
+
+def test_own_address_label_never_candidate(client, mock_classify, mock_imap, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "MY_EMAILS", ["johannes@lohnn.se"])
+    mock_classify.get_available_categories.return_value = ["NOISE", "URGENT"]
+    _seed_log("g1")
+    mock_imap.get_labels_for_emails.side_effect = _labels_map(
+        {"g1": ["Johannes@Lohnn.SE"]}          # case-insensitive address match
+    )
+
+    from jobs.correction import check_corrections_job
+    check_corrections_job(limit=10, trigger="manual")
+
+    assert database.get_candidate_category_logs() == []
+
+
+def test_genuine_label_recorded_despite_system_noise(client, mock_classify, mock_imap):
+    mock_classify.get_available_categories.return_value = ["NOISE", "URGENT"]
+    _seed_log("g1")
+    mock_imap.get_labels_for_emails.side_effect = _labels_map(
+        {"g1": ["\\Important", "PURCHASES"]}
+    )
+
+    from jobs.correction import check_corrections_job
+    check_corrections_job(limit=10, trigger="manual")
+
+    row = database.get_log_by_id("g1")
+    assert json.loads(row["candidate_labels"]) == ["PURCHASES"]   # noise filtered
+
+
+def test_multiple_unknown_labels_all_recorded(client, mock_classify, mock_imap, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "MY_EMAILS", ["johannes@lohnn.se"])
+    mock_classify.get_available_categories.return_value = ["NOISE", "URGENT"]
+    _seed_log("g1")
+    mock_imap.get_labels_for_emails.side_effect = _labels_map(
+        {"g1": ["\\Important", "johannes@lohnn.se", "ZEBRA", "AMBER"]}
+    )
+
+    from jobs.correction import check_corrections_job
+    check_corrections_job(limit=10, trigger="manual")
+
+    # ALL genuine unknowns recorded (not first-only), system artifacts gone
+    row = database.get_log_by_id("g1")
+    assert json.loads(row["candidate_labels"]) == ["AMBER", "ZEBRA"]
+
+
+def test_correction_resolution_and_candidate_coexist(client, mock_classify, mock_imap):
+    """[known-P, known-R, unknown] must BOTH move the correction to R and
+    record the unknown — known categories flow via corrections regardless of
+    the candidate queue."""
+    mock_classify.get_available_categories.return_value = ["NOISE", "URGENT", "FOCUS", "REFERENCE"]
+    _seed_log("g1", predicted="URGENT")
+    mock_imap.get_labels_for_emails.side_effect = _labels_map(
+        {"g1": ["URGENT", "FOCUS", "PURCHASES"]}
+    )
+
+    from jobs.correction import check_corrections_job
+    check_corrections_job(limit=10, trigger="manual")
+
+    row = database.get_log_by_id("g1")
+    assert row["corrected_category"] == "FOCUS"                  # resolution fired
+    assert json.loads(row["candidate_labels"]) == ["PURCHASES"]  # AND the candidate recorded
+    assert row["ambiguous_labels"] is None
