@@ -90,7 +90,7 @@ Each `.jsonl` file has one JSON object per line with fields: `subject`, `body`, 
 
 ### API Security
 
-Protected endpoints require `X-API-Key` header matching `ADMIN_API_KEY` from `.env`. If `ADMIN_API_KEY` is unset, all protected endpoints return 500.
+Protected endpoints require `X-API-Key` header matching `ADMIN_API_KEY` from `.env`. If `ADMIN_API_KEY` is unset, all protected endpoints return 500. Optional `READ_API_KEY` grants GET/HEAD only (mutating routes require the admin key or the localhost+Tailscale socket-peer bypass — `127.0.0.0/8`, `::1/128`, `100.64.0.0/10`); unset/empty keeps the old single-key behavior. Keys are never logged.
 
 ### Testing Pattern
 

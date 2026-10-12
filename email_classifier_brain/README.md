@@ -364,6 +364,27 @@ mechanism.
 - **Environment Variable:** `ADMIN_API_KEY`
 - If `ADMIN_API_KEY` is not set in `.env`, all protected endpoints will return
   `500 Server Error` as a safety measure.
+- **Trusted-network bypass:** requests arriving from localhost
+  (`127.0.0.0/8`, `::1/128`) or the Tailscale CGNAT range (`100.64.0.0/10`)
+  skip the key check entirely — detected from the socket peer address, no
+  headers involved. The bypass grants full read **and** write access.
+
+### Read-only key (`READ_API_KEY`, optional)
+
+Setting `READ_API_KEY` adds a second, weaker tier: that key is accepted for
+**GET/HEAD only** — every key-gated read endpoint (`/stats`, `/labels`,
+`/notifications*`, `/jobs/status`, `/jobs/history`, `/logs/ambiguous`,
+`/logs/candidate-categories`, `/admin/retrain-status`,
+`/admin/update-errors`) — while **mutating routes (POST) still require the
+admin key or the trusted-network bypass** (a read key gets `403` there):
+corrections, candidate accept/discard, re-check/re-classify/backfill/update
+triggers, notification ack/pop, job cancel. `GET /health` stays public
+(its optional `check_imap=true` probe remains admin/bypass-only). Leaving
+`READ_API_KEY` unset or empty changes nothing. Keys are never logged.
+
+Typical split: anything that only displays state uses the read key;
+anything that can change labeling, training data, or the service itself
+keeps the admin key.
 
 ## Background Jobs
 
