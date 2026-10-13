@@ -172,6 +172,36 @@ def discard_candidate_category(log_id: str):
     return {"status": "success", "message": "Candidate category flag discarded."}
 
 
+def _compute_repair_actions(live_labels: list, expected: str, known_categories: set,
+                            apply_verified: bool) -> list:
+    """
+    Pure computation of the classifier-owned repair actions for one email's
+    live labels. Shared by the apply path and the unconfirmed-refusal report
+    (backslash-prefixed IMAP system artifacts are never trained categories,
+    so they are naturally excluded).
+    """
+    actions = []
+    for lbl in list(live_labels):
+        if lbl in known_categories and lbl != expected:
+            actions.append({"action": "remove", "label": lbl})
+    if config.UNSURE_LABEL in live_labels:
+        actions.append({"action": "remove_flag", "label": config.UNSURE_LABEL})
+    if expected not in live_labels:
+        actions.append({"action": "apply", "label": expected})
+    if apply_verified and config.VERIFICATION_LABEL not in live_labels:
+        actions.append({"action": "apply", "label": config.VERIFICATION_LABEL})
+    return actions
+
+
+def _execute_repair_action(client, log_id: str, action: dict) -> bool:
+    """Execute one planned repair action; returns the write's ok flag."""
+    if action["action"] == "remove":
+        return client.remove_label(log_id, action["label"])
+    if action["action"] == "remove_flag":
+        return client.remove_label(log_id, action["label"])
+    return client.apply_label(log_id, action["label"])
+
+
 @router.post("/logs/{log_id}/repair-gmail-labels", dependencies=[Depends(get_api_key)])
 def repair_gmail_labels(log_id: str):
     """
@@ -185,6 +215,14 @@ def repair_gmail_labels(log_id: str):
     - removes a leftover UNSURE_CLASSIFICATION flag,
     - applies the expected category and VERIFIED if absent.
 
+    HARD RULE (2026-10): VERIFIED is only ever applied to rows whose
+    corrected_category is SET — a human must have confirmed the label.
+    On a model-predicted (uncorrected) row the endpoint REFUSES with a 409
+    carrying the report of what it WOULD have done, so a model guess can
+    never be laundered into a 'verified fact'. The repair never writes the
+    database (update_log_correction is not involved) — it stays a Gmail-only,
+    side-effect-bounded surface.
+
     The user's own labels are never touched; works for archived and
     trashed-but-not-purged mail (uid resolution covers out-of-inbox
     mailboxes). Returns a JSON action report.
@@ -193,7 +231,8 @@ def repair_gmail_labels(log_id: str):
     if not log_entry:
         raise HTTPException(status_code=404, detail="Log entry not found")
 
-    expected = log_entry.get('corrected_category') or log_entry.get('predicted_category')
+    corrected = log_entry.get('corrected_category')
+    expected = corrected or log_entry.get('predicted_category')
     known_categories = set(classify.get_available_categories())
     if expected not in known_categories:
         raise HTTPException(
@@ -202,24 +241,39 @@ def repair_gmail_labels(log_id: str):
                    f"correct the row first."
         )
 
+    confirmed = bool(corrected)
+
     client = None
     try:
         client = imap_client.GmailClient()
         live_labels = client.get_labels_for_emails([log_id]).get(log_id, [])
-        actions = []
-        for lbl in list(live_labels):
-            if lbl in known_categories and lbl != expected:
-                removes_ok = client.remove_label(log_id, lbl)
-                actions.append({"action": "remove", "label": lbl, "ok": removes_ok})
-        if config.UNSURE_LABEL in live_labels:
-            unsure_ok = client.remove_label(log_id, config.UNSURE_LABEL)
-            actions.append({"action": "remove_flag", "label": config.UNSURE_LABEL, "ok": unsure_ok})
-        if expected not in live_labels:
-            applied_ok = client.apply_label(log_id, expected)
-            actions.append({"action": "apply", "label": expected, "ok": applied_ok})
-        if config.VERIFICATION_LABEL not in live_labels:
-            verified_ok = client.apply_label(log_id, config.VERIFICATION_LABEL)
-            actions.append({"action": "apply", "label": config.VERIFICATION_LABEL, "ok": verified_ok})
+        planned = _compute_repair_actions(
+            live_labels, expected, known_categories, apply_verified=confirmed
+        )
+        if not confirmed:
+            # Model guess, not human fact: refuse, and hand back the plan the
+            # OLD semantics would have executed (VERIFIED included) — that
+            # laundering-in-waiting is exactly what the refusal prevents.
+            refused_plan = _compute_repair_actions(
+                live_labels, expected, known_categories, apply_verified=True
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "status": "refused",
+                    "reason": (
+                        "Row is model-predicted, not human-confirmed — repair would "
+                        "stamp the model's guess as VERIFIED. Confirm the label first "
+                        f"via POST /logs/{log_id}/correction, then retry."
+                    ),
+                    "expected_category": expected,
+                    "live_labels_before": live_labels,
+                    "would_apply": refused_plan,
+                },
+            )
+        actions = [
+            {**a, "ok": _execute_repair_action(client, log_id, a)} for a in planned
+        ]
         return {
             "status": "success",
             "expected_category": expected,

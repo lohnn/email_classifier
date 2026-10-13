@@ -178,6 +178,11 @@ if [ "$DB_ROW_COUNT" -eq 0 ]; then
     if [ $? -eq 0 ]; then
         echo "Storage restored from Google Drive."
         JUST_RESTORED=true
+        # A restore regresses classifier state (corrections, candidates,
+        # recheck stamps) to the GDrive backup's age — this MUST be visible
+        # to the human, not just an echo: silent DB regression is the
+        # 2026-10 specialkost-corrected_category-loss class.
+        log_event "warning" "Local DB empty/unreadable - restored storage from GDrive backup (stale by up to a day); classifier-state may be aged. If corrections were made since the last successful backup, re-confirm them (or use the repair endpoint for Gmail labels)."
     else
         echo "Warning: Storage restore failed. A new database will be created if one does not exist."
     fi

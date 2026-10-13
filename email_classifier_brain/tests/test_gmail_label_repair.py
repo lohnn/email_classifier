@@ -277,3 +277,75 @@ def test_repair_endpoint_404_for_unknown_row(client):
     response = client.post("/logs/unknown-id/repair-gmail-labels",
                            headers={"X-API-Key": "testkey"})
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# H1 — unconfirmed rows (corrected_category NULL) are REFUSED with a report:
+# a repair must never launder the model's guess into a VERIFIED fact.
+# ---------------------------------------------------------------------------
+
+def test_repair_refuses_on_unconfirmed_row_with_would_apply_report(
+    client, mock_classify
+):
+    mock_classify.get_available_categories.return_value = [
+        "Jarvis/NOISE", "Jarvis/URGENT", "Jarvis/FOCUS", "Jarvis/REFERENCE"
+    ]
+    _seed_log("202", predicted="Jarvis/NOISE")   # corrected_category stays NULL
+
+    server = LabelFakeServer({"INBOX": {202: ["Jarvis/NOISE", "UNSURE_CLASSIFICATION",
+                                             "\\Important"]}})
+    fake = _client(server)
+    with patch("imap_client.GmailClient", return_value=fake):
+        response = client.post(
+            "/logs/202/repair-gmail-labels", headers={"X-API-Key": "testkey"}
+        )
+
+    assert response.status_code == 409
+    payload = response.json()["detail"]
+    assert payload["status"] == "refused"
+    assert "model-predicted, not human-confirmed" in payload["reason"]
+    assert "POST /logs/202/correction" in payload["reason"]
+    assert payload["expected_category"] == "Jarvis/NOISE"
+    # Report-only: the plan is computed from live labels, artifacts excluded
+    planned = {(a["action"], a["label"]) for a in payload["would_apply"]}
+    assert ("remove_flag", "UNSURE_CLASSIFICATION") in planned
+    assert ("apply", "VERIFIED") in planned                 # would have laundered — refused
+    assert ("apply", "Jarvis/NOISE") not in planned          # predicted already on
+    # Nothing touched Gmail: zero STORE/label-write calls, only reads
+    assert all("STORE" not in str(a) for a in server.calls)
+    assert not any(a[0] == "STORE" for a in server.calls)
+
+
+def test_repair_confirmed_row_still_applies_verified(client, mock_classify):
+    "The confirmed-row path keeps confirmed-row behavior incl. VERIFIED (unchanged)."
+    mock_classify.get_available_categories.return_value = [
+        "Jarvis/NOISE", "Jarvis/URGENT"
+    ]
+    _seed_log("203", predicted="Jarvis/NOISE")
+    database.update_log_correction("203", "Jarvis/URGENT")
+
+    server = LabelFakeServer({"INBOX": {203: ["Jarvis/URGENT"]}})
+    fake = _client(server)
+    with patch("imap_client.GmailClient", return_value=fake):
+        response = client.post(
+            "/logs/203/repair-gmail-labels", headers={"X-API-Key": "testkey"}
+        )
+
+    assert response.status_code == 200
+    action_map = {(a["action"], a["label"]): a["ok"] for a in response.json()["actions"]}
+    assert ("apply", "VERIFIED") in action_map
+    assert action_map[("apply", "VERIFIED")] is True
+
+
+def test_compute_repair_actions_pure_function_hidden_paths():
+    from api.routes.admin import _compute_repair_actions
+    known = {"Jarvis/NOISE", "Jarvis/URGENT"}
+    actions = _compute_repair_actions(
+        ["Jarvis/NOISE", "UNSURE_CLASSIFICATION", "\\Important"],
+        expected="Jarvis/NOISE",
+        known_categories=known,
+        apply_verified=False,      # unconfirmed rows: no VERIFIED even in the plan
+    )
+    assert {"action": "remove_flag", "label": "UNSURE_CLASSIFICATION"} in actions
+    assert all(a["label"] != "VERIFIED" for a in actions)
+    assert all("Important" not in a.get("label", "") for a in actions)
