@@ -465,7 +465,9 @@ the same state.
   (unknown) labels are never touched and are surfaced as candidate new
   categories instead. Label writes now cover archived and
   trashed-but-not-purged mail too (uid resolution walks All Mail/Trash),
-  and every removal is **verified server-side** after the STORE.
+  and every removal is **verified server-side** after the STORE. Label
+  writes also reach archived and trashed-but-not-purged mail (uid
+  resolution walks All Mail/Trash in the same selection as the STORE).
 - **If Gmail and the database ever disagree, you can see it and fix it.**
   Failed cleanup after a resolved correction (DB updated, Gmail stale —
   e.g. 'VERIFIED applied but the old label is still on the message', hit
@@ -475,7 +477,16 @@ the same state.
   label state from the database (removes stale trained-category labels and
   UNSURE, applies the expected category and VERIFIED) and returns a JSON
   action report of exactly what it did. Nothing repairs Gmail
-  automatically — the endpoint is user-triggered by design.
+  automatically — the endpoint is user-triggered by design. **Confirmed
+  rows only:** on a row that is still model-predicted (`corrected_category`
+  NULL) the repair endpoint REFUSES with a 409 whose payload contains the
+  plan it *would* have run — a repair must never stamp the model's guess
+  as VERIFIED; confirm the label with `POST /logs/{id}/correction` first.
+  A restore of the classifier's storage from the (up to a day stale)
+  Google Drive backup — the empty/unreadable-DB path in `run_service.sh` —
+  is likewise surfaced as a warning in `update_history.json`, because it
+  silently regresses classifier state (corrections, recheck stamps) to the
+  backup's age.
 - **Confirming a correct prediction = add `VERIFIED`, not removing the UNSURE flag.**
   When the re-check sees `VERIFIED` on an email whose single trained label
   matches what the database already believes, it writes the confirmed
