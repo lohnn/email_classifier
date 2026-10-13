@@ -345,6 +345,7 @@ Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
 | `POST` | `/admin/push-training-data`      | Manually push `TrainingData/` to Git.                |
 | `GET`  | `/admin/update-errors`           | Get history of automated update failures.            |
 | `GET`  | `/admin/retrain-status`          | Whether training data is ahead of the deployed model (`retrain_worthwhile` + both commit ids). |
+| `POST` | `/logs/{id}/repair-gmail-labels` | User-triggered Gmail label resync from the DB for one email (removes stale trained-category labels + UNSURE, applies expected category + VERIFIED). Works for archived/trashed mail. Returns a JSON action report. |
 
 ## Google Drive — Model Storage
 
@@ -462,7 +463,19 @@ the same state.
   `UNSURE_CLASSIFICATION` flag from the email in Gmail, then applies
   `VERIFIED` as before. Only classifier-owned labels are removed — your own
   (unknown) labels are never touched and are surfaced as candidate new
-  categories instead.
+  categories instead. Label writes now cover archived and
+  trashed-but-not-purged mail too (uid resolution walks All Mail/Trash),
+  and every removal is **verified server-side** after the STORE.
+- **If Gmail and the database ever disagree, you can see it and fix it.**
+  Failed cleanup after a resolved correction (DB updated, Gmail stale —
+  e.g. 'VERIFIED applied but the old label is still on the message', hit
+  live 2026-10) lands in `update_history.json` as a warning naming the
+  email. Fix one email with
+  `POST /logs/{id}/repair-gmail-labels`: it recomputes classifier-owned
+  label state from the database (removes stale trained-category labels and
+  UNSURE, applies the expected category and VERIFIED) and returns a JSON
+  action report of exactly what it did. Nothing repairs Gmail
+  automatically — the endpoint is user-triggered by design.
 - **Confirming a correct prediction = add `VERIFIED`, not removing the UNSURE flag.**
   When the re-check sees `VERIFIED` on an email whose single trained label
   matches what the database already believes, it writes the confirmed

@@ -21,7 +21,7 @@ from api.security import get_api_key
 from job_queue import job_queue
 from jobs.correction import check_corrections_job, force_check_corrections_job
 from jobs.training_data import add_to_training_data, backfill_training_data_job, push_training_data_to_git
-from jobs.update import get_retrain_status, shutdown_server
+from jobs.update import append_update_history, get_retrain_status, shutdown_server
 
 logger = logging.getLogger(__name__)
 
@@ -56,22 +56,37 @@ def correct_label(log_id: str, req: CorrectionRequest):
 
     # Apply VERIFIED label in IMAP as permanent marker
     client = None
+    gmail_sync_ok = True
     try:
         client = imap_client.GmailClient()
-        client.apply_label(log_id, req.corrected_category)
-        if old_label and old_label != req.corrected_category:
-            client.remove_label(log_id, old_label)
+        gmail_sync_ok &= client.apply_label(log_id, req.corrected_category)
+        if old_label != req.corrected_category and not client.remove_label(log_id, old_label):
+            gmail_sync_ok = False
         # A human has resolved the label — clear the classifier's UNSURE flag
         # (classifier-owned only: the user's own labels are never touched)
-        client.remove_label(log_id, config.UNSURE_LABEL)
-        client.apply_label(log_id, config.VERIFICATION_LABEL)
+        gmail_sync_ok &= client.remove_label(log_id, config.UNSURE_LABEL)
+        gmail_sync_ok &= client.apply_label(log_id, config.VERIFICATION_LABEL)
     except Exception as e:
+        gmail_sync_ok = False
         logger.error(f"Failed to update IMAP labels for {log_id}: {e}")
     finally:
         if client:
             client.disconnect()
 
-    return {"status": "success", "message": f"Label corrected to {req.corrected_category} and added to training data."}
+    if not gmail_sync_ok:
+        # DB-fixed-but-Gmail-stale drift: the human reads update_history.json
+        append_update_history(
+            "warning",
+            f"Gmail sync incomplete for email {log_id}: correction to "
+            f"{req.corrected_category!r} recorded (training data + DB updated) but "
+            f"some label writes failed. Resync with POST /logs/{log_id}/repair-gmail-labels.",
+        )
+
+    response = {"status": "success", "message": f"Label corrected to {req.corrected_category} and added to training data."}
+    if not gmail_sync_ok:
+        response["gmail_sync"] = "incomplete"
+        response["message"] += " (Warning: some Gmail label writes failed — see update_history.json; resync with POST /logs/{log_id}/repair-gmail-labels)"
+    return response
 
 
 @router.get("/logs/ambiguous", dependencies=[Depends(get_api_key)])
@@ -155,6 +170,65 @@ def discard_candidate_category(log_id: str):
     if not cleared:
         raise HTTPException(status_code=404, detail="No candidate category flag on this log")
     return {"status": "success", "message": "Candidate category flag discarded."}
+
+
+@router.post("/logs/{log_id}/repair-gmail-labels", dependencies=[Depends(get_api_key)])
+def repair_gmail_labels(log_id: str):
+    """
+    USER-TRIGGERED Gmail label sync for one logged email — there is no
+    automation behind it. Recomputes the classifier-owned label state from
+    the database and applies it to the email:
+
+    - removes every TRAINED category label that is not the row's current
+      corrected/predicted category (the 'old label still on the message'
+      drift, e.g. the 2026-10 specialkost case),
+    - removes a leftover UNSURE_CLASSIFICATION flag,
+    - applies the expected category and VERIFIED if absent.
+
+    The user's own labels are never touched; works for archived and
+    trashed-but-not-purged mail (uid resolution covers out-of-inbox
+    mailboxes). Returns a JSON action report.
+    """
+    log_entry = database.get_log_by_id(log_id)
+    if not log_entry:
+        raise HTTPException(status_code=404, detail="Log entry not found")
+
+    expected = log_entry.get('corrected_category') or log_entry.get('predicted_category')
+    known_categories = set(classify.get_available_categories())
+    if expected not in known_categories:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Row category {expected!r} is not a trained category; "
+                   f"correct the row first."
+        )
+
+    client = None
+    try:
+        client = imap_client.GmailClient()
+        live_labels = client.get_labels_for_emails([log_id]).get(log_id, [])
+        actions = []
+        for lbl in list(live_labels):
+            if lbl in known_categories and lbl != expected:
+                removes_ok = client.remove_label(log_id, lbl)
+                actions.append({"action": "remove", "label": lbl, "ok": removes_ok})
+        if config.UNSURE_LABEL in live_labels:
+            unsure_ok = client.remove_label(log_id, config.UNSURE_LABEL)
+            actions.append({"action": "remove_flag", "label": config.UNSURE_LABEL, "ok": unsure_ok})
+        if expected not in live_labels:
+            applied_ok = client.apply_label(log_id, expected)
+            actions.append({"action": "apply", "label": expected, "ok": applied_ok})
+        if config.VERIFICATION_LABEL not in live_labels:
+            verified_ok = client.apply_label(log_id, config.VERIFICATION_LABEL)
+            actions.append({"action": "apply", "label": config.VERIFICATION_LABEL, "ok": verified_ok})
+        return {
+            "status": "success",
+            "expected_category": expected,
+            "live_labels_before": live_labels,
+            "actions": actions,
+        }
+    finally:
+        if client:
+            client.disconnect()
 
 
 @router.post("/admin/push-training-data", dependencies=[Depends(get_api_key)])
