@@ -15,8 +15,27 @@ import database
 import imap_client
 from job_queue import job_queue
 from jobs.training_data import add_to_training_data
+from jobs.update import append_update_history
 
 logger = logging.getLogger(__name__)
+
+
+def _surface_gmail_cleanup_failure(gid: str, new_label: str) -> None:
+    """
+    A Gmail cleanup failure AFTER the training-data + DB write is
+    'DB-fixed-but-Gmail-stale' drift — the 2026-10 live bug class (DB said
+    corrected, Gmail kept the old label). Observability goes to
+    update_history.json (the file the human reads), not just logs. The
+    remedy is the user-triggered repair endpoint; nothing auto-touches
+    Gmail after this.
+    """
+    append_update_history(
+        "warning",
+        f"Gmail cleanup incomplete for email {gid}: correction to {new_label!r} "
+        f"recorded (training data and database updated) but the old/UNSURE label "
+        f"could not be confirmed removed. Resync with "
+        f"POST /logs/{gid}/repair-gmail-labels.",
+    )
 
 
 def _candidate_labels(found_labels: list, known_labels: set) -> list:
@@ -176,15 +195,19 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
                     add_to_training_data(log, correction_candidate, previous_category=current_local)
                     database.update_log_correction(gid, correction_candidate)
 
+                    gmail_cleanup_ok = True
                     if cleanup_needed:
                         logger.info(f"Removing old label {current_local} from {gid}")
-                        client.remove_label(gid, current_local)
+                        gmail_cleanup_ok &= client.remove_label(gid, current_local)
 
                     # The classifier's UNSURE flag is meaningless once a human
                     # has resolved this email's label — clear it alongside the
                     # old category. Only classifier-owned labels are removed;
                     # the user's own unknown labels (candidates) stay.
-                    client.remove_label(gid, config.UNSURE_LABEL)
+                    gmail_cleanup_ok &= client.remove_label(gid, config.UNSURE_LABEL)
+
+                    if not gmail_cleanup_ok:
+                        _surface_gmail_cleanup_failure(gid, correction_candidate)
 
                     if not is_verified:
                         logger.info(f"Adding {config.VERIFICATION_LABEL} to {gid}")
@@ -201,7 +224,8 @@ def check_corrections_job(limit: int = 200, trigger: str = "scheduled"):
                         # The human just declared this classification correct:
                         # strip the classifier's stale UNSURE flag (a no-op
                         # when the email doesn't carry it).
-                        client.remove_label(gid, config.UNSURE_LABEL)
+                        if not client.remove_label(gid, config.UNSURE_LABEL):
+                            _surface_gmail_cleanup_failure(gid, verified_candidate)
                         updates_count += 1
 
                 database.update_recheck_status(
@@ -354,12 +378,15 @@ def force_check_corrections_job(trigger: str = "scheduled"):
                         logger.info(f"Detected external correction for {gid}: {current_local} -> {correction_candidate}")
                         add_to_training_data(log, correction_candidate, previous_category=current_local)
                         database.update_log_correction(gid, correction_candidate)
+                        gmail_cleanup_ok = True
                         if cleanup_needed:
                             logger.info(f"Removing old label {current_local} from {gid}")
-                            client.remove_label(gid, current_local)
+                            gmail_cleanup_ok &= client.remove_label(gid, current_local)
                         # Same classifier-owned cleanup as the scheduled loop:
                         # clear the stale UNSURE flag once a human resolved it
-                        client.remove_label(gid, config.UNSURE_LABEL)
+                        gmail_cleanup_ok &= client.remove_label(gid, config.UNSURE_LABEL)
+                        if not gmail_cleanup_ok:
+                            _surface_gmail_cleanup_failure(gid, correction_candidate)
                         if not is_verified:
                             logger.info(f"Adding {config.VERIFICATION_LABEL} to {gid}")
                             client.apply_label(gid, config.VERIFICATION_LABEL)
@@ -372,7 +399,8 @@ def force_check_corrections_job(trigger: str = "scheduled"):
                             database.update_log_correction(gid, verified_candidate)
                             # Same confirmed-classification cleanup as the
                             # scheduled loop: strip the stale UNSURE flag.
-                            client.remove_label(gid, config.UNSURE_LABEL)
+                            if not client.remove_label(gid, config.UNSURE_LABEL):
+                                _surface_gmail_cleanup_failure(gid, verified_candidate)
                             updates_count += 1
 
                     database.update_recheck_status(

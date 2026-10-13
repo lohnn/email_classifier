@@ -227,9 +227,16 @@ class GmailClient:
 
     def _search_by_gmail_id(self, gmail_id: str) -> bytes:
         """
-        Helper to find the UID of an email given its X-GM-MSGID.
+        Helper to find the UID of an email given its X-GM-MSGID, searching
+        the INBOX selection.
+
         Returns the UID as bytes, or None if not found.
         Raises imaplib.IMAP4.error or OSError on connection failures.
+
+        Label WRITE paths use _resolve_uid instead, which also searches
+        out-of-inbox mailboxes. Deliberately NOT given to
+        fetch_email_by_gmail_id (reclassify): making archived bodies
+        fetchable would silently change reclassify's scope.
         """
         self.connect()
         typ, data = self.connection.uid('SEARCH', None, f'X-GM-MSGID {gmail_id}')
@@ -238,22 +245,98 @@ class GmailClient:
             return data[0].split()[-1]
         return None
 
-    def apply_label(self, gmail_id: str, label: str):
+    def _store_label(self, gmail_id: str, sign: str, label: str, verify: bool) -> None:
+        """
+        Shared STORE for +/-X-GM-LABELS with mailbox-aware uid resolution.
+        UIDs are PER-MAILBOX: the STORE must happen in the SAME selection
+        that resolved the uid — resolving in All Mail and storing in INBOX
+        would target an unrelated message (or nothing). So: try INBOX
+        (a fresh connect always selects INBOX); on a search miss walk the
+        supplement mailboxes, storing inside each selection as we go;
+        restore INBOX no matter what.
+
+        Raises imaplib.IMAP4.error on any failure — INCLUDING search-miss
+        in every mailbox — so with_retry retries transient part-failures
+        and the caller's except path sees the final False. Removal
+        verification (parameter verify) reads the labels back server-side:
+        a completed STORE is not proof of effect (2026-10 live bug).
+        """
+        label_to_send = _imap_quote_label(label)
+
+        def _store_in_current_selection():
+            typ, data = self.connection.uid('SEARCH', None, f'X-GM-MSGID {gmail_id}')
+            if not (typ == 'OK' and data[0]):
+                return False  # not in THIS mailbox — caller walks to the next one
+            uid = data[0].split()[-1]
+            typ, store_data = self.connection.uid(
+                'STORE', uid, f'{sign}X-GM-LABELS', f'({label_to_send})'
+            )
+            if typ != 'OK':
+                raise imaplib.IMAP4.error(
+                    f"STORE {sign}X-GM-LABELS {label!r} on {gmail_id} returned {typ}: {store_data}"
+                )
+            if verify:
+                typ, vdata = self.connection.uid('FETCH', uid, '(X-GM-LABELS)')
+                if typ != 'OK':
+                    raise imaplib.IMAP4.error(
+                        f"post-store verification fetch failed for {gmail_id}: {vdata}"
+                    )
+                remaining = self._labels_from_fetch_response(vdata)
+                if label in remaining:
+                    raise imaplib.IMAP4.error(
+                        f"label {label!r} still present on {gmail_id} after removal STORE "
+                        f"(remaining labels: {remaining})"
+                    )
+            return True
+
+        self.connect()
+        try:
+            if not _store_in_current_selection():  # INBOX first
+                for mailbox in self._supplement_mailbox_names():
+                    typ, _ = self.connection.select(mailbox)
+                    if typ != 'OK':
+                        continue
+                    if _store_in_current_selection():
+                        return
+                raise imaplib.IMAP4.error(
+                    f"email {gmail_id} not found in any mailbox for {sign}X-GM-LABELS"
+                )
+        finally:
+            try:
+                self.connection.select("INBOX")
+            except Exception:
+                self.connection = None  # force a fresh (INBOX) connection next call
+
+    def _labels_from_fetch_response(self, data) -> list:
+        """Flatten a FETCH (X-GM-LABELS) response into a label list."""
+        remaining = []
+        for response_part in data:
+            metadata = (response_part[0] if isinstance(response_part, tuple)
+                        else response_part)
+            if isinstance(metadata, bytes):
+                metadata = metadata.decode('utf-8', errors='ignore')
+            match = X_GM_LABELS_PATTERN.search(metadata)
+            if match:
+                for m in LABEL_TOKEN_PATTERN.finditer(match.group(1)):
+                    remaining.append(
+                        m.group(1).replace('\\"', '"').replace('\\\\', '\\')
+                        if m.group(1) else m.group(2)
+                    )
+        return remaining
+
+    def apply_label(self, gmail_id: str, label: str) -> bool:
         """
         Apply a label to the email using UID STORE +X-GM-LABELS.
-        Accepts gmail_id (X-GM-MSGID).
-        """
-        label_to_send = _imap_quote_label(label)
+        Accepts gmail_id (X-GM-MSGID). Uid resolution covers archived and
+        trashed-but-not-purged mail (_store_label).
 
+        Returns True iff the STORE completed; False on search-miss or
+        repeated store failure — callers must surface False, not assume
+        success (a swallowed failure here is how Gmail ended up stale while
+        the DB said 'corrected').
+        """
         def _do():
-            self.connect()
-            uid = self._search_by_gmail_id(gmail_id)
-            if not uid:
-                logger.warning(f"Could not find email with Gmail ID {gmail_id} to apply label.")
-                return
-            typ, data = self.connection.uid('STORE', uid, '+X-GM-LABELS', f'({label_to_send})')
-            if typ != 'OK':
-                raise imaplib.IMAP4.error(f"Failed to apply label {label} to {gmail_id}: {data}")
+            self._store_label(gmail_id, "+", label, verify=False)
 
         try:
             with_retry(
@@ -263,25 +346,26 @@ class GmailClient:
                 exceptions=_IMAP_ERRORS,
                 on_retry=lambda exc, _: self._reset_connection(),
             )
+            return True
         except Exception as e:
-            logger.error(f"Error applying label {label} to {gmail_id}: {e}")
+            logger.error(f"Error applying label {label!r} to {gmail_id}: {e}")
+            return False
 
-    def remove_label(self, gmail_id: str, label: str):
+    def remove_label(self, gmail_id: str, label: str) -> bool:
         """
         Remove a label from the email using UID STORE -X-GM-LABELS.
-        Accepts gmail_id (X-GM-MSGID).
-        """
-        label_to_send = _imap_quote_label(label)
+        Accepts gmail_id (X-GM-MSGID). Uid resolution covers archived and
+        trashed-but-not-purged mail (_store_label).
 
+        Returns True iff the label is CONFIRMED absent afterwards. Any
+        failure — search-miss in every mailbox, STORE error after retries,
+        or a STORE that completed without actually removing the label
+        (2026-10 live bug: DB said corrected, Gmail kept the old label) —
+        returns False. Callers must surface that instead of proceeding as
+        if Gmail now matches the database.
+        """
         def _do():
-            self.connect()
-            uid = self._search_by_gmail_id(gmail_id)
-            if not uid:
-                logger.warning(f"Could not find email with Gmail ID {gmail_id} to remove label.")
-                return
-            typ, data = self.connection.uid('STORE', uid, '-X-GM-LABELS', f'({label_to_send})')
-            if typ != 'OK':
-                raise imaplib.IMAP4.error(f"Failed to remove label {label} from {gmail_id}: {data}")
+            self._store_label(gmail_id, "-", label, verify=True)
 
         try:
             with_retry(
@@ -291,8 +375,10 @@ class GmailClient:
                 exceptions=_IMAP_ERRORS,
                 on_retry=lambda exc, _: self._reset_connection(),
             )
+            return True
         except Exception as e:
-            logger.error(f"Error removing label {label} from {gmail_id}: {e}")
+            logger.error(f"Error removing label {label!r} from {gmail_id}: {e}")
+            return False
 
     def fetch_email_by_gmail_id(self, gmail_id: str) -> Message:
         """
