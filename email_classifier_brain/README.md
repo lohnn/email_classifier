@@ -345,6 +345,8 @@ Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
 | `POST` | `/admin/push-training-data`      | Manually push `TrainingData/` to Git.                |
 | `GET`  | `/admin/update-errors`           | Get history of automated update failures.            |
 | `GET`  | `/admin/retrain-status`          | Whether training data is ahead of the deployed model (`retrain_worthwhile` + both commit ids). |
+| `POST` | `/admin/upload-model-artifact`   | **Tailscale/localhost ONLY** — stream a model artifact (.gguf/.safetensors/.json/.pkl) into staging; sha256 computed + echoed; optional `sha256_expected`. |
+| `POST` | `/admin/install-model-artifact`  | **Tailscale/localhost ONLY** — atomically install a staged artifact (GGUF → llama model path, ST pieces → model/). No auto-restart. |
 | `POST` | `/logs/{id}/repair-gmail-labels` | User-triggered Gmail label resync from the DB for one email (removes stale trained-category labels + UNSURE, applies expected category + VERIFIED). Works for archived/trashed mail. Returns a JSON action report. |
 
 ## Embedder Backend — llama.cpp (production) vs SetFit (rollback)
@@ -509,7 +511,19 @@ the same state.
   label state from the database (removes stale trained-category labels and
   UNSURE, applies the expected category and VERIFIED) and returns a JSON
   action report of exactly what it did. Nothing repairs Gmail
-  automatically — the endpoint is user-triggered by design. **Confirmed
+  automatically — the endpoint is user-triggered by design. **Model-artifact deploy loop (replaces the scp/GDrive model
+  dance):** `POST /admin/upload-model-artifact` (raw body + `?filename=`)
+  streams into a staging dir with streaming sha256 (optional
+  `sha256_expected`, ~2 GiB cap, basename+extension whitelist), then
+  `POST /admin/install-model-artifact?staged_name=…` atomically moves it to
+  the active location (GGUF → the llama.cpp model path per
+  `LLAMA_MODEL_FILE`; ST pieces → `model/`). **No auto-restart** — the
+  target service loads on its next restart. Both steps are
+  **Tailscale/localhost-peer-only**: even a valid admin key from an
+  untrusted network is rejected (403) — one of the accepted file types is
+  a pickle that executes on load. Both steps land in
+  `update_history.json` (file, size, sha256, peer). GDrive storage backups
+  stay as-is; only the manual model-transfer dance is replaced. **Confirmed
   rows only:** on a row that is still model-predicted (`corrected_category`
   NULL) the repair endpoint REFUSES with a 409 whose payload contains the
   plan it *would* have run — a repair must never stamp the model's guess

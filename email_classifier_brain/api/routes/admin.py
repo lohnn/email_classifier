@@ -6,15 +6,19 @@ Protected endpoints for manual job triggers, label correction,
 training data management, and update control.
 """
 
+import hashlib
 import json
 import logging
+import os
+import uuid
 from pathlib import Path
 
 import classify
 import config
 import database
 import imap_client
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from api.security import is_trusted_ip
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from api.models import CandidateCategoryRequest, CorrectionRequest
 from api.security import get_api_key
@@ -283,6 +287,182 @@ def repair_gmail_labels(log_id: str):
     finally:
         if client:
             client.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# Model-artifact upload/install — the STRICTEST routes in the app.
+# TAILSCALE/LOCALHOST PEER ONLY: even a VALID admin key from an untrusted
+# network is rejected, because these routes write code-adjacent payloads
+# (a .pkl that executes on load) beyond the key wall. Trust model comes
+# from the user directive 2026-10-24.
+# ---------------------------------------------------------------------------
+
+_MODEL_KIND_BY_EXT = {
+    ".gguf": "llama_model",      # llama.cpp GGUF (merged LoRA model)
+    ".safetensors": "st_model",  # ST model set components
+    ".json": "st_model",         # config.json, label_mapping.json, MODEL_INFO.json ...
+    ".pkl": "st_model",          # model_head.pkl (executes on load — hence the peer wall)
+}
+
+
+def _require_trusted_peer(request: Request) -> str:
+    """Reject unless the socket peer is localhost or the Tailscale CGNAT
+    range. Runs INSIDE the handler so a valid admin key from an untrusted
+    network is still rejected (403) — the key wall alone is not enough here."""
+    peer = request.client.host if request.client else None
+    if not peer or not is_trusted_ip(peer):
+        logger.warning("Model-artifact route refused for untrusted peer %r", peer)
+        raise HTTPException(
+            status_code=403,
+            detail="This endpoint is only reachable from localhost/Tailscale connections.",
+        )
+    return peer
+
+
+def _safe_artifact_name(filename: str) -> tuple:
+    """basename-only + per-kind extension whitelist. Returns (name, kind)."""
+    name = os.path.basename((filename or "").strip())
+    if not name or name in (".", "..") or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail=f"Invalid artifact filename: {filename!r}")
+    kind = _MODEL_KIND_BY_EXT.get(os.path.splitext(name)[1].lower())
+    if not kind:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported artifact type (allowed: {', '.join(sorted(_MODEL_KIND_BY_EXT))})",
+        )
+    return name, kind
+
+
+@router.post("/admin/upload-model-artifact", dependencies=[Depends(get_api_key)])
+async def upload_model_artifact(
+    request: Request,
+    filename: str = Query(..., description="Target artifact filename (basename only)"),
+    sha256_expected: str | None = Query(None, description="Optional integrity check before staging completes"),
+):
+    """
+    Stream-upload a model artifact into the staging dir (TAILSCALE/LOCALHOST
+    PEER ONLY regardless of caller key). Raw body = file bytes. sha256 is
+    computed while streaming and echoed; if `sha256_expected` is given a
+    mismatch aborts the staging. Nothing is installed or activated here —
+    the explicit /admin/install-model-artifact call decides when to flip.
+    """
+    peer = _require_trusted_peer(request)
+    name, kind = _safe_artifact_name(filename)
+
+    declared = request.headers.get("content-length")
+    if declared and int(declared) > config.MAX_MODEL_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Artifact exceeds upload size cap")
+
+    os.makedirs(config.MODEL_STAGING_DIR, exist_ok=True)
+    staged_path = os.path.join(config.MODEL_STAGING_DIR, name)
+    tmp_path = os.path.join(config.MODEL_STAGING_DIR, f".part-{uuid.uuid4().hex}")
+
+    sha = hashlib.sha256()
+    size = 0
+    try:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > config.MAX_MODEL_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Artifact exceeds upload size cap")
+            sha.update(chunk)
+            with open(tmp_path, "ab") as f:
+                f.write(chunk)
+    except HTTPException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+    digest = sha.hexdigest()
+    if sha256_expected and digest != sha256_expected.strip().lower():
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise HTTPException(
+            status_code=400,
+            detail=f"sha256 mismatch: got {digest}, expected {sha256_expected}",
+        )
+    if size == 0:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise HTTPException(status_code=400, detail="Empty artifact")
+
+    # atomic within staging: same-dir replace of the completed .part file
+    if os.path.exists(staged_path):
+        existing = hashlib.sha256()
+        with open(staged_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                existing.update(chunk)
+        if existing.hexdigest() != digest:
+            os.remove(tmp_path)
+            raise HTTPException(
+                status_code=409,
+                detail=f"{name} is already staged with a different sha256; "
+                       f"delete it first (install endpoint reports paths).",
+            )
+        os.remove(tmp_path)  # identical bytes already staged — idempotent
+    else:
+        os.replace(tmp_path, staged_path)
+
+    append_update_history(
+        "info",
+        f"Model artifact '{name}' ({kind}) staged: {size} bytes, sha256={digest[:16]}… "
+        f"from trusted peer {peer}. Not installed — "
+        f"POST /admin/install-model-artifact to activate.",
+    )
+    return {
+        "status": "staged",
+        "staged_as": name,
+        "kind": kind,
+        "size": size,
+        "sha256": digest,
+        "staging_dir": config.MODEL_STAGING_DIR,
+    }
+
+
+@router.post("/admin/install-model-artifact", dependencies=[Depends(get_api_key)])
+def install_model_artifact(request: Request, staged_name: str = Query(...,
+                           description="Staged artifact filename (as reported by upload)")):
+    """
+    Atomically move a previously staged+verified artifact into its ACTIVE
+    location (GGUF → the llama.cpp model path; ST components → model/).
+    NO auto-restart, no auto-activation beyond the move — the human/coordinator
+    decides when to flip; the target service loads on its next restart.
+    """
+    peer = _require_trusted_peer(request)
+    name, kind = _safe_artifact_name(staged_name)
+    staged_path = os.path.join(config.MODEL_STAGING_DIR, name)
+    if not os.path.exists(staged_path):
+        raise HTTPException(status_code=404, detail=f"Nothing staged as '{staged_name}'")
+
+    sha = hashlib.sha256()
+    with open(staged_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            sha.update(chunk)
+    digest = sha.hexdigest()
+
+    if kind == "llama_model":
+        target = config.LLAMA_MODEL_FILE
+    else:
+        target = os.path.join(config.MODEL_OUTPUT_DIR, name)
+    os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+
+    # atomic within the same filesystem: both live under the service workdir
+    os.replace(staged_path, target)
+
+    append_update_history(
+        "info",
+        f"Model artifact '{name}' ({kind}) INSTALLED to {target} "
+        f"(sha256={digest[:16]}…, peer {peer}). Restart the target service "
+        f"(email-embedder / email-classifier) to load it.",
+    )
+    return {
+        "status": "installed",
+        "artifact": name,
+        "kind": kind,
+        "target": os.path.abspath(target),
+        "size": os.path.getsize(target),
+        "sha256": digest,
+        "note": "Staged artifact installed — restart the target service to load it.",
+    }
 
 
 @router.post("/admin/push-training-data", dependencies=[Depends(get_api_key)])

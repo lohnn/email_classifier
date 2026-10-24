@@ -122,6 +122,20 @@ CENTROIDS_PATH = os.getenv("CENTROIDS_PATH") or os.path.join(
     MODEL_OUTPUT_DIR, "label_centroids.json"
 )
 
+# Model-artifact upload/install (POST /admin/upload-model-artifact +
+# /admin/install-model-artifact — TAILSCALE-PEER-ONLY routes). The staging
+# dir lives under STORAGE_DIR so staging→install stays on one filesystem
+# (atomic os.replace). The GGUF install target is the path llama.cpp loads
+# (email-embedder.service -m path on the Pi); the ST set installs into
+# MODEL_OUTPUT_DIR.
+MODEL_STAGING_DIR = os.getenv("MODEL_STAGING_DIR") or os.path.join(
+    STORAGE_DIR, "model_staging"
+)
+LLAMA_MODEL_FILE = os.getenv("LLAMA_MODEL_FILE") or os.path.join(
+    "llama_model", "merged_text_q8_0.gguf"
+)
+MAX_MODEL_UPLOAD_BYTES = int(os.getenv("MAX_MODEL_UPLOAD_BYTES") or 2 * 1024 * 1024 * 1024)
+
 # ---------------------------------------------------------------------------
 # Context-window budget (intfloat/multilingual-e5-small)
 # ---------------------------------------------------------------------------
