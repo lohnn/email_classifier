@@ -367,6 +367,8 @@ from SetFit probabilities).
   in-process SetFit path — flip only as a DELIBERATE ops action)
 - `LLAMA_ENDPOINT` = `http://127.0.0.1:8090` (Pi: email-embedder.service)
 - `LLAMA_TIMEOUT_SECONDS` / `LLAMA_RETRIES` / `LLAMA_RETRY_BACKOFF_SECONDS`
+  (Pi reality 2026-10-25: a long email embeds in ~10–90 s on the Pi 4's A72 —
+  the 30 s default aborts exactly those; the Pi sets 180)
 - `CENTROIDS_PATH` = `model/label_centroids.json` (ships with the model)
 
 **Outage semantics:** embedder failures surface LOUDLY — retried, then a
