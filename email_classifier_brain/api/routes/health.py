@@ -61,8 +61,15 @@ def health_check(
         checks["database"] = {"status": "error", "detail": "Database connectivity error"}
         critical_ok = False
 
-    # --- Model loaded state ---
-    if classify._model is not None:
+    # --- Model/embedder state (backend-aware) ---
+    if config.EMBEDDER_BACKEND == "llama_cpp":
+        import embedder
+        if embedder.llama_healthy():
+            checks["model"] = {"status": "ok", "backend": "llama_cpp"}
+        else:
+            checks["model"] = {"status": "not_loaded"}
+            critical_ok = False
+    elif classify._model is not None:
         checks["model"] = {"status": "ok"}
     else:
         checks["model"] = {"status": "not_loaded"}

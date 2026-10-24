@@ -347,6 +347,38 @@ Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
 | `GET`  | `/admin/retrain-status`          | Whether training data is ahead of the deployed model (`retrain_worthwhile` + both commit ids). |
 | `POST` | `/logs/{id}/repair-gmail-labels` | User-triggered Gmail label resync from the DB for one email (removes stale trained-category labels + UNSURE, applies expected category + VERIFIED). Works for archived/trashed mail. Returns a JSON action report. |
 
+## Embedder Backend — llama.cpp (production) vs SetFit (rollback)
+
+`classify.py` classifies via **kNN over per-class centroids** computed from
+the LoRA-merged EmbeddingGemma-2 text model, served by a local **llama.cpp**
+server (`--embedding --pooling mean --ubatch-size 2048`, OpenAI-style
+`POST /v1/embeddings`). The classification prompt prefix
+(`task: classification | query: `) is applied **in the caller** — llama.cpp
+takes raw text. Output is always 768d (no truncate_dim; MRL-512 storage cuts
+would be caller-side `vec[:512]` + re-normalize). The UNSURE gate
+(`is_unsure_classification`) is unchanged; on the llama backend it runs with
+the thresholds calibrated in `label_centroids.json` (cosine scale differs
+from SetFit probabilities).
+
+**Config (`.env`):**
+- `EMBEDDER_BACKEND` = `llama_cpp` (default) | `st` (full rollback to the
+  in-process SetFit path — flip only as a DELIBERATE ops action)
+- `LLAMA_ENDPOINT` = `http://127.0.0.1:8090` (Pi: email-embedder.service)
+- `LLAMA_TIMEOUT_SECONDS` / `LLAMA_RETRIES` / `LLAMA_RETRY_BACKOFF_SECONDS`
+- `CENTROIDS_PATH` = `model/label_centroids.json` (ships with the model)
+
+**Outage semantics:** embedder failures surface LOUDLY — retried, then a
+`warning` lands in `update_history.json` and every classification errors
+out until the server recovers or ops flips the flag. There is NO automatic
+fallback to SetFit.
+
+**Provenance + rebuild:** `label_centroids.json` carries the merged-GGUF
+sha256, the adapter (`email_real/lora_adapter_final.pt`), the corpus commit
+(17a86de), and the validation numbers; rebuild it with
+`build_label_centroids.py --splits <corpus> --endpoint <server>` (the script
+validates against the §16 numbers before writing). The embedding route is
+INFERENCE ONLY — training (train.py/evaluate.py) stays on SetFit/ST.
+
 ## Google Drive — Model Storage
 
 The trained model (~490 MB) is stored in Google Drive instead of Git. Use
