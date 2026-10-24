@@ -32,6 +32,13 @@ Usage from the command line:
     python classify.py
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from setfit import SetFitModel  # type-checking only; never imported at runtime
+
 import email
 import email.message
 import json
