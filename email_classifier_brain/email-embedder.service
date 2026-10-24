@@ -1,22 +1,44 @@
 [Unit]
-Description=Email embedder — llama.cpp server (EmbeddingGemma-2 LoRA-merged GGUF)
+Description=Email embedder — llama.cpp static server (EmbeddingGemma-2 LoRA-merged GGUF)
 Documentation=https://github.com/ggml-org/llama.cpp
 After=network.target
 
 [Service]
 Type=simple
-# Pi placement per DEPLOY.md (llama_cpp_migration_20261024): binary + GGUF
-# under /home/email_bot; sha256 of the GGUF must match
-# 68cc924c210aeff4d701d52d9b128301763e676c82dfc2d4fb76f1b58dbcfa62
-# (artifacts/llama_cpp_migration_20261024/SHA256SUMS).
-User=email_bot
-Group=email_bot
-WorkingDirectory=/home/email_bot
-ExecStart=/home/email_bot/llama.cpp/llama-server \
-  -m /home/email_bot/models/merged_text_q8_0.gguf \
+# Production shape as deployed on the Pi (2026-10-25).
+
+# WHY A STATIC llama-server: llama.cpp nightly (~b11852+) builds a stub exe +
+# dynamically dlopen'd per-CPU-variant backends (libggml-cpu-armv8.x_*.so).
+# On the Pi runtime that in-process backend registry silently finds NOTHING
+# (even with byte-identical libs and working standalone dlopen) -> crash-loop
+# "no backends are loaded" at every start. A fully static build links the CPU
+# backend at compile time and deletes the scan entirely.
+#
+# Build recipe (from an aarch64 container, ~2 min; -mcpu=cortex-a72 was
+# measured 15-20% SLOWER than the generic armv8-a default - keep generic):
+#   cmake -B build -DGGML_NATIVE=OFF -DGGML_CPU_ALL_VARIANTS=OFF \
+#         -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF \
+#         -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-static"
+#   cmake --build build -j10 --target llama-server
+#
+# Model placement: the classifier repo's own llama_model/ dir is the single
+# source of truth. Update the model without touching this unit:
+#   POST /admin/upload-model-artifact (sha256_expected enforced in-flight)
+#   POST /admin/install-model-artifact
+#   systemctl restart email-embedder
+# The installed GGUF must have sha256
+#   68cc924c210aeff4d701d52d9b128301763e676c82dfc2d4fb76f1b58dbcfa62
+# (the fine-tuned merge; a larger 309,855,456-byte file with sha 2188ac1d...
+# from the legacy Drive channel is NOT this model).
+
+User=lohnn
+Group=lohnn
+WorkingDirectory=/home/lohnn/llamacpp-static
+ExecStart=/home/lohnn/llamacpp-static/llama-server \
+  -m /home/lohnn/email_classifier/email_classifier_brain/llama_model/merged_text_q8_0.gguf \
   --embedding \
   --pooling mean \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port 8090 \
   --threads 4 \
   --ubatch-size 2048
@@ -24,10 +46,12 @@ ExecStart=/home/email_bot/llama.cpp/llama-server \
 #   mean pooling (metadata-only pooling is not honored by the b-family
 #   server: /v1/embeddings would 400 'Pooling none'), and physical batch
 #   >512 tokens so whole emails (up to ~1925 tokens) embed in one shot.
+# Loopback bind: the classifier (same host) is the only client.
 Restart=always
 RestartSec=5
 # No EnvironmentFile needed: everything the brain needs comes from the
-# brain's own .env (LLAMA_ENDPOINT); the server itself is config-complete.
+# brain's own .env (LLAMA_ENDPOINT, and LLAMA_TIMEOUT_SECONDS=180 on the
+# Pi - a long email embeds in ~10-90 s on the A72, aborting at 30 s).
 
 [Install]
 WantedBy=multi-user.target
