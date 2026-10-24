@@ -1,0 +1,18 @@
+# Zero-touch model updates: when a new GGUF lands at the deploy path,
+# this unit triggers email-embedder-reload.service.
+#
+# NOTE: PathChanged must match the GGUF install target — which is
+# LLAMA_MODEL_FILE in the brain's .env (config.py) AND the -m path in
+# email-embedder.service. Change all three together (bootstrap_llama_cpp.sh
+# installs these units with this expectation baked in).
+[Unit]
+Description=Watch the email embedder GGUF path for updates
+
+[Path]
+PathChanged=/home/email_bot/models/merged_text_q8_0.gguf
+# Trigger immediately on change; debounce not needed — the reload unit is
+# a cheap oneshot restart.
+Unit=email-embedder-reload.service
+
+[Install]
+WantedBy=multi-user.target

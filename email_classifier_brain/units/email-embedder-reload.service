@@ -1,0 +1,13 @@
+# Fired by email-embedder-reload.path when the GGUF file changes.
+# Runs as root by default: `systemctl try-restart email-embedder.service`
+# needs no extra privilege grants (this IS the privileged operation) —
+# deliberately NOT User=, Group=, or CapabilityBoundingSet-ed.
+[Unit]
+Description=Reload the email embedder after a new GGUF install
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl try-restart email-embedder.service
+
+[Install]
+WantedBy=multi-user.target

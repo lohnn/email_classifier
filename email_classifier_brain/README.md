@@ -568,6 +568,33 @@ This single command:
 
 ## Deploying on Raspberry Pi
 
+### llama.cpp embedder — one-command bootstrap + zero-touch model updates
+
+The production embedder is a local llama.cpp server (`email-embedder.service`)
+holding the LoRA-merged GGUF (`merged_text_q8_0.gguf`; sha in the
+`artifacts/llama_cpp_migration_20261024/SHA256SUMS`). One-time bootstrap on
+the Pi:
+
+```bash
+sudo ./bootstrap_llama_cpp.sh    # from email_classifier_brain/ (units/ sibling used)
+```
+
+It fetches the newest ubuntu-arm64 llama.cpp nightly FROM THE RELEASES LIST
+(never a pinned release-notes URL — those rot; effort-capped with manual
+fallback), installs `llama-server` to `/home/email_bot/llama.cpp/`, installs
+`email-embedder.service` (only if absent) plus the
+`email-embedder-reload.path` + `email-embedder-reload.service` watcher pair,
+creates the model dir, and daemon-reloads. No keys; no other services.
+
+After that, model updates are zero-touch: upload via
+`/admin/upload-model-artifact`, install via `/admin/install-model-artifact`
+— the path unit sees the installed GGUF and restarts the embedder
+automatically. The email-classifier service itself is NOT touched by the
+reload: switching its `model/` set stays the manual install + service
+restart flow as documented. Reminder: a plain service restart does NOT pull
+code or sync models — only the `.update_request` marker path (daily
+auto-update) does, unchanged.
+
 ```bash
 # Initial setup
 git clone <code-repo-url> && cd email_classifier_brain
