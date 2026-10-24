@@ -38,12 +38,26 @@ import json
 import mimetypes
 import os
 
-from setfit import SetFitModel
+try:
+    import setfit  # noqa: F401  (import check only — SetFit model load is LAZY)
+except ImportError:  # pragma: no cover
+    setfit = None
 
 try:
-    from config import MODEL_OUTPUT_DIR, format_model_input, clean_subject, clean_body, UNSURE_CONFIDENCE_THRESHOLD, UNSURE_DELTA_THRESHOLD
+    from config import (
+        MODEL_OUTPUT_DIR, format_model_input, clean_subject, clean_body,
+        UNSURE_CONFIDENCE_THRESHOLD, UNSURE_DELTA_THRESHOLD,
+        EMBEDDER_BACKEND, CLS_PROMPT, CENTROIDS_PATH,
+    )
 except ImportError:
-    from classifier_brain.config import MODEL_OUTPUT_DIR, format_model_input, clean_subject, clean_body, UNSURE_CONFIDENCE_THRESHOLD, UNSURE_DELTA_THRESHOLD
+    from classifier_brain.config import (
+        MODEL_OUTPUT_DIR, format_model_input, clean_subject, clean_body,
+        UNSURE_CONFIDENCE_THRESHOLD, UNSURE_DELTA_THRESHOLD,
+        EMBEDDER_BACKEND, CLS_PROMPT, CENTROIDS_PATH,
+    )
+
+import embedder as _embedder
+import config as _config
 
 
 # ---------------------------------------------------------------------------
@@ -76,47 +90,86 @@ def _load_label_mapping() -> dict[int, str]:
     return {int(k): v for k, v in raw.items()}
 
 
-# Global singletons — loaded once when the module is first imported
-# (Skip loading during tests to avoid heavy ML model overhead)
-if os.getenv("TESTING") == "true":
-    _model = None
-    _label_mapping = {}
-else:
-    _model = _load_model()
-    _label_mapping = _load_label_mapping()
+# Global singletons — loaded LAZILY on first ST-path use (the llama.cpp
+# production path never allocates the 500 MB SetFit stack). Skip eager load
+# during tests.
+_model = None
+_label_mapping = {}
+_st_loaded = False
+
+
+def _get_st():
+    """Lazily load the SetFit model + label mapping (rollback backend only)."""
+    global _model, _label_mapping, _st_loaded
+    if os.getenv("TESTING") == "true":
+        raise RuntimeError("SetFit path not available under TESTING=true")
+    if not _st_loaded:
+        _model = _load_model()
+        _label_mapping = _load_label_mapping()
+        _st_loaded = True
+    return _model, _label_mapping
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def is_unsure_classification(probs) -> bool:
+def is_unsure_classification(probs, confidence_threshold: float | None = None,
+                             delta_threshold: float | None = None) -> bool:
     """
     Determine whether a classification result should be flagged as uncertain.
 
     Returns True if either of the following conditions holds:
-    - The top class probability is below UNSURE_CONFIDENCE_THRESHOLD (low overall confidence), OR
-    - The gap between the top-two class probabilities is below UNSURE_DELTA_THRESHOLD
-      (the model cannot clearly distinguish between two categories).
+    - The top class probability is below the confidence threshold (low overall
+      confidence), OR
+    - The gap between the top-two class probabilities is below the delta
+      threshold (the model cannot clearly distinguish between two categories).
+
+    The gate logic is backend-independent: SetFit probabilities use the
+    classic thresholds; llama.cpp cosine scores use the thresholds calibrated
+    in the centroids artifact (the cosine scale differs slightly
+    post-quantization — FINDINGS §14/§16).
 
     Args:
-        probs: Array-like of per-class probabilities from predict_proba.
+        probs: Array-like of per-class scores (probabilities or cosines).
+        confidence_threshold / delta_threshold: backend-specific thresholds;
+            None defaults to the SetFit-era constants from config.
 
     Returns:
         True if the classification is uncertain, False otherwise.
     """
+    conf_thr = UNSURE_CONFIDENCE_THRESHOLD if confidence_threshold is None else confidence_threshold
+    delta_thr = UNSURE_DELTA_THRESHOLD if delta_threshold is None else delta_threshold
     sorted_probs = sorted((float(p) for p in probs), reverse=True)
     top_score = sorted_probs[0]
 
-    if top_score < UNSURE_CONFIDENCE_THRESHOLD:
+    if top_score < conf_thr:
         return True
 
     if len(sorted_probs) >= 2:
         delta = top_score - sorted_probs[1]
-        if delta < UNSURE_DELTA_THRESHOLD:
+        if delta < delta_thr:
             return True
 
     return False
+
+
+def _predict_llama(model_input: str, return_score: bool):
+    """llama.cpp production path: embed the prefix-applied input via the
+    local server, kNN over the shipped L2 centroids, UNSURE gate on the
+    calibrated cosine thresholds from the centroids artifact."""
+    vec = _embedder.embed_texts([model_input])[0]
+    centroids = _embedder.load_centroids(_config.CENTROIDS_PATH)
+    label, score, scores_vec = _embedder.knn_classify(vec, centroids)
+    if return_score:
+        gate = _embedder.artifact_gate_thresholds(_config.CENTROIDS_PATH)
+        unsure = is_unsure_classification(
+            scores_vec,
+            confidence_threshold=gate["confidence_threshold"],
+            delta_threshold=gate["delta_threshold"],
+        )
+        return label, float(score), unsure
+    return label
 
 
 def predict_email(
@@ -163,22 +216,30 @@ def predict_email(
         attachment_types=attachment_types,
     )
 
+    if _config.EMBEDDER_BACKEND == "llama_cpp":
+        # Production path: local llama.cpp server (LoRA-merged GGUF) +
+        # kNN over the shipped centroids. Outages raise EmbedderOutage
+        # (surfaced LOUDLY in embedder._surface_outage) — flip
+        # EMBEDDER_BACKEND=st only as a deliberate ops action.
+        return _predict_llama(model_input, return_score)
+
+    model, label_mapping = _get_st()
     if return_score:
         # Get probabilities for all classes
-        probs = _model.predict_proba([model_input])[0]
+        probs = model.predict_proba([model_input])[0]
         # Find the index of the highest probability
         predicted_index = int(probs.argmax())
         score = float(probs[predicted_index])
 
-        label = _label_mapping.get(predicted_index, f"UNKNOWN({predicted_index})")
+        label = label_mapping.get(predicted_index, f"UNKNOWN({predicted_index})")
         unsure = is_unsure_classification(probs)
         return label, score, unsure
 
-    prediction = _model.predict([model_input])
+    prediction = model.predict([model_input])
 
     # SetFit returns a tensor or array; extract the integer label
     predicted_index = int(prediction[0])
-    label = _label_mapping.get(predicted_index, f"UNKNOWN({predicted_index})")
+    label = label_mapping.get(predicted_index, f"UNKNOWN({predicted_index})")
     return label
 
 
@@ -280,7 +341,17 @@ def predict_raw_email(msg: email.message.Message, return_score: bool = False) ->
 
 
 def get_available_categories() -> list[str]:
-    """Return the list of all category labels the model was trained on."""
+    """Return the list of all category labels the model was trained on.
+
+    llama.cpp backend: the shipped centroids' keys (the artifact that
+    defines the production vocabulary). Falls back to the SetFit-era
+    label_mapping when the centroids artifact is absent (tests / pre-deploy).
+    """
+    if _config.EMBEDDER_BACKEND == "llama_cpp":
+        try:
+            return sorted(_embedder.load_centroids(_config.CENTROIDS_PATH).keys())
+        except OSError:
+            return sorted(_label_mapping.values())
     return sorted(_label_mapping.values())
 
 

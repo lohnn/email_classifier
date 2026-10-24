@@ -100,6 +100,43 @@ DB_PATH = os.getenv("DB_PATH") or os.path.join(STORAGE_DIR, "email_history.db")
 E5_PREFIX = "passage: "
 
 # ---------------------------------------------------------------------------
+# Embedder backend — production serving path is the llama.cpp endpoint
+# serving the LoRA-merged GGUF (embeddinggemma-2 text tower, 768d, mean
+# pooling). 'st' is the full rollback: the in-process SetFit path, flipped
+# only as a deliberate ops action. An llama.cpp outage is surfaced LOUDLY
+# (error log + update_history warning) and never silently degraded —
+# 2026-10 wave lessons: silent degrade is how drift ships.
+# ---------------------------------------------------------------------------
+EMBEDDER_BACKEND = (os.getenv("EMBEDDER_BACKEND") or "llama_cpp").strip().lower()
+LLAMA_ENDPOINT = os.getenv("LLAMA_ENDPOINT") or "http://127.0.0.1:8090"
+LLAMA_TIMEOUT_SECONDS = _get_float_env("LLAMA_TIMEOUT_SECONDS", 30.0)
+LLAMA_RETRIES = int(os.getenv("LLAMA_RETRIES") or "3")
+LLAMA_RETRY_BACKOFF_SECONDS = _get_float_env("LLAMA_RETRY_BACKOFF_SECONDS", 2.0)
+# Classification task prefix applied IN THE CALLER (llama.cpp takes raw
+# text) — byte-for-byte the string the lab validated (FINDINGS §16: dev
+# 0.900 / test ≥0.889 with caller-applied prefix on served Q8).
+CLS_PROMPT = os.getenv("CLS_PROMPT", "task: classification | query: ")
+# kNN centroids shipped with the model artifact (alongside label_mapping.json;
+# built by the retrain pipeline's build_centroids.py against the exact GGUF).
+CENTROIDS_PATH = os.getenv("CENTROIDS_PATH") or os.path.join(
+    MODEL_OUTPUT_DIR, "label_centroids.json"
+)
+
+# Model-artifact upload/install (POST /admin/upload-model-artifact +
+# /admin/install-model-artifact — TAILSCALE-PEER-ONLY routes). The staging
+# dir lives under STORAGE_DIR so staging→install stays on one filesystem
+# (atomic os.replace). The GGUF install target is the path llama.cpp loads
+# (email-embedder.service -m path on the Pi); the ST set installs into
+# MODEL_OUTPUT_DIR.
+MODEL_STAGING_DIR = os.getenv("MODEL_STAGING_DIR") or os.path.join(
+    STORAGE_DIR, "model_staging"
+)
+LLAMA_MODEL_FILE = os.getenv("LLAMA_MODEL_FILE") or os.path.join(
+    "llama_model", "merged_text_q8_0.gguf"
+)
+MAX_MODEL_UPLOAD_BYTES = int(os.getenv("MAX_MODEL_UPLOAD_BYTES") or 2 * 1024 * 1024 * 1024)
+
+# ---------------------------------------------------------------------------
 # Context-window budget (intfloat/multilingual-e5-small)
 # ---------------------------------------------------------------------------
 #

@@ -1,0 +1,33 @@
+[Unit]
+Description=Email embedder — llama.cpp server (EmbeddingGemma-2 LoRA-merged GGUF)
+Documentation=https://github.com/ggml-org/llama.cpp
+After=network.target
+
+[Service]
+Type=simple
+# Pi placement per DEPLOY.md (llama_cpp_migration_20261024): binary + GGUF
+# under /home/email_bot; sha256 of the GGUF must match
+# 68cc924c210aeff4d701d52d9b128301763e676c82dfc2d4fb76f1b58dbcfa62
+# (artifacts/llama_cpp_migration_20261024/SHA256SUMS).
+User=email_bot
+Group=email_bot
+WorkingDirectory=/home/email_bot
+ExecStart=/home/email_bot/llama.cpp/llama-server \
+  -m /home/email_bot/models/merged_text_q8_0.gguf \
+  --embedding \
+  --pooling mean \
+  --host 0.0.0.0 \
+  --port 8090 \
+  --threads 4 \
+  --ubatch-size 2048
+# --pooling mean and --ubatch-size 2048 are REQUIRED for this GGUF:
+#   mean pooling (metadata-only pooling is not honored by the b-family
+#   server: /v1/embeddings would 400 'Pooling none'), and physical batch
+#   >512 tokens so whole emails (up to ~1925 tokens) embed in one shot.
+Restart=always
+RestartSec=5
+# No EnvironmentFile needed: everything the brain needs comes from the
+# brain's own .env (LLAMA_ENDPOINT); the server itself is config-complete.
+
+[Install]
+WantedBy=multi-user.target

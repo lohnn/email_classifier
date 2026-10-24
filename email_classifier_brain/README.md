@@ -345,7 +345,41 @@ Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
 | `POST` | `/admin/push-training-data`      | Manually push `TrainingData/` to Git.                |
 | `GET`  | `/admin/update-errors`           | Get history of automated update failures.            |
 | `GET`  | `/admin/retrain-status`          | Whether training data is ahead of the deployed model (`retrain_worthwhile` + both commit ids). |
+| `POST` | `/admin/upload-model-artifact`   | **Tailscale/localhost ONLY** — stream a model artifact (.gguf/.safetensors/.json/.pkl) into staging; sha256 computed + echoed; optional `sha256_expected`. |
+| `POST` | `/admin/install-model-artifact`  | **Tailscale/localhost ONLY** — atomically install a staged artifact (GGUF → llama model path, ST pieces → model/). No auto-restart. |
 | `POST` | `/logs/{id}/repair-gmail-labels` | User-triggered Gmail label resync from the DB for one email (removes stale trained-category labels + UNSURE, applies expected category + VERIFIED). Works for archived/trashed mail. Returns a JSON action report. |
+
+## Embedder Backend — llama.cpp (production) vs SetFit (rollback)
+
+`classify.py` classifies via **kNN over per-class centroids** computed from
+the LoRA-merged EmbeddingGemma-2 text model, served by a local **llama.cpp**
+server (`--embedding --pooling mean --ubatch-size 2048`, OpenAI-style
+`POST /v1/embeddings`). The classification prompt prefix
+(`task: classification | query: `) is applied **in the caller** — llama.cpp
+takes raw text. Output is always 768d (no truncate_dim; MRL-512 storage cuts
+would be caller-side `vec[:512]` + re-normalize). The UNSURE gate
+(`is_unsure_classification`) is unchanged; on the llama backend it runs with
+the thresholds calibrated in `label_centroids.json` (cosine scale differs
+from SetFit probabilities).
+
+**Config (`.env`):**
+- `EMBEDDER_BACKEND` = `llama_cpp` (default) | `st` (full rollback to the
+  in-process SetFit path — flip only as a DELIBERATE ops action)
+- `LLAMA_ENDPOINT` = `http://127.0.0.1:8090` (Pi: email-embedder.service)
+- `LLAMA_TIMEOUT_SECONDS` / `LLAMA_RETRIES` / `LLAMA_RETRY_BACKOFF_SECONDS`
+- `CENTROIDS_PATH` = `model/label_centroids.json` (ships with the model)
+
+**Outage semantics:** embedder failures surface LOUDLY — retried, then a
+`warning` lands in `update_history.json` and every classification errors
+out until the server recovers or ops flips the flag. There is NO automatic
+fallback to SetFit.
+
+**Provenance + rebuild:** `label_centroids.json` carries the merged-GGUF
+sha256, the adapter (`email_real/lora_adapter_final.pt`), the corpus commit
+(17a86de), and the validation numbers; rebuild it with
+`build_label_centroids.py --splits <corpus> --endpoint <server>` (the script
+validates against the §16 numbers before writing). The embedding route is
+INFERENCE ONLY — training (train.py/evaluate.py) stays on SetFit/ST.
 
 ## Google Drive — Model Storage
 
@@ -477,7 +511,19 @@ the same state.
   label state from the database (removes stale trained-category labels and
   UNSURE, applies the expected category and VERIFIED) and returns a JSON
   action report of exactly what it did. Nothing repairs Gmail
-  automatically — the endpoint is user-triggered by design. **Confirmed
+  automatically — the endpoint is user-triggered by design. **Model-artifact deploy loop (replaces the scp/GDrive model
+  dance):** `POST /admin/upload-model-artifact` (raw body + `?filename=`)
+  streams into a staging dir with streaming sha256 (optional
+  `sha256_expected`, ~2 GiB cap, basename+extension whitelist), then
+  `POST /admin/install-model-artifact?staged_name=…` atomically moves it to
+  the active location (GGUF → the llama.cpp model path per
+  `LLAMA_MODEL_FILE`; ST pieces → `model/`). **No auto-restart** — the
+  target service loads on its next restart. Both steps are
+  **Tailscale/localhost-peer-only**: even a valid admin key from an
+  untrusted network is rejected (403) — one of the accepted file types is
+  a pickle that executes on load. Both steps land in
+  `update_history.json` (file, size, sha256, peer). GDrive storage backups
+  stay as-is; only the manual model-transfer dance is replaced. **Confirmed
   rows only:** on a row that is still model-predicted (`corrected_category`
   NULL) the repair endpoint REFUSES with a 409 whose payload contains the
   plan it *would* have run — a repair must never stamp the model's guess
@@ -521,6 +567,33 @@ This single command:
 4. Commits and pushes any new label corrections to the training data repo
 
 ## Deploying on Raspberry Pi
+
+### llama.cpp embedder — one-command bootstrap + zero-touch model updates
+
+The production embedder is a local llama.cpp server (`email-embedder.service`)
+holding the LoRA-merged GGUF (`merged_text_q8_0.gguf`; sha in the
+`artifacts/llama_cpp_migration_20261024/SHA256SUMS`). One-time bootstrap on
+the Pi:
+
+```bash
+sudo ./bootstrap_llama_cpp.sh    # from email_classifier_brain/ (units/ sibling used)
+```
+
+It fetches the newest ubuntu-arm64 llama.cpp nightly FROM THE RELEASES LIST
+(never a pinned release-notes URL — those rot; effort-capped with manual
+fallback), installs `llama-server` to `/home/email_bot/llama.cpp/`, installs
+`email-embedder.service` (only if absent) plus the
+`email-embedder-reload.path` + `email-embedder-reload.service` watcher pair,
+creates the model dir, and daemon-reloads. No keys; no other services.
+
+After that, model updates are zero-touch: upload via
+`/admin/upload-model-artifact`, install via `/admin/install-model-artifact`
+— the path unit sees the installed GGUF and restarts the embedder
+automatically. The email-classifier service itself is NOT touched by the
+reload: switching its `model/` set stays the manual install + service
+restart flow as documented. Reminder: a plain service restart does NOT pull
+code or sync models — only the `.update_request` marker path (daily
+auto-update) does, unchanged.
 
 ```bash
 # Initial setup
