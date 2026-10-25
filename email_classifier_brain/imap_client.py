@@ -27,6 +27,13 @@ LABEL_TOKEN_PATTERN = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|([^"\s()]+)')
 # Transient errors that warrant a retry (network drops, protocol aborts)
 _IMAP_ERRORS = (imaplib.IMAP4.error, OSError)
 
+# Size cap for the read sweep's composed `SEEN NOT X-GM-LABELS ...` SEARCH
+# criteria (WI-103). With dozens of trained categories the line stays well
+# under this; crossing it means an absurd label vocabulary and we fall back
+# to a plain SEEN scan with client-side filtering instead of shipping a
+# giant command the server may reject anyway.
+MAX_NEGATED_SEARCH_CHARS = 4000
+
 
 def _imap_quote_label(label: str) -> str:
     """Return label properly quoted and escaped for use in IMAP commands.
@@ -109,113 +116,281 @@ class GmailClient:
             if not email_ids:
                 return []
 
-            try:
-                BATCH_SIZE = int(os.getenv("IMAP_BATCH_SIZE") or "50")
-            except ValueError:
-                BATCH_SIZE = 50
-
-            # ------------------------------------------------------------------
-            # Phase 1: metadata-only scan (no body download) newest-first.
-            # Collects qualifying sequence IDs and their gmail IDs up to limit.
-            #
             # NOTE: IMAP FETCH returns results in ascending sequence-number order
-            # regardless of the order requested.  To honour newest-first we build
-            # a lookup dict from each batch response, then walk `batch_ids` (which
-            # *are* in newest-first order) to decide qualification order.
-            # ------------------------------------------------------------------
-            qualifying_seq_ids: List[bytes] = []
-            known_labels_set = set(known_labels)
-
-            for i in range(0, len(email_ids), BATCH_SIZE):
-                batch_ids = email_ids[i:i + BATCH_SIZE]
-                ids_str = b','.join(batch_ids)
-
-                typ, msg_data = self.connection.fetch(ids_str, '(X-GM-LABELS X-GM-MSGID)')
-                if typ != 'OK':
-                    continue
-
-                # Build a lookup: seq_id (str) -> labels_str
-                metadata_by_seq: Dict[str, str] = {}
-                for response_part in msg_data:
-                    raw_line = response_part[0] if isinstance(response_part, tuple) else response_part
-                    metadata = raw_line.decode('utf-8', errors='ignore')
-
-                    seq_match = SEQ_PATTERN.match(metadata)
-                    if not seq_match:
-                        continue
-                    seq_id_str = seq_match.group(1)
-
-                    labels_str = ""
-                    lbl_match = X_GM_LABELS_PATTERN.search(metadata)
-                    if lbl_match:
-                        labels_str = lbl_match.group(1)
-
-                    metadata_by_seq[seq_id_str] = labels_str
-
-                # Walk batch_ids in newest-first order to preserve ordering
-                for bid in batch_ids:
-                    bid_str = bid.decode('utf-8', errors='ignore')
-                    if bid_str not in metadata_by_seq:
-                        continue
-
-                    labels_str = metadata_by_seq[bid_str]
-
-                    # Skip if any known label is already applied
-                    skip = False
-                    for m in LABEL_TOKEN_PATTERN.finditer(labels_str):
-                        label_found = m.group(1).replace('\\"', '"').replace('\\\\', '\\') if m.group(1) else m.group(2)
-                        if label_found in known_labels_set:
-                            skip = True
-                            break
-
-                    if not skip:
-                        qualifying_seq_ids.append(bid)
-                        if limit is not None and len(qualifying_seq_ids) >= limit:
-                            break  # got enough from this batch
-
-                if limit is not None and len(qualifying_seq_ids) >= limit:
-                    break  # outer loop – got enough
+            # regardless of the order requested. The shared metadata scan walks
+            # `email_ids` (which *are* in newest-first order) to decide
+            # qualification order.
+            qualifying_seq_ids = self._scan_qualifying_metadata(email_ids, set(known_labels), limit=limit)
 
             if not qualifying_seq_ids:
                 return []
 
-            # ------------------------------------------------------------------
             # Phase 2: fetch full bodies only for the qualifying emails.
-            #
-            # Again, IMAP returns results in ascending order, so we collect into
-            # a dict and then reassemble in qualifying_seq_ids order.
-            # ------------------------------------------------------------------
-            body_by_seq: Dict[str, Tuple[str, Message]] = {}
+            return self._fetch_bodies(qualifying_seq_ids)
 
-            for i in range(0, len(qualifying_seq_ids), BATCH_SIZE):
-                batch_seq = qualifying_seq_ids[i:i + BATCH_SIZE]
-                ids_str = b','.join(batch_seq)
+        return with_retry(
+            _do,
+            retries=3,
+            backoff=2.0,
+            exceptions=_IMAP_ERRORS,
+            on_retry=lambda exc, _: self._reset_connection(),
+        )
 
-                typ, msg_data = self.connection.fetch(ids_str, '(BODY.PEEK[] X-GM-MSGID)')
-                if typ != 'OK':
+    def _scan_qualifying_metadata(
+        self,
+        email_ids: List[bytes],
+        known_labels_set: set,
+        limit: Optional[int] = None,
+        skip_ids: Optional[set] = None,
+    ) -> List[Tuple[bytes, str]]:
+        """
+        Phase-1 metadata scan shared by the unread fetch and the read-mail
+        sweep (WI-103): batched X-GM-LABELS + X-GM-MSGID fetches, no bodies.
+
+        Walks `email_ids` newest-first and returns [(seq_id, gmail_id)] for
+        emails that carry NONE of `known_labels_set` and are NOT in
+        `skip_ids` (when given). Early-stops once `limit` qualifying emails
+        are collected.
+
+        skip_ids is the processed-marker guard (e.g. gmail ids that already
+        have a DB log row): a skipped email neither qualifies nor consumes
+        the `limit` budget — otherwise a wall of already-processed mail at
+        the head of the scan would stall the sweep.
+        """
+        try:
+            BATCH_SIZE = int(os.getenv("IMAP_BATCH_SIZE") or "50")
+        except ValueError:
+            BATCH_SIZE = 50
+
+        qualifying: List[Tuple[bytes, str]] = []
+
+        for i in range(0, len(email_ids), BATCH_SIZE):
+            batch_ids = email_ids[i:i + BATCH_SIZE]
+            ids_str = b','.join(batch_ids)
+
+            typ, msg_data = self.connection.fetch(ids_str, '(X-GM-LABELS X-GM-MSGID)')
+            if typ != 'OK':
+                continue
+
+            # Build a lookup: seq_id (str) -> (labels_str, gmail_id)
+            metadata_by_seq: Dict[str, Tuple[str, str]] = {}
+            for response_part in msg_data:
+                raw_line = response_part[0] if isinstance(response_part, tuple) else response_part
+                metadata = raw_line.decode('utf-8', errors='ignore')
+
+                seq_match = SEQ_PATTERN.match(metadata)
+                if not seq_match:
+                    continue
+                seq_id_str = seq_match.group(1)
+
+                labels_str = ""
+                lbl_match = X_GM_LABELS_PATTERN.search(metadata)
+                if lbl_match:
+                    labels_str = lbl_match.group(1)
+
+                msgid_match = X_GM_MSGID_PATTERN.search(metadata)
+                gmail_id = msgid_match.group(1) if msgid_match else ""
+
+                metadata_by_seq[seq_id_str] = (labels_str, gmail_id)
+
+            # Walk batch_ids in newest-first order to preserve ordering
+            for bid in batch_ids:
+                bid_str = bid.decode('utf-8', errors='ignore')
+                if bid_str not in metadata_by_seq:
                     continue
 
-                for response_part in msg_data:
-                    if isinstance(response_part, tuple):
-                        metadata = response_part[0].decode('utf-8', errors='ignore')
-                        seq_match = SEQ_PATTERN.match(metadata)
-                        msgid_match = X_GM_MSGID_PATTERN.search(metadata)
-                        if not seq_match or not msgid_match:
-                            continue
-                        seq_id_str = seq_match.group(1)
-                        gmail_id = msgid_match.group(1)
-                        raw_email = response_part[1]
-                        msg = email.message_from_bytes(raw_email)
-                        body_by_seq[seq_id_str] = (gmail_id, msg)
+                labels_str, gmail_id = metadata_by_seq[bid_str]
 
-            # Reassemble in newest-first order (matching qualifying_seq_ids)
-            results: List[Tuple[str, Message]] = []
-            for seq_id in qualifying_seq_ids:
-                key = seq_id.decode('utf-8', errors='ignore')
-                if key in body_by_seq:
-                    results.append(body_by_seq[key])
+                # Skip already-processed ids (processed-marker) BEFORE the
+                # label filter: they neither qualify nor consume the limit.
+                if skip_ids and gmail_id and gmail_id in skip_ids:
+                    continue
 
-            return results
+                # Skip if any known label is already applied
+                skip = False
+                for m in LABEL_TOKEN_PATTERN.finditer(labels_str):
+                    label_found = m.group(1).replace('\\"', '"').replace('\\\\', '\\') if m.group(1) else m.group(2)
+                    if label_found in known_labels_set:
+                        skip = True
+                        break
+
+                if not skip:
+                    qualifying.append((bid, gmail_id))
+                    if limit is not None and len(qualifying) >= limit:
+                        break  # got enough from this batch
+
+            if limit is not None and len(qualifying) >= limit:
+                break  # outer loop – got enough
+
+        return qualifying
+
+    def _fetch_bodies(self, qualifying_seq_ids: List[Tuple[bytes, str]]) -> List[Tuple[str, Message]]:
+        """
+        Phase 2 shared by both fetch paths: fetch BODY.PEEK[] (and
+        X-GM-MSGID) only for the qualifying emails, then reassemble in
+        qualifying order (IMAP returns ascending; we re-map via sequence
+        ids).
+        """
+        try:
+            BATCH_SIZE = int(os.getenv("IMAP_BATCH_SIZE") or "50")
+        except ValueError:
+            BATCH_SIZE = 50
+
+        body_by_seq: Dict[str, Tuple[str, Message]] = {}
+
+        for i in range(0, len(qualifying_seq_ids), BATCH_SIZE):
+            batch_seq = qualifying_seq_ids[i:i + BATCH_SIZE]
+            ids_str = b','.join(seq for seq, _gid in batch_seq)
+
+            typ, msg_data = self.connection.fetch(ids_str, '(BODY.PEEK[] X-GM-MSGID)')
+            if typ != 'OK':
+                continue
+
+            for response_part in msg_data:
+                if isinstance(response_part, tuple):
+                    metadata = response_part[0].decode('utf-8', errors='ignore')
+                    seq_match = SEQ_PATTERN.match(metadata)
+                    msgid_match = X_GM_MSGID_PATTERN.search(metadata)
+                    if not seq_match or not msgid_match:
+                        continue
+                    seq_id_str = seq_match.group(1)
+                    gmail_id = msgid_match.group(1)
+                    raw_email = response_part[1]
+                    msg = email.message_from_bytes(raw_email)
+                    body_by_seq[seq_id_str] = (gmail_id, msg)
+
+        # Reassemble in qualifying order (matching qualifying_seq_ids)
+        results: List[Tuple[str, Message]] = []
+        for seq_id in qualifying_seq_ids:
+            key = seq_id[0].decode('utf-8', errors='ignore')
+            if key in body_by_seq:
+                results.append(body_by_seq[key])
+
+        return results
+
+    def has_unprocessed_unseen_emails(self, known_labels: List[str]) -> bool:
+        """
+        True iff at least one UNSEEN message in INBOX carries NONE of the
+        known_labels — i.e. the unread queue still holds unprocessed mail.
+
+        Metadata-only (no body download) and early-stopping. This is the
+        hard-gate probe for the read-mail sweep (WI-103): the sweep may only
+        start when this returns False. Any probe failure returns True —
+        fail closed: never sweep read mail while the unread state is unknown.
+        """
+        def _do():
+            self.connect()
+            typ, data = self.connection.search(None, 'UNSEEN')
+            if typ != 'OK' or not data[0]:
+                return False
+            email_ids = data[0].split()[::-1]  # newest first, like the fetch path
+            qualifying = self._scan_qualifying_metadata(email_ids, set(known_labels), limit=1)
+            return len(qualifying) > 0
+
+        try:
+            return with_retry(
+                _do,
+                retries=3,
+                backoff=2.0,
+                exceptions=_IMAP_ERRORS,
+                on_retry=lambda exc, _: self._reset_connection(),
+            )
+        except Exception as e:
+            logger.error(f"Unread-queue drain probe failed; treating as NOT drained: {e}")
+            return True
+
+    def _negated_seen_criteria(self, known_labels: List[str]) -> Optional[str]:
+        """
+        SEARCH criteria for read-mail sweep candidates: every READ email
+        carrying NONE of the known labels, evaluated server-side.
+
+        SEEN + one NOT X-GM-LABELS per known label (multiple keys are an
+        implicit AND per RFC 3501). Returns None (caller uses the plain
+        `SEEN` fallback) when there is nothing to negate or the criteria
+        would be oversized. X-GM-LABELS is a documented SEARCH criterion
+        (Gmail IMAP extensions); a server without NOT support returns a
+        SUPERSET — the client-side label filter in _scan_qualifying_metadata
+        remains the correctness backstop — or rejects the command, which the
+        caller treats as the same fallback.
+        """
+        if not known_labels:
+            return None
+        not_chain = " ".join(
+            f"NOT X-GM-LABELS {_imap_quote_label(label)}" for label in known_labels
+        )
+        if len(not_chain) > MAX_NEGATED_SEARCH_CHARS:
+            logger.info(
+                "Read sweep: %d known labels exceed the negated-SEARCH size cap; "
+                "falling back to plain SEEN scan.", len(known_labels),
+            )
+            return None
+        return f"SEEN {not_chain}"
+
+    def fetch_read_unprocessed_emails(
+        self,
+        known_labels: List[str],
+        limit: Optional[int] = None,
+        skip_ids: Optional[set] = None,
+    ) -> List[Tuple[str, Message]]:
+        """
+        Fetch READ (\\Seen) emails that do not carry any of the known_labels
+        and are not in skip_ids. Returns [(gmail_id, msg)], newest first.
+
+        This is the read-mail backfill sweep's (WI-103) candidate source. It
+        contains NO ordering/interleaving logic of its own: the caller MUST
+        sequence it after the UNSEEN phase and only once
+        has_unprocessed_unseen_emails() is False (the hard gate).
+
+        Candidate reduction: a server-side `SEEN NOT X-GM-LABELS ...` search
+        is attempted first (cheap in steady state — an empty result means no
+        scan at all). A rejected, oversized, or failing criteria falls back
+        to a plain SEEN search whose results are filtered client-side in
+        _scan_qualifying_metadata — correct in every case, merely costlier.
+
+        skip_ids = processed-marker (e.g. gmail ids with a DB log row):
+        zero-label read mail the system already processed once is excluded
+        before any body download, so it is never endlessly re-fetched or
+        re-classified cycle after cycle.
+        """
+        def _do():
+            self.connect()
+
+            fallback = True   # plain-SEEN scan unless the negated search succeeded
+            email_ids: List[bytes] = []
+
+            criteria = self._negated_seen_criteria(known_labels)
+            if criteria is not None:
+                try:
+                    typ, data = self.connection.search(None, criteria)
+                    if typ == 'OK':
+                        fallback = False
+                        email_ids = (data[0].split()[::-1] if data[0] else [])
+                        logger.info(
+                            f"Read sweep: negated label search matched {len(email_ids)} candidates"
+                        )
+                    else:
+                        logger.warning(
+                            "Read sweep: negated label search returned %s; "
+                            "falling back to plain SEEN scan.", typ,
+                        )
+                except _IMAP_ERRORS as e:
+                    logger.warning(
+                        f"Read sweep: negated label search rejected by server ({e}); "
+                        "falling back to plain SEEN scan."
+                    )
+
+            if fallback:
+                typ, data = self.connection.search(None, 'SEEN')
+                if typ != 'OK' or not data[0]:
+                    return []
+                email_ids = data[0].split()[::-1]
+
+            qualifying = self._scan_qualifying_metadata(
+                email_ids, set(known_labels), limit=limit, skip_ids=skip_ids,
+            )
+            if not qualifying:
+                return []
+            return self._fetch_bodies(qualifying)
 
         return with_retry(
             _do,

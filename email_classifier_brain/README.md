@@ -101,6 +101,8 @@ cp .env.example .env
 | `RECHECK_INTERVAL_HOURS`     | Frequency of re-check job (default: 12).              |
 | `ENABLE_RECLASSIFY_JOB`      | Set to `false` to disable periodic re-classification. |
 | `RECLASSIFY_INTERVAL_HOURS`  | Frequency of re-classification (default: re-check).   |
+| `ENABLE_READ_SWEEP`          | The read-mail backfill sweep — **enabled by default**; set to `false` to disable it. |
+| `READ_SWEEP_BATCH_SIZE`      | Max read emails labelled per classification cycle when the sweep is enabled (default: `5`). |
 | `VERIFICATION_LABEL`         | Gmail label used for explicit verification.           |
 | `UNSURE_LABEL`               | Gmail label applied when confidence is low (default: `UNSURE_CLASSIFICATION`). |
 | `UNSURE_CONFIDENCE_THRESHOLD`| Top-class probability below which the unsure label is applied (default: `0.65`). |
@@ -440,6 +442,42 @@ The service uses `APScheduler` to handle recurring tasks:
 | **Re-check**       | 12 hrs           | `RECHECK_INTERVAL_HOURS`, `ENABLE_RECHECK_JOB`       | Discovers label changes made manually on the server.        |
 | **Re-classify**    | 12 hrs           | `RECLASSIFY_INTERVAL_HOURS`, `ENABLE_RECLASSIFY_JOB` | Updates local history labels if the model has improved.     |
 | **Auto-Update**    | 1 day            | `ZERO_CORRECTION_WARN_DAYS` (warn threshold)         | Pushes training data to Git, emits loop-health signals, and triggers a service refresh. |
+
+### Read-mail backfill sweep (WI-103)
+
+**Enabled by default** (`ENABLE_READ_SWEEP`; set it to `false` to disable).
+The classification job has two strictly ordered phases. The UNSEEN phase (new
+mail) always runs first; the read sweep runs only afterwards and only when it
+is allowed to. Enabling the sweep changes no safety rail — the hard unread-first
+gate, the trained-label filter, and the processed-marker skip_ids below all
+apply unchanged, and the pace stays gradual.
+
+**Hard gate:** the sweep runs only when the unread queue is *fully drained* —
+the service probes the live mailbox after the unread phase and requires that
+**no UNSEEN email in the INBOX lacks all trained-category labels**. Any new
+unread mail arriving mid-cycle re-blocks the sweep; a probe failure fails
+closed (sweep skipped). Unread always wins; the phases never interleave.
+
+**Pacing:** when enabled, at most `READ_SWEEP_BATCH_SIZE` (default 5) read
+emails are labelled per classification cycle — roughly 1440/day on the default
+5-minute cadence, so multi-thousand-email history sweeps over days instead of
+blasting the mailbox. Sweep activity is observable via `GET /stats`
+(`read_sweep_attempts_total`, `read_sweep_gated_total`,
+`read_sweep_candidates_total`, `read_sweep_labeled_total`).
+
+**Safety rules:**
+
+- Emails already carrying a trained-category label are never candidates — the
+  sweep never re-labels or overwrites anything (corrections MOVE via the
+  re-check job, they are never appended).
+- Zero-label read emails that already have a database log row count as
+  processed and are skipped (`database.get_all_log_ids()` passed as
+  `skip_ids`) — so a read email whose labels were stripped is not endlessly
+  re-fetched.
+- The DB log row is written only after Gmail accepted the label; an email
+  whose label application failed stays eligible for the next cycle.
+- The sweep has no cursor of its own: after a restart it re-derives the
+  remaining history from Gmail labels + DB rows.
 
 The re-check job uses a "gliding scale" based on email age — checking newer
 emails more frequently than older ones to optimize performance. Among the

@@ -235,6 +235,26 @@ def get_log_by_id(log_id: str) -> Optional[Dict[str, Any]]:
     conn.close()
     return dict(row) if row else None
 
+def get_all_log_ids() -> set:
+    """All processed-marker ids: every logs-table primary key.
+
+    The logs table is the system's processed-state record — an email with a
+    row here has already been classified (and possibly later corrected) by
+    this system, even if its Gmail labels were subsequently stripped. The
+    read-mail sweep (WI-103) uses this set to skip such zero-label read
+    emails instead of re-fetching and re-labelling them every cycle.
+
+    NOTE: this is intentionally NOT the ``is_read`` column — that is the
+    NOTIFICATION read flag for the dashboard, unrelated to email read-state.
+    """
+    conn = get_db_connection()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT id FROM logs")
+        return {row['id'] for row in c.fetchall()}
+    finally:
+        conn.close()
+
 def update_log_correction(log_id: str, corrected_category: str) -> None:
     """Update a log entry with the corrected category.
 

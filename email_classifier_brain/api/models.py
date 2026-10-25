@@ -23,6 +23,12 @@ class StatsResponse(BaseModel):
     stats: dict
     model_inputs_total: int = 0
     model_inputs_truncated: int = 0
+    # Read-mail sweep prevalence (WI-103): attempts / gate-blocks / fetched
+    # candidates / labelled emails, per process lifetime (W-022 observability).
+    read_sweep_attempts_total: int = 0
+    read_sweep_gated_total: int = 0
+    read_sweep_candidates_total: int = 0
+    read_sweep_labeled_total: int = 0
 
 
 class Notification(BaseModel):
