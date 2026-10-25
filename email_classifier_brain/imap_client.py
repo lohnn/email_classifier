@@ -34,6 +34,17 @@ _IMAP_ERRORS = (imaplib.IMAP4.error, OSError)
 # giant command the server may reject anyway.
 MAX_NEGATED_SEARCH_CHARS = 4000
 
+# Conventional Gmail All Mail name — the read sweep's fallback when LIST
+# cannot discover an RFC 6154 \All special-use mailbox. Only trusted after a
+# successful SELECT; a non-Gmail server with neither means the sweep warns
+# and runs INBOX-scoped for that cycle.
+ALL_MAIL_FALLBACK_NAME = "[Gmail]/All Mail"
+
+# A LIST untagged line's mailbox name: the final quoted token
+# ("(\flags) "delimiter" "name"). Selectively matched by the read sweep's
+# All Mail discovery (_select_all_mail).
+_LIST_QUOTED_NAME_PATTERN = re.compile(r'"([^"]*)"\s*$')
+
 
 def _imap_quote_label(label: str) -> str:
     """Return label properly quoted and escaped for use in IMAP commands.
@@ -51,6 +62,9 @@ class GmailClient:
         self.user = os.getenv("IMAP_USER") or (os.getenv("MY_EMAIL") or "").split(",")[0].strip()
         self.password = os.getenv("IMAP_PASSWORD")
         self.connection = None
+        # Resolved All Mail mailbox name for the read sweep (WI-103); None
+        # until a LIST-\All or a verified conventional-name SELECT resolves it.
+        self._all_mail_name: Optional[str] = None
 
         if not self.user or not self.password:
             # We don't raise error immediately to allow importing the module,
@@ -326,6 +340,76 @@ class GmailClient:
             return None
         return f"SEEN {not_chain}"
 
+    def _select_all_mail(self) -> bool:
+        """
+        Select the account's All Mail mailbox for the read sweep (WI-103:
+        the backlog is archived history, which is invisible from INBOX).
+
+        Resolution order (resolved name is cached on the client instance):
+          1. the name resolved by a previous call;
+          2. LIST + the RFC 6154 \\All special-use attribute (mirrors
+             _supplement_mailbox_names, so localized Gmail UIs resolve);
+          3. the conventional Gmail name "[Gmail]/All Mail", verified by
+             actually selecting it before it may be cached;
+          4. give up: warn and return False — the caller stays on the
+             already-selected INBOX, so a non-Gmail server without an All
+             Mail mailbox degrades explicitly (warned, INBOX-scoped cycle),
+             never silently.
+
+        Only the Session's SELECTION changes here; every other IMAP helper
+        in this file expects INBOX, so the sweep's caller must restore INBOX
+        afterwards (it does, mirroring _labels_search_in_mailboxes).
+        """
+        def _try_select(name: str) -> bool:
+            try:
+                typ, _data = self.connection.select(name)
+                if typ == 'OK':
+                    return True
+            except _IMAP_ERRORS:
+                pass
+            return False
+
+        if self._all_mail_name:
+            if _try_select(self._all_mail_name):
+                return True
+            # Cached name stopped resolving (renamed/deleted mailbox):
+            # forget it and re-resolve below.
+            self._all_mail_name = None
+
+        try:
+            typ, data = self.connection.list('""', '*')
+            if typ == 'OK' and data:
+                for entry in data:
+                    text = (entry.decode('utf-8', errors='ignore')
+                            if isinstance(entry, bytes) else str(entry))
+                    flags = text.split(')', 1)[0].lower()
+                    # Name = the LAST quoted token of the LIST line ("(\flags)
+                    # "delimiter" "name"). Don't split on whitespace — mailbox
+                    # names contain spaces ("All Mail") — and don't reuse the
+                    # split-on-'/' parsing from _supplement_mailbox_names,
+                    # which leaves the delimiter's closing quote+space glued
+                    # to the name (' "Gmail/…') on quoted-"/" servers.
+                    name_match = _LIST_QUOTED_NAME_PATTERN.search(text)
+                    name = name_match.group(1) if name_match else ""
+                    if '\\all' in flags and name:
+                        if _try_select(name):
+                            self._all_mail_name = name
+                            return True
+        except _IMAP_ERRORS as e:
+            logger.info(f"Read sweep: IMAP LIST for All Mail discovery failed ({e}).")
+
+        # Conventional Gmail name, but only trusted once a select succeeds —
+        # a non-Gmail server may have neither directory nor mailbox.
+        if _try_select(ALL_MAIL_FALLBACK_NAME):
+            self._all_mail_name = ALL_MAIL_FALLBACK_NAME
+            return True
+
+        logger.warning(
+            "Read sweep: no All Mail mailbox could be selected (LIST found no "
+            f"\\All mailbox and {ALL_MAIL_FALLBACK_NAME!r} unavailable); staying on INBOX."
+        )
+        return False
+
     def fetch_read_unprocessed_emails(
         self,
         known_labels: List[str],
@@ -336,9 +420,17 @@ class GmailClient:
         Fetch READ (\\Seen) emails that do not carry any of the known_labels
         and are not in skip_ids. Returns [(gmail_id, msg)], newest first.
 
-        This is the read-mail backfill sweep's (WI-103) candidate source. It
-        contains NO ordering/interleaving logic of its own: the caller MUST
-        sequence it after the UNSEEN phase and only once
+        SCOPE (WI-103 follow-up): the sweep runs in the account's All Mail
+        mailbox — archived read history is the actual backlog and is
+        invisible from INBOX. The UNSEEN phase and the
+        has_unprocessed_unseen_emails() hard gate remain INBOX-scoped:
+        unread mail in the INBOX governs priority exactly as the user's
+        rule states. Every successful sweep restores the INBOX selection
+        before returning (all other helpers expect INBOX); a connection
+        whose restore fails is dropped so the next call reconnects fresh.
+
+        This method contains NO ordering/interleaving logic of its own: the
+        caller MUST sequence it after the UNSEEN phase and only once
         has_unprocessed_unseen_emails() is False (the hard gate).
 
         Candidate reduction: a server-side `SEEN NOT X-GM-LABELS ...` search
@@ -354,43 +446,64 @@ class GmailClient:
         """
         def _do():
             self.connect()
-
-            fallback = True   # plain-SEEN scan unless the negated search succeeded
-            email_ids: List[bytes] = []
-
-            criteria = self._negated_seen_criteria(known_labels)
-            if criteria is not None:
-                try:
-                    typ, data = self.connection.search(None, criteria)
-                    if typ == 'OK':
-                        fallback = False
-                        email_ids = (data[0].split()[::-1] if data[0] else [])
-                        logger.info(
-                            f"Read sweep: negated label search matched {len(email_ids)} candidates"
-                        )
-                    else:
-                        logger.warning(
-                            "Read sweep: negated label search returned %s; "
-                            "falling back to plain SEEN scan.", typ,
-                        )
-                except _IMAP_ERRORS as e:
+            try:
+                # Scope: read history lives in All Mail (archived mail is
+                # invisible from INBOX). On a server without All Mail this
+                # warns and the cycle runs in the already-selected INBOX.
+                if not self._select_all_mail():
                     logger.warning(
-                        f"Read sweep: negated label search rejected by server ({e}); "
-                        "falling back to plain SEEN scan."
+                        "Read sweep: All Mail unavailable — sweeping the "
+                        "selected INBOX this cycle."
                     )
+                mailbox = self._all_mail_name or "INBOX"
 
-            if fallback:
-                typ, data = self.connection.search(None, 'SEEN')
-                if typ != 'OK' or not data[0]:
+                fallback = True   # plain-SEEN scan unless the negated search succeeded
+                email_ids: List[bytes] = []
+
+                criteria = self._negated_seen_criteria(known_labels)
+                if criteria is not None:
+                    try:
+                        typ, data = self.connection.search(None, criteria)
+                        if typ == 'OK':
+                            fallback = False
+                            email_ids = (data[0].split()[::-1] if data[0] else [])
+                            logger.info(
+                                f"Read sweep: negated label search matched "
+                                f"{len(email_ids)} candidates in {mailbox}"
+                            )
+                        else:
+                            logger.warning(
+                                "Read sweep: negated label search returned %s; "
+                                "falling back to plain SEEN scan.", typ,
+                            )
+                    except _IMAP_ERRORS as e:
+                        logger.warning(
+                            f"Read sweep: negated label search rejected by server ({e}); "
+                            "falling back to plain SEEN scan."
+                        )
+
+                if fallback:
+                    typ, data = self.connection.search(None, 'SEEN')
+                    if typ != 'OK' or not data[0]:
+                        return []
+                    email_ids = data[0].split()[::-1]
+
+                qualifying = self._scan_qualifying_metadata(
+                    email_ids, set(known_labels), limit=limit, skip_ids=skip_ids,
+                )
+                if not qualifying:
                     return []
-                email_ids = data[0].split()[::-1]
-
-            qualifying = self._scan_qualifying_metadata(
-                email_ids, set(known_labels), limit=limit, skip_ids=skip_ids,
-            )
-            if not qualifying:
-                return []
-            return self._fetch_bodies(qualifying)
+                return self._fetch_bodies(qualifying)
+            finally:
+                # Every other IMAP helper in this file expects INBOX, and a
+                # cached connection keeps its selection across calls
+                # (connect() merely NOOPs). Restore exactly like
+                # _labels_search_in_mailboxes: on failure drop the cached
+                # connection so the next call reconnects into INBOX.
+                try:
+                    self.connection.select("INBOX")
+                except Exception:
+                    self.connection = None
 
         return with_retry(
             _do,
