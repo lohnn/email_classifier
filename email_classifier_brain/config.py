@@ -50,6 +50,30 @@ try:
 except ValueError:
     RECLASSIFY_INTERVAL_HOURS = RECHECK_INTERVAL_HOURS
 
+# ---------------------------------------------------------------------------
+# Read-mail backfill sweep (WI-103)
+# ---------------------------------------------------------------------------
+# Once the unread (UNSEEN) queue is fully drained, the classifier may label
+# older already-read (\Seen) mail that was never classified — gradually, a
+# bounded batch per classification cycle, until mailbox history is done.
+#
+# Hard gate (enforced in jobs/classification.py, not by convention): read-mail
+# work only runs when has_unprocessed_unseen_emails() is False — no UNSEEN
+# email in the INBOX selection lacks all trained-category labels. Unread
+# always wins; the two phases never interleave.
+#
+# Conservative defaults: the sweep is OFF (a deploy must not change behaviour
+# until opted in via .env) and the batch is small because every labelled
+# historical email is a Gmail write (IMAP rate limits, Pi-class resources).
+ENABLE_READ_SWEEP = (os.getenv("ENABLE_READ_SWEEP") or "false").lower() == "true"
+
+# Maximum read emails labelled per classification cycle once the sweep is
+# enabled and the hard gate passes. 5 per 5-minute cycle ≈ 1440/day, so a
+# multi-thousand-email backlog sweeps in days, not in one blast.
+READ_SWEEP_BATCH_SIZE = int(os.getenv("READ_SWEEP_BATCH_SIZE") or "5")
+if READ_SWEEP_BATCH_SIZE < 1:
+    READ_SWEEP_BATCH_SIZE = 1
+
 # Label used to explicitly verify a classification
 VERIFICATION_LABEL = os.getenv("VERIFICATION_LABEL") or "VERIFIED"
 
@@ -204,6 +228,55 @@ class _TruncationStats:
 
 
 truncation_stats = _TruncationStats()
+
+
+class _SweepStats:
+    """Process-global counters for the read-mail backfill sweep (WI-103).
+
+    Observable signal, per the W-022 rule that a prevalence count that only
+    lands in a log file is invisible: gated/candidate/labelled counts surface
+    via GET /stats. Thread-safe for the same reason as _TruncationStats (the
+    classification job runs on the JobQueue worker thread while /stats is
+    served from the main thread).
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._attempts = 0
+        self._gated = 0
+        self._candidates = 0
+        self._labeled = 0
+
+    def record(self, attempt: bool = False, gated: bool = False,
+               candidates: int = 0, labeled: int = 0) -> None:
+        """Record sweep events. `attempt=True` marks one sweep-phase execution;
+        gated/candidates/labeled are the outcome deltas of that execution."""
+        with self._lock:
+            if attempt:
+                self._attempts += 1
+            if gated:
+                self._gated += 1
+            self._candidates += candidates
+            self._labeled += labeled
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "read_sweep_attempts_total": self._attempts,
+                "read_sweep_gated_total": self._gated,
+                "read_sweep_candidates_total": self._candidates,
+                "read_sweep_labeled_total": self._labeled,
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._attempts = 0
+            self._gated = 0
+            self._candidates = 0
+            self._labeled = 0
+
+
+sweep_stats = _SweepStats()
 
 
 def _truncate_body(body: str, max_chars: int = MAX_BODY_CHARS) -> tuple[str, bool]:

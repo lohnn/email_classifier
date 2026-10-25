@@ -114,10 +114,12 @@ def get_stats(
     Get classification statistics (counts per category).
     Optionally filter by start_time and end_time (ISO format).
 
-    Also returns body-truncation prevalence: how many model inputs built in
-    this process had their body capped to fit the E5 context window
-    (config.MAX_BODY_CHARS). This is the observable signal for the silent
-    accuracy leak that over-long inputs used to cause.
+    Also returns body-truncation prevalence (how many model inputs built in
+    this process had their body capped to fit the E5 context window,
+    config.MAX_BODY_CHARS) and the read-mail sweep counters (WI-103:
+    attempts, gate-blocks, fetched candidates, labelled emails). These are
+    the observable signals for the silent accuracy leak and the sweep's
+    gating behaviour, respectively (W-022).
     """
     stats = database.get_stats(start_time, end_time)
     truncation = config.truncation_stats.snapshot()
@@ -125,4 +127,5 @@ def get_stats(
         "stats": stats,
         "model_inputs_total": truncation["model_inputs_total"],
         "model_inputs_truncated": truncation["model_inputs_truncated"],
+        **config.sweep_stats.snapshot(),
     }
