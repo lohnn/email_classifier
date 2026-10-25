@@ -9,8 +9,8 @@ Two strictly ordered phases (WI-103):
   1. UNSEEN phase — classify new mail (as always).
   2. Read sweep — label older already-read mail that was never
      classified, HARD-GATED behind a fully drained unread queue, at a
-     bounded per-cycle pace (config.ENABLE_READ_SWEEP /
-     config.READ_SWEEP_BATCH_SIZE, conservatively OFF / 5 by default).
+     bounded per-cycle pace (config.ENABLE_READ_SWEEP, enabled by default;
+     config.READ_SWEEP_BATCH_SIZE default 5).
      Unread always wins; the phases never interleave.
 """
 

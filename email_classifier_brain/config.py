@@ -62,10 +62,11 @@ except ValueError:
 # email in the INBOX selection lacks all trained-category labels. Unread
 # always wins; the two phases never interleave.
 #
-# Conservative defaults: the sweep is OFF (a deploy must not change behaviour
-# until opted in via .env) and the batch is small because every labelled
-# historical email is a Gmail write (IMAP rate limits, Pi-class resources).
-ENABLE_READ_SWEEP = (os.getenv("ENABLE_READ_SWEEP") or "false").lower() == "true"
+# Default: ENABLED. Turning it on flips no safety rail — the hard unread-first
+# gate above, the trained-label filter, and the processed-marker skip_ids all
+# apply unchanged — and the batch default (5) keeps the gradual per-cycle pace.
+# Set ENABLE_READ_SWEEP=false to opt out entirely.
+ENABLE_READ_SWEEP = (os.getenv("ENABLE_READ_SWEEP") or "true").lower() == "true"
 
 # Maximum read emails labelled per classification cycle once the sweep is
 # enabled and the hard gate passes. 5 per 5-minute cycle ≈ 1440/day, so a

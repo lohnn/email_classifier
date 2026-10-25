@@ -101,7 +101,7 @@ cp .env.example .env
 | `RECHECK_INTERVAL_HOURS`     | Frequency of re-check job (default: 12).              |
 | `ENABLE_RECLASSIFY_JOB`      | Set to `false` to disable periodic re-classification. |
 | `RECLASSIFY_INTERVAL_HOURS`  | Frequency of re-classification (default: re-check).   |
-| `ENABLE_READ_SWEEP`          | Set to `true` to enable the read-mail backfill sweep (default: `false`). |
+| `ENABLE_READ_SWEEP`          | The read-mail backfill sweep — **enabled by default**; set to `false` to disable it. |
 | `READ_SWEEP_BATCH_SIZE`      | Max read emails labelled per classification cycle when the sweep is enabled (default: `5`). |
 | `VERIFICATION_LABEL`         | Gmail label used for explicit verification.           |
 | `UNSURE_LABEL`               | Gmail label applied when confidence is low (default: `UNSURE_CLASSIFICATION`). |
@@ -445,9 +445,12 @@ The service uses `APScheduler` to handle recurring tasks:
 
 ### Read-mail backfill sweep (WI-103)
 
+**Enabled by default** (`ENABLE_READ_SWEEP`; set it to `false` to disable).
 The classification job has two strictly ordered phases. The UNSEEN phase (new
 mail) always runs first; the read sweep runs only afterwards and only when it
-is allowed to.
+is allowed to. Enabling the sweep changes no safety rail — the hard unread-first
+gate, the trained-label filter, and the processed-marker skip_ids below all
+apply unchanged, and the pace stays gradual.
 
 **Hard gate:** the sweep runs only when the unread queue is *fully drained* —
 the service probes the live mailbox after the unread phase and requires that

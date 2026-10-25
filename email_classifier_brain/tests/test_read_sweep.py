@@ -10,7 +10,7 @@ fully drained. Coverage here:
     label application leaves the email unmarked/retryable), label respect
     (never removes or overwrites known labels; known-labeled email never
     becomes a sweep candidate)
-  - config: conservative defaults; /stats observability counters
+  - config: default-enabled knob (opt-out); /stats observability counters
 """
 
 import imaplib
@@ -373,7 +373,8 @@ def test_sweep_runs_when_unread_fully_drained(db, sweep_config):
 
 
 def test_sweep_disabled_by_config_does_nothing(db):
-    """Default (conservative) config: sweep off → no read-mail work at all."""
+    """The opt-out knob: ENABLE_READ_SWEEP=false → no read-mail work at all,
+    even with the unread queue fully drained."""
     client = MagicMock()
     client.fetch_unprocessed_emails.return_value = []
     client.has_unprocessed_unseen_emails.return_value = False
@@ -480,8 +481,10 @@ def test_sweep_respects_job_cancellation(db, sweep_config):
 # config defaults + /stats observability
 # ---------------------------------------------------------------------------
 
-def test_sweep_config_conservative_defaults():
-    assert config.ENABLE_READ_SWEEP is False
+def test_sweep_config_default_enabled():
+    """WI-103 follow-up: the sweep ships ENABLED by default (gradual pacing
+    unchanged); disabling is the explicit opt-out."""
+    assert config.ENABLE_READ_SWEEP is True
     assert config.READ_SWEEP_BATCH_SIZE == 5
 
 
