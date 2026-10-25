@@ -452,6 +452,16 @@ is allowed to. Enabling the sweep changes no safety rail — the hard unread-fir
 gate, the trained-label filter, and the processed-marker skip_ids below all
 apply unchanged, and the pace stays gradual.
 
+**Scope:** all read mail in the account (Gmail's All Mail — discovered via the
+RFC 6154 `\All` special-use attribute, with the conventional `[Gmail]/All Mail`
+name as a verified fallback) — not just INBOX, since the backlog is archived
+history that INBOX cannot see. A server where no All Mail mailbox can be
+selected degrades explicitly (warning + INBOX-scoped cycle), never silently;
+the INBOX selection is restored after every sweep. Cost note: until the
+backlog drains, the All Mail candidate search returns id lists only, but those
+can be large each cycle — body downloads stay capped by `READ_SWEEP_BATCH_SIZE`
+and the early-stopping metadata scan.
+
 **Hard gate:** the sweep runs only when the unread queue is *fully drained* —
 the service probes the live mailbox after the unread phase and requires that
 **no UNSEEN email in the INBOX lacks all trained-category labels**. Any new

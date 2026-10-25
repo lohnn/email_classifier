@@ -38,27 +38,72 @@ from jobs.classification import classification_job
 
 
 # ---------------------------------------------------------------------------
-# Fake INBOX connection (search + batched fetch surface used by the sweep)
+# Fake mailbox connection (search + batched fetch surface used by the sweep)
 # ---------------------------------------------------------------------------
 
 class FakeMailboxConn:
     """
-    Scripted INBOX for fetch paths. Messages are ordered by sequence number
+    Scripted two-mailbox IMAP account (INBOX + All Mail), the surface the
+    sweep and gate touch. Message lists are ordered by sequence number
     (list order = ascending seq = oldest..newest), like real IMAP SEARCH
     output. Supports UNSEEN/SEEN searches, honors NOT X-GM-LABELS clauses,
     and can be told to reject (tagged BAD) or ignore (server quirk →
     superset result) those clauses to exercise the client-side fallbacks.
+
+    select()/search() calls are recorded together in `timeline` (in order)
+    so tests can assert that All Mail is selected BEFORE the sweep searches
+    and INBOX is restored afterwards.
     """
 
-    def __init__(self, messages=None, reject_negation=False, ignore_negation=False):
-        self.messages = messages or []
+    ALL_NAME = "[Gmail]/All Mail"
+
+    def __init__(self, messages=None, reject_negation=False, ignore_negation=False,
+                 all_mail=None, no_all_mail=False, all_select_fails=False,
+                 list_raises=False):
+        # `messages` = INBOX view; `all_mail` = account-wide archive view.
+        self.stores = {
+            "INBOX": list(messages or []),
+            "ALL": list(all_mail if all_mail is not None else []),
+        }
         self.reject_negation = reject_negation
         self.ignore_negation = ignore_negation
+        self.no_all_mail = no_all_mail
+        self.all_select_fails = all_select_fails
+        self.list_raises = list_raises
+        self.mailbox = "INBOX"
         self.search_calls = []
+        self.select_calls = []
+        self.timeline = []
+        self.list_calls = 0
         self.fetch_calls = []
 
     def noop(self):
         return ("OK", [b""])
+
+    def list(self, *args, **kwargs):
+        self.list_calls += 1
+        if self.list_raises:
+            raise imaplib.IMAP4.error("LIST exploded")
+        if self.no_all_mail:
+            return ("OK", [b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"'])
+        return (
+            "OK",
+            [
+                b'(\\HasNoChildren \\All) "/" "[Gmail]/All Mail"',
+                b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"',
+            ],
+        )
+
+    def select(self, name, *args, **kwargs):
+        self.select_calls.append(name)
+        self.timeline.append(("select", name))
+        if self.all_select_fails and self.ALL_NAME in str(name):
+            return ("NO", [b"No such mailbox"])
+        self.mailbox = "ALL" if self.ALL_NAME in str(name) else "INBOX"
+        return ("OK", [b"42"])
+
+    def _store(self):
+        return self.stores["ALL"] if self.mailbox == "ALL" else self.stores["INBOX"]
 
     @staticmethod
     def _negated_labels(criteria):
@@ -67,11 +112,12 @@ class FakeMailboxConn:
 
     def search(self, charset, criteria):
         self.search_calls.append(criteria)
+        self.timeline.append(("search", criteria))
         if self.reject_negation and "NOT X-GM-LABELS" in criteria:
             raise imaplib.IMAP4.error("BAD Could not parse command")
         neg = set() if self.ignore_negation else self._negated_labels(criteria)
         ids = []
-        for seq, msg in enumerate(self.messages, start=1):
+        for seq, msg in enumerate(self._store(), start=1):
             if "UNSEEN" in criteria.split() and msg["seen"]:
                 continue
             if "SEEN" in criteria.split() and not msg["seen"]:
@@ -83,12 +129,13 @@ class FakeMailboxConn:
 
     def fetch(self, ids_bytes, query):
         self.fetch_calls.append((ids_bytes, query))
+        store = self._store()
         out = []
         for raw_id in ids_bytes.split(b","):
             seq = int(raw_id)
-            if seq < 1 or seq > len(self.messages):
+            if seq < 1 or seq > len(store):
                 continue
-            msg = self.messages[seq - 1]
+            msg = store[seq - 1]
             if "BODY.PEEK" in query:
                 raw_email = f'Subject: {msg["subject"]}\r\n\r\nbody-{msg["gid"]}'.encode()
                 header = (
@@ -124,11 +171,11 @@ def _body_fetch_ids(conn):
 
 
 # ---------------------------------------------------------------------------
-# imap layer — fetch_read_unprocessed_emails
+# imap layer — fetch_read_unprocessed_emails (sweep scope: All Mail)
 # ---------------------------------------------------------------------------
 
 def test_read_sweep_fetches_only_unlabeled_read_mail():
-    conn = FakeMailboxConn([
+    conn = FakeMailboxConn(all_mail=[
         _msg("1001", True, [], "Old unprocessed"),          # sweep candidate
         _msg("1002", True, ["URGENT"], "Labeled by user"),  # labeled read — never touched
         _msg("1003", False, [], "Fresh unread"),            # unread — unread path's job
@@ -139,6 +186,12 @@ def test_read_sweep_fetches_only_unlabeled_read_mail():
     assert [gid for gid, _msg_obj in result] == ["1004", "1001"]  # newest first
     # Server-side reduction: SEEN + NOT of the known labels
     assert conn.search_calls[-1] == 'SEEN NOT X-GM-LABELS "URGENT"'
+    # All Mail was selected BEFORE the search, INBOX restored afterwards
+    assert conn.timeline == [
+        ("select", FakeMailboxConn.ALL_NAME),
+        ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
+        ("select", "INBOX"),
+    ]
     # Bodies downloaded only for the two surviving candidates (seqs 1 and 4)
     body_ids = set().union(*_body_fetch_ids(conn)) if _body_fetch_ids(conn) else set()
     assert body_ids == {1, 4}
@@ -146,7 +199,7 @@ def test_read_sweep_fetches_only_unlabeled_read_mail():
 
 def test_read_sweep_negation_rejected_falls_back_to_plain_seen():
     conn = FakeMailboxConn(
-        [
+        all_mail=[
             _msg("2001", True, [], "Unlabeled read"),
             _msg("2002", True, ["URGENT"], "Labeled read"),
             _msg("2003", False, [], "Unread"),
@@ -159,6 +212,13 @@ def test_read_sweep_negation_rejected_falls_back_to_plain_seen():
     # First attempt used the negated criteria, then the fallback used plain SEEN
     assert conn.search_calls[0] == 'SEEN NOT X-GM-LABELS "URGENT"'
     assert conn.search_calls[1] == "SEEN"
+    # All Mail was selected before BOTH searches; INBOX restored at the end
+    assert conn.timeline == [
+        ("select", FakeMailboxConn.ALL_NAME),
+        ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
+        ("search", "SEEN"),
+        ("select", "INBOX"),
+    ]
     # Client-side label filter did the real work on the fallback path
     body_ids = set().union(*_body_fetch_ids(conn)) if _body_fetch_ids(conn) else set()
     assert body_ids == {1}
@@ -168,7 +228,7 @@ def test_read_sweep_negation_superset_still_filtered_client_side():
     # Server "honors" the command but returns ALL read mail (quirk / missing
     # NOT support): the client-side label filter must still protect labels.
     conn = FakeMailboxConn(
-        [
+        all_mail=[
             _msg("3001", True, [], "Unlabeled read"),
             _msg("3002", True, ["URGENT"], "Labeled read"),
         ],
@@ -179,7 +239,7 @@ def test_read_sweep_negation_superset_still_filtered_client_side():
 
 
 def test_read_sweep_skip_ids_exclude_processed_without_body_fetch():
-    conn = FakeMailboxConn([
+    conn = FakeMailboxConn(all_mail=[
         _msg("4001", True, [], "Processed but label-stripped"),  # in DB → skip
         _msg("4002", True, [], "Unprocessed"),
         _msg("4003", True, [], "Also processed"),                # in DB → skip
@@ -199,7 +259,7 @@ def test_read_sweep_skip_ids_exclude_processed_without_body_fetch():
 
 def test_read_sweep_limit_paces_batch():
     conn = FakeMailboxConn(
-        [_msg(str(5000 + i), True, [], f"Old {i}") for i in range(10)]
+        all_mail=[_msg(str(5000 + i), True, [], f"Old {i}") for i in range(10)]
     )
     result = _client(conn).fetch_read_unprocessed_emails(known_labels=[], limit=3)
 
@@ -211,7 +271,7 @@ def test_read_sweep_limit_paces_batch():
 def test_read_sweep_huge_criteria_falls_back_to_plain_seen():
     # Absurd category counts must not ship a multi-kilobyte SEARCH line.
     with patch.object(imap_client, "MAX_NEGATED_SEARCH_CHARS", 10):
-        conn = FakeMailboxConn([_msg("6001", True, [], "R")])
+        conn = FakeMailboxConn(all_mail=[_msg("6001", True, [], "R")])
         result = _client(conn).fetch_read_unprocessed_emails(known_labels=["LONG/LABEL"])
     assert conn.search_calls == ["SEEN"]
     assert [gid for gid, _m in result] == ["6001"]
@@ -219,12 +279,13 @@ def test_read_sweep_huge_criteria_falls_back_to_plain_seen():
 
 def test_read_sweep_no_dangerous_server_response_is_tolerated():
     # typ != 'OK' (instead of raising) must also trigger the plain-SEEN fallback.
-    conn = FakeMailboxConn([_msg("7001", True, [], "R")])
+    conn = FakeMailboxConn(all_mail=[_msg("7001", True, [], "R")])
     original_search = conn.search
 
     def flaky_search(charset, criteria):
         if "NOT X-GM-LABELS" in criteria:
             conn.search_calls.append(criteria)
+            conn.timeline.append(("search", criteria))
             return ("NO", [b"mailbox unavailable"])
         return original_search(charset, criteria)  # standalone server appends internally
 
@@ -232,6 +293,128 @@ def test_read_sweep_no_dangerous_server_response_is_tolerated():
     result = _client(conn).fetch_read_unprocessed_emails(known_labels=["URGENT"])
     assert conn.search_calls == ['SEEN NOT X-GM-LABELS "URGENT"', "SEEN"]
     assert [gid for gid, _m in result] == ["7001"]
+    # Selection still bracketed the whole cycle, including the fallback path
+    assert conn.timeline[0] == ("select", FakeMailboxConn.ALL_NAME)
+    assert conn.timeline[-1] == ("select", "INBOX")
+
+
+def test_read_sweep_all_mail_discovered_via_list_special_use():
+    """Localized Gmail: the \\All special-use attribute resolves the mailbox
+    name (not the literal); the sweep searches that selection."""
+    localized_all = "[Gmail]/Todos"
+    conn = FakeMailboxConn(all_mail=[_msg("801", True, [], "R")])
+
+    def localized_list(*args, **kwargs):
+        conn.list_calls += 1
+        return ("OK", [
+            f'(\\HasNoChildren \\All) "/" "{localized_all}"'.encode(),
+            b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"',
+        ])
+
+    conn.list = localized_list
+    # The stock select() only maps names containing "All Mail" to the ALL
+    # store; make the localized name resolve too.
+    original_select = conn.select
+
+    def select_any(name, *args, **kwargs):
+        if name == localized_all:
+            conn.select_calls.append(name)
+            conn.timeline.append(("select", name))
+            conn.mailbox = "ALL"
+            return ("OK", [b"42"])
+        return original_select(name, *args, **kwargs)
+
+    conn.select = select_any
+
+    client = _client(conn)
+    result = client.fetch_read_unprocessed_emails(known_labels=["URGENT"])
+    assert [gid for gid, _m in result] == ["801"]
+    assert client._all_mail_name == localized_all
+
+
+def test_read_sweep_all_mail_name_cached_across_cycles():
+    """The resolved name is cached per client: the second sweep must not
+    re-run mailbox discovery (LIST)."""
+    conn = FakeMailboxConn(all_mail=[
+        _msg("9001", True, [], "First batch"),
+        _msg("9002", True, [], "Second batch"),
+    ])
+    client = _client(conn)
+    first = client.fetch_read_unprocessed_emails(known_labels=["U"], limit=1)
+    list_calls_after_first = conn.list_calls
+    second = client.fetch_read_unprocessed_emails(known_labels=["U"], limit=1)
+
+    # Same visible candidates (the sweep consumes no mailbox state); the
+    # point is that the second cycle re-uses the cached resolution.
+    assert [gid for gid, _m in first] == ["9002"]
+    assert [gid for gid, _m in second] == ["9002"]
+    assert conn.list_calls == list_calls_after_first == 1
+    # Both cycles still selected All Mail and restored INBOX
+    assert conn.select_calls == [
+        FakeMailboxConn.ALL_NAME, "INBOX",
+        FakeMailboxConn.ALL_NAME, "INBOX",
+    ]
+
+
+def test_read_sweep_falls_back_to_literal_all_mail_when_list_fails():
+    """No LIST discovery (server quirk / transient failure): the conventional
+    Gmail name is tried, trusted only once its SELECT succeeds, then cached."""
+    conn = FakeMailboxConn(all_mail=[_msg("9101", True, [], "R")], list_raises=True)
+    client = _client(conn)
+
+    result = client.fetch_read_unprocessed_emails(known_labels=["URGENT"])
+
+    assert [gid for gid, _m in result] == ["9101"]
+    assert client._all_mail_name == FakeMailboxConn.ALL_NAME
+    assert conn.timeline == [
+        ("select", FakeMailboxConn.ALL_NAME),
+        ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
+        ("select", "INBOX"),
+    ]
+
+
+def test_read_sweep_no_all_mail_stays_on_inbox():
+    """Final fallback: non-Gmail-style server (no \\All in LIST, literal name
+    unselectable) → warn and sweep the selected INBOX instead of breaking."""
+    conn = FakeMailboxConn(
+        messages=[_msg("9201", True, [], "Inbox read, never labeled")],
+        no_all_mail=True,
+        all_select_fails=True,
+    )
+    client = _client(conn)
+
+    result = client.fetch_read_unprocessed_emails(known_labels=["URGENT"])
+
+    # Sweep ran INBOX-scoped: the INBOX candidate was found and returned
+    assert [gid for gid, _m in result] == ["9201"]
+    assert client._all_mail_name is None
+    # Attempted the literal fallback name, never selected All Mail; restored INBOX
+    assert conn.select_calls == [FakeMailboxConn.ALL_NAME, "INBOX"]
+    assert conn.timeline == [
+        ("select", FakeMailboxConn.ALL_NAME),
+        ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
+        ("select", "INBOX"),
+    ]
+
+
+def test_read_sweep_broken_inbox_restore_drops_connection():
+    """If restoring INBOX fails after the sweep, the cached connection is
+    dropped so the next call reconnects fresh (never sweeps the wrong
+    mailbox with a stale selection)."""
+    conn = FakeMailboxConn(all_mail=[_msg("9301", True, [], "R")])
+    client = _client(conn)
+    original_select = conn.select
+
+    def select_fails_on_inbox(name, *args, **kwargs):
+        if name == "INBOX":
+            conn.select_calls.append(name)
+            conn.timeline.append(("select", name))
+            raise imaplib.IMAP4.error("connection dead")
+        return original_select(name, *args, **kwargs)
+
+    conn.select = select_fails_on_inbox
+    client.fetch_read_unprocessed_emails(known_labels=["URGENT"])
+    assert client.connection is None
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +443,20 @@ def test_gate_probe_false_when_read_or_labeled():
 def test_gate_probe_empty_inbox_is_drained():
     conn = FakeMailboxConn([])
     assert _client(conn).has_unprocessed_unseen_emails(known_labels=["URGENT"]) is False
+
+
+def test_gate_probe_is_inbox_scoped_even_when_archive_has_unread():
+    """Priority rule stays bound to INBOX: archived unseen mail (invisible to
+    the UNSEEN phase) must neither block the gate nor trigger a mailbox
+    switch — only unseen mail in the INBOX selection governs."""
+    conn = FakeMailboxConn(
+        messages=[_msg("8501", False, ["URGENT"], "Labeled unread in INBOX")],
+        all_mail=[_msg("8502", False, [], "Archived UNSEEN — nobody's job yet")],
+    )
+    client = _client(conn)
+    assert client.has_unprocessed_unseen_emails(known_labels=["URGENT"]) is False
+    # The probe never left INBOX: no mailbox switches at all
+    assert conn.select_calls == []
 
 
 def test_gate_probe_error_fails_closed():
