@@ -471,9 +471,27 @@ closed (sweep skipped). Unread always wins; the phases never interleave.
 **Pacing:** when enabled, at most `READ_SWEEP_BATCH_SIZE` (default 5) read
 emails are labelled per classification cycle — roughly 1440/day on the default
 5-minute cadence, so multi-thousand-email history sweeps over days instead of
-blasting the mailbox. Sweep activity is observable via `GET /stats`
-(`read_sweep_attempts_total`, `read_sweep_gated_total`,
-`read_sweep_candidates_total`, `read_sweep_labeled_total`).
+blasting the mailbox.
+
+**Self-diagnosis (WI-103 debug round):** sweep activity is observable via
+`GET /stats` — `read_sweep_attempts_total` (cycles that reached the gate
+probe), `read_sweep_gated_total`, `read_sweep_candidates_total`,
+`read_sweep_labeled_total`, `read_sweep_skipped_no_categories_total`,
+`read_sweep_mailbox_last` (mailbox actually searched by the last sweep
+fetch), `read_sweep_last_skip_reason` (`none|no_trained_categories|
+gated_unread|disabled` — `disabled` is synthesized live from config) and
+`read_sweep_trained_categories_count`. Since the debug round, an
+empty-vocabulary cycle no longer counts as an attempt: it is its own counter,
+because the categories source is re-read live at sweep time (the job-start
+snapshot it used before is what kept the sweep silently skipped on the Pi
+while classification itself worked). `GET /admin/sweep-state` (key-gated,
+like the other admin GETs) renders the full remote-debug surface in one
+payload: resolved All Mail mailbox, last searched mailbox, last search mode
+(`negated` vs `plain_seen`), last cycle timestamp + skip reason, all
+counters, the trained category list, and the category-source diagnostics
+(backend, `CENTROIDS_PATH`, its absolute path, existence, parsed-entry count,
+or a parse error) — no journal greps required. Counters reset on process
+restart (same lifetime as the truncation counters).
 
 **Safety rules:**
 

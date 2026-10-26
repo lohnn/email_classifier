@@ -290,12 +290,23 @@ def test_read_sweep_no_dangerous_server_response_is_tolerated():
         return original_search(charset, criteria)  # standalone server appends internally
 
     conn.search = flaky_search
-    result = _client(conn).fetch_read_unprocessed_emails(known_labels=["URGENT"])
+    sweep_client2 = _client(conn)
+    result = sweep_client2.fetch_read_unprocessed_emails(known_labels=["URGENT"])
     assert conn.search_calls == ['SEEN NOT X-GM-LABELS "URGENT"', "SEEN"]
     assert [gid for gid, _m in result] == ["7001"]
     # Selection still bracketed the whole cycle, including the fallback path
     assert conn.timeline[0] == ("select", FakeMailboxConn.ALL_NAME)
     assert conn.timeline[-1] == ("select", "INBOX")
+    assert sweep_client2.last_sweep_search_mode == "plain_seen"
+
+
+def test_sweep_records_negated_search_mode():
+    conn = FakeMailboxConn(all_mail=[_msg("7101", True, [], "R")])
+    sweep_client = _client(conn)
+    result = sweep_client.fetch_read_unprocessed_emails(known_labels=["URGENT"])
+
+    assert [gid for gid, _m in result] == ["7101"]
+    assert sweep_client.last_sweep_search_mode == "negated"
 
 
 def test_read_sweep_all_mail_discovered_via_list_special_use():
@@ -487,6 +498,17 @@ def db():
         with patch("database.DB_FILE", tmp.name):
             database.init_db()
             yield tmp.name
+
+
+@pytest.fixture
+def client():
+    """TestClient for endpoint-level assertions (key-gated routes)."""
+    from fastapi.testclient import TestClient
+    with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+        with patch("database.DB_FILE", tmp.name):
+            database.init_db()
+            with TestClient(main.app) as c:
+                yield c
 
 
 @pytest.fixture
@@ -691,10 +713,13 @@ def test_stats_surfaces_read_sweep_counters(db, sweep_config):
     client = MagicMock()
     client.fetch_unprocessed_emails.return_value = []
     client.has_unprocessed_unseen_emails.return_value = True  # gated attempt
+    client._all_mail_name = None
 
     read_msg = MagicMock()
     read_msg.get.return_value = None
     client2 = MagicMock()
+    client2._all_mail_name = None
+
     client2.fetch_unprocessed_emails.return_value = []
     client2.has_unprocessed_unseen_emails.return_value = False
     client2.fetch_read_unprocessed_emails.return_value = [("9400", read_msg)]
@@ -710,5 +735,206 @@ def test_stats_surfaces_read_sweep_counters(db, sweep_config):
     assert data["read_sweep_gated_total"] == 1
     assert data["read_sweep_candidates_total"] == 1
     assert data["read_sweep_labeled_total"] == 1
+    # WI-103 debug round: additive self-diagnosis fields. Run 2's sweep
+    # fetch searched INBOX (client mock has no All Mail resolution).
+    assert data["read_sweep_mailbox_last"] == "INBOX"
+    assert data["read_sweep_last_skip_reason"] == "none"
+    assert data["read_sweep_skipped_no_categories_total"] == 0
+    assert data["read_sweep_trained_categories_count"] == 2
     # The response model must accept the additive fields (API stays valid).
     StatsResponse(**data)
+
+
+# ---------------------------------------------------------------------------
+# WI-103 debug round — root cause: category source must be read LIVE
+# ---------------------------------------------------------------------------
+
+def test_sweep_reads_categories_live_at_sweep_time(db, sweep_config):
+    """ROOT CAUSE (Pi 2026-10-26): the job-start categories snapshot was empty
+    while classification itself worked — vocabulary sources populate lazily
+    in-process (SetFit-era mapping) or resolve differently across time, so a
+    frozen snapshot kept the sweep skipped forever ("no trained categories").
+    The sweep must re-read the SAME source the classifier uses, at sweep
+    time, after the unread phase has warmed any lazy state."""
+    read_msg = MagicMock()
+    read_msg.get.return_value = None
+
+    client = MagicMock()
+    client.fetch_unprocessed_emails.return_value = []
+    client.has_unprocessed_unseen_emails.return_value = False
+    client.fetch_read_unprocessed_emails.return_value = [("9500", read_msg)]
+    client.apply_label.return_value = True
+    client._all_mail_name = "[Gmail]/All Mail"
+
+    classify_mock = _make_classify_mock()
+    # 1st read = job start (stale/empty source), 2nd read = sweep phase
+    classify_mock.get_available_categories.side_effect = [[], ["URGENT", "FOCUS"]]
+
+    result = _run_job(client, classify_mock)
+
+    client.fetch_read_unprocessed_emails.assert_called_once()
+    assert {r["id"] for r in result} == {"9500"}
+    assert "9500" in database.get_all_log_ids()
+    assert client.has_unprocessed_unseen_emails.call_args.args[0] == ["URGENT", "FOCUS"]
+
+
+def test_skip_no_categories_recorded_with_dedicated_counter(db, sweep_config):
+    """The empty-vocabulary skip is its OWN counter — attempts no longer
+    conflates it (a no-categories cycle never reaches the gate probe)."""
+    client = MagicMock()
+    client.fetch_unprocessed_emails.return_value = []
+    client.apply_label.return_value = True
+
+    classify_mock = _make_classify_mock()
+    classify_mock.get_available_categories.return_value = []
+
+    _run_job(client, classify_mock)
+
+    client.fetch_read_unprocessed_emails.assert_not_called()
+    snap = config.sweep_stats.snapshot()
+    assert snap["read_sweep_skipped_no_categories_total"] == 1
+    assert snap["read_sweep_attempts_total"] == 0   # no gate-reaching attempt
+    assert snap["read_sweep_gated_total"] == 0
+    assert snap["read_sweep_last_skip_reason"] == "no_trained_categories"
+    assert snap["read_sweep_trained_categories_count"] == 0
+
+    from api.routes.health import get_stats
+    data = get_stats()
+    assert data["read_sweep_last_skip_reason"] == "no_trained_categories"
+    assert data["read_sweep_skipped_no_categories_total"] == 1
+
+
+def test_skip_reason_gated_unread_rendered(db, sweep_config):
+    config.sweep_stats.reset()
+
+    client = MagicMock()
+    client.fetch_unprocessed_emails.return_value = []
+    client.has_unprocessed_unseen_emails.return_value = True
+    client.apply_label.return_value = True
+    client._all_mail_name = "[Gmail]/All Mail"
+
+    _run_job(client, _make_classify_mock())
+
+    snap = config.sweep_stats.snapshot()
+    assert snap["read_sweep_attempts_total"] == 1  # reached the gate probe
+    assert snap["read_sweep_last_skip_reason"] == "gated_unread"
+
+    from api.routes.health import get_stats
+    assert get_stats()["read_sweep_last_skip_reason"] == "gated_unread"
+
+
+def test_stats_renders_disabled_reason_synthesized(db, sweep_config):
+    """skip_reason enum: disabled is synthesized live from config (a disabled
+    service records nothing new)."""
+    from api.routes.health import get_stats
+    with patch("config.ENABLE_READ_SWEEP", False):
+        data = get_stats()
+    assert data["read_sweep_last_skip_reason"] == "disabled"
+
+
+def test_runs_records_mailbox_last(db, sweep_config):
+    read_msg = MagicMock()
+    read_msg.get.return_value = None
+
+    client = MagicMock()
+    client.fetch_unprocessed_emails.return_value = []
+    client.has_unprocessed_unseen_emails.return_value = False
+    client.fetch_read_unprocessed_emails.return_value = [("9600", read_msg)]
+    client.apply_label.return_value = True
+    client._all_mail_name = "[Gmail]/All Mail"
+
+    _run_job(client, _make_classify_mock())
+
+    from api.routes.health import get_stats
+    data = get_stats()
+    assert data["read_sweep_mailbox_last"] == "[Gmail]/All Mail"
+    assert data["read_sweep_last_skip_reason"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# WI-103 debug round — GET /admin/sweep-state (coordinator's remote-debug)
+# ---------------------------------------------------------------------------
+
+def test_sweep_state_endpoint_full_payload(db, sweep_config, tmp_path):
+    import json as _json
+    from api.routes import admin
+
+    centroids = tmp_path / "label_centroids.json"
+    centroids.write_text(
+        '{"centroids_l2": {"NOISE": [1.0, 0.0], "URN": [0.0, 1.0]}}',
+        encoding="utf-8",
+    )
+
+    read_msg = MagicMock()
+    read_msg.get.return_value = None
+    client = MagicMock()
+    client.fetch_unprocessed_emails.return_value = []
+    client.has_unprocessed_unseen_emails.return_value = False
+    client.fetch_read_unprocessed_emails.return_value = [("9700", read_msg)]
+    client.apply_label.return_value = True
+    client._all_mail_name = "[Gmail]/All Mail"
+    client.last_sweep_search_mode = "negated"
+
+    _run_job(client, _make_classify_mock())
+
+    with patch("config.CENTROIDS_PATH", str(centroids)), \
+         patch("imap_client.gmail_client", client), \
+         patch.object(config, "EMBEDDER_BACKEND", "llama_cpp"), \
+         patch("api.routes.admin.classify.get_available_categories",
+         return_value=["URGENT", "FOCUS"]):
+        payload = admin.get_sweep_state()
+
+    # Must be JSON-safe for the coordinator's remote read
+    _json.dumps(payload)
+
+    assert payload["enabled"] is True
+    assert payload["batch_size"] == 5
+    assert payload["last_skip_reason"] == "none"
+    assert payload["mailbox"]["resolved_all_mail"] == "[Gmail]/All Mail"
+    assert payload["mailbox"]["last_searched"] == "[Gmail]/All Mail"
+    assert payload["mailbox"]["last_search_mode"] == "negated"
+    assert payload["trained_categories"]["count"] == 2
+    assert payload["trained_categories"]["names"] == ["FOCUS", "URGENT"]
+    assert payload["category_source"]["backend"] == "llama_cpp"
+    assert payload["category_source"]["centroids_path"] == str(centroids)
+    assert payload["category_source"]["centroids_exists"] is True
+    assert payload["category_source"]["centroids_entries"] == 2
+    assert payload["counters"]["read_sweep_skipped_no_categories_total"] == 0
+    assert payload["counters"]["read_sweep_attempts_total"] == 1
+    assert payload["last_cycle"]["at"] is not None
+
+
+def test_sweep_state_endpoint_empty_categories_is_rendered_not_broken():
+    """Broken/absent category source must render as an explicit state — the
+    endpoint exists precisely so this is debuggable remotely (no 500)."""
+    import json as _json
+    from api.routes import admin
+
+    client = MagicMock()
+    client._all_mail_name = None
+    client.last_sweep_search_mode = None
+
+    with patch("api.routes.admin.classify.get_available_categories",
+             return_value=[]), \
+         patch("config.CENTROIDS_PATH", "/definitely/not/there.json"), \
+         patch("imap_client.gmail_client", client), \
+         patch.object(config, "EMBEDDER_BACKEND", "llama_cpp"):
+        payload = admin.get_sweep_state()
+
+    _json.dumps(payload)
+    assert payload["trained_categories"] == {"count": 0, "names": []}
+    assert payload["category_source"]["centroids_exists"] is False
+    assert payload["category_source"]["centroids_entries"] is None
+    assert payload["mailbox"]["resolved_all_mail"] is None
+    assert payload["last_skip_reason"] in (
+        "no_trained_categories", "none", "gated_unread", "disabled"
+    )
+
+
+def test_sweep_state_endpoint_requires_key(client):
+    response = client.get("/admin/sweep-state")
+    assert response.status_code in (401, 403)
+
+    response = client.get("/admin/sweep-state", headers={"X-API-Key": "testkey"})
+    assert response.status_code == 200
+    assert response.json()["enabled"] == config.ENABLE_READ_SWEEP

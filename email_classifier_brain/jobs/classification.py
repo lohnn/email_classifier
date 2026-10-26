@@ -107,7 +107,7 @@ def _classify_and_log(client, e_id: str, msg, results: list) -> bool:
         return False
 
 
-def _read_sweep_phase(client, known_labels, results) -> int:
+def _read_sweep_phase(client, results) -> int:
     """
     WI-103 read-mail backfill phase. Returns the number of read emails
     fetched (candidates) this phase.
@@ -127,15 +127,34 @@ def _read_sweep_phase(client, known_labels, results) -> int:
     own: after a restart it simply re-derives the remaining history from
     Gmail labels + DB rows.
 
+    Category source is read LIVE at sweep time (WI-103 debug round,
+    2026-10-26): the same get_available_categories() the classifier uses is
+    consulted HERE, after the unread phase — not the job-start snapshot.
+    Vocabulary sources populate lazily in-process or resolve on disk only
+    once restored/installed, and the frozen snapshot made the sweep skip
+    every cycle on the Pi ("no trained categories") while classification
+    itself worked. An empty live read is its own observable skip counter
+    (read_sweep_skipped_no_categories_total) — attempts_total now counts
+    only cycles that reach the gate probe.
+
     Never raises when the client is well-behaved: unexpected failures from
     the sweep itself are swallowed by the caller so the sweep can never
     fail a job run whose unread phase succeeded.
     """
-    config.sweep_stats.record(attempt=True)  # one attempt per enabled cycle
+    known_labels = classify.get_available_categories()
+    config.sweep_stats.note_trained_categories(len(known_labels))
 
     if not known_labels:
-        logger.info("Read sweep skipped: no trained categories available yet.")
+        config.sweep_stats.record(skipped_no_categories=True)
+        logger.info(
+            "Read sweep skipped: no trained categories available (vocabulary "
+            "resolved empty — see classify diagnostics and "
+            "GET /admin/sweep-state)."
+        )
         return 0
+
+    # One attempt = a cycle that reached the gate probe (vocabulary usable).
+    config.sweep_stats.record(attempt=True)
 
     # --- hard gate: unread always wins -----------------------------------
     if client.has_unprocessed_unseen_emails(known_labels):
@@ -147,6 +166,12 @@ def _read_sweep_phase(client, known_labels, results) -> int:
     skip_ids = database.get_all_log_ids()
     emails = client.fetch_read_unprocessed_emails(
         known_labels, limit=batch_size, skip_ids=skip_ids,
+    )
+    config.sweep_stats.note_mailbox(
+        getattr(client, "_all_mail_name", None) or "INBOX"
+    )
+    config.sweep_stats.note_search_mode(
+        getattr(client, "last_sweep_search_mode", None)
     )
     config.sweep_stats.record(candidates=len(emails))
     logger.info(
@@ -198,7 +223,7 @@ def classification_job(limit: int = 20, trigger: str = "scheduled"):
         # ------------------------------------------------------------------
         if config.ENABLE_READ_SWEEP and not was_cancelled:
             try:
-                emails_processed += _read_sweep_phase(client, known_labels, results)
+                emails_processed += _read_sweep_phase(client, results)
             except Exception as e:
                 logger.error(f"Read sweep phase failed: {e}")
                 error_count += 1
