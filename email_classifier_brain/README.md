@@ -457,7 +457,13 @@ RFC 6154 `\All` special-use attribute, with the conventional `[Gmail]/All Mail`
 name as a verified fallback) — not just INBOX, since the backlog is archived
 history that INBOX cannot see. A server where no All Mail mailbox can be
 selected degrades explicitly (warning + INBOX-scoped cycle), never silently;
-the INBOX selection is restored after every sweep. Cost note: until the
+the INBOX selection is restored after every sweep. Discovery covers accounts
+served under the googlemail.com prefix (the literal fallback chain tries
+`[Gmail]/All Mail` **and** `[Google Mail]/All Mail`, each verified by an
+actual SELECT), and on failure `GET /admin/sweep-state`'s
+`mailbox.discovery_error` / `mailbox.list_sample` carry the raw LIST
+response plus per-limb SELECT results, so a live-vs-expected naming delta
+self-reports instead of requiring journal greps. Cost note: until the
 backlog drains, the All Mail candidate search returns id lists only, but those
 can be large each cycle — body downloads stay capped by `READ_SWEEP_BATCH_SIZE`
 and the early-stopping metadata scan.

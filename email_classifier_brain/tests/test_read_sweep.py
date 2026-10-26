@@ -59,7 +59,7 @@ class FakeMailboxConn:
 
     def __init__(self, messages=None, reject_negation=False, ignore_negation=False,
                  all_mail=None, no_all_mail=False, all_select_fails=False,
-                 list_raises=False):
+                 failing_names=None, list_raises=False):
         # `messages` = INBOX view; `all_mail` = account-wide archive view.
         self.stores = {
             "INBOX": list(messages or []),
@@ -68,7 +68,11 @@ class FakeMailboxConn:
         self.reject_negation = reject_negation
         self.ignore_negation = ignore_negation
         self.no_all_mail = no_all_mail
-        self.all_select_fails = all_select_fails
+        # Names whose SELECT must fail: all_select_fails=True means BOTH
+        # All Mail literals (Gmail + Google Mail) are unselectable.
+        self.failing_names = set(failing_names or [])
+        if all_select_fails:
+            self.failing_names.update({"[Gmail]/All Mail", "[Google Mail]/All Mail"})
         self.list_raises = list_raises
         self.mailbox = "INBOX"
         self.search_calls = []
@@ -97,9 +101,12 @@ class FakeMailboxConn:
     def select(self, name, *args, **kwargs):
         self.select_calls.append(name)
         self.timeline.append(("select", name))
-        if self.all_select_fails and self.ALL_NAME in str(name):
+        if str(name) in self.failing_names:
             return ("NO", [b"No such mailbox"])
-        self.mailbox = "ALL" if self.ALL_NAME in str(name) else "INBOX"
+        if "All Mail" in str(name) or "[Google Mail]/" in str(name):
+            self.mailbox = "ALL"
+        else:
+            self.mailbox = "INBOX"
         return ("OK", [b"42"])
 
     def _store(self):
@@ -367,6 +374,96 @@ def test_read_sweep_all_mail_name_cached_across_cycles():
     ]
 
 
+def test_read_sweep_discovers_google_mail_prefix_literal():
+    """Live-Gmail shape behind WI-103 follow-up 4: LIST carries no \All
+    attribute, the English '[Gmail]/All Mail' literal is unselectable, and
+    the account's legacy prefix '[Google Mail]/All Mail' resolves."""
+    conn = FakeMailboxConn(
+        all_mail=[_msg("12001", True, [], "Archived history")],
+        no_all_mail=True,
+        failing_names={"[Gmail]/All Mail"},
+    )
+    client = _client(conn)
+
+    result = client.fetch_read_unprocessed_emails(known_labels=["URGENT"])
+
+    assert [gid for gid, _m in result] == ["12001"]
+    assert client._all_mail_name == "[Google Mail]/All Mail"
+    assert client._all_mail_discovery_error is None
+    assert conn.timeline == [
+        ("select", "[Gmail]/All Mail"),
+        ("select", "[Google Mail]/All Mail"),
+        ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
+        ("select", "INBOX"),
+    ]
+
+
+def test_read_sweep_attrs_resolve_localized_all_mail_name():
+    """RFC 6154 \All attribute wins over any localized folder NAME — a
+    Swedish-UI All Mail ('Alla meddelanden') resolves via discovery."""
+    localized_all = "Alla meddelanden"
+    conn = FakeMailboxConn(all_mail=[_msg("12101", True, [], "R")])
+
+    def swedish_list(*args, **kwargs):
+        conn.list_calls += 1
+        return ("OK", [
+            f'(\\HasChildren \\All) "/" "{localized_all}"'.encode(),
+        ])
+
+    conn.list = swedish_list
+    original_select = conn.select
+
+    def select_any(name, *args, **kwargs):
+        if name == localized_all:
+            conn.select_calls.append(name)
+            conn.timeline.append(("select", name))
+            conn.mailbox = "ALL"
+            return ("OK", [b"42"])
+        return original_select(name, *args, **kwargs)
+
+    conn.select = select_any
+
+    client = _client(conn)
+    result = client.fetch_read_unprocessed_emails(known_labels=["URGENT"])
+    assert [gid for gid, _m in result] == ["12101"]
+    assert client._all_mail_name == localized_all
+    assert client._all_mail_discovery_error is None
+
+
+def test_read_sweep_no_all_mail_populates_discovery_diagnostics():
+    """Neither \All attribute nor any literal resolves: degrade to INBOX,
+    and persist the raw LIST sample + per-limb select results so the
+    live-vs-mock delta is self-reporting via GET /admin/sweep-state."""
+    conn = FakeMailboxConn(
+        messages=[_msg("12201", True, [], "Inbox-only fallback mail")],
+        no_all_mail=True,
+        all_select_fails=True,
+    )
+    client = _client(conn)
+
+    result = client.fetch_read_unprocessed_emails(known_labels=["URGENT"])
+
+    assert [gid for gid, _m in result] == ["12201"]  # INBOX-scoped cycle
+    assert client._all_mail_name is None
+    assert client._all_mail_discovery_error is not None
+    assert "[Google Mail]/All Mail" in client._all_mail_discovery_error
+    assert client._all_mail_list_sample is not None
+    # The sample carries the RAW server response text
+    assert "Trash" in client._all_mail_list_sample
+
+
+def test_read_sweep_success_clears_discovery_diagnostics():
+    conn = FakeMailboxConn(all_mail=[_msg("12301", True, [], "R")])
+    client = _client(conn)
+    client._all_mail_discovery_error = "stale from an earlier failure"
+    client._all_mail_list_sample = "stale sample"
+
+    client.fetch_read_unprocessed_emails(known_labels=["URGENT"])
+
+    assert client._all_mail_discovery_error is None
+    assert client._all_mail_list_sample is None
+
+
 def test_read_sweep_falls_back_to_literal_all_mail_when_list_fails():
     """No LIST discovery (server quirk / transient failure): the conventional
     Gmail name is tried, trusted only once its SELECT succeeds, then cached."""
@@ -399,10 +496,14 @@ def test_read_sweep_no_all_mail_stays_on_inbox():
     # Sweep ran INBOX-scoped: the INBOX candidate was found and returned
     assert [gid for gid, _m in result] == ["9201"]
     assert client._all_mail_name is None
-    # Attempted the literal fallback name, never selected All Mail; restored INBOX
-    assert conn.select_calls == [FakeMailboxConn.ALL_NAME, "INBOX"]
+    # Attempted BOTH literal fallbacks (Gmail + Google Mail prefixes) before
+    # giving up; never selected All Mail; restored INBOX
+    assert conn.select_calls == [
+        FakeMailboxConn.ALL_NAME, "[Google Mail]/All Mail", "INBOX",
+    ]
     assert conn.timeline == [
         ("select", FakeMailboxConn.ALL_NAME),
+        ("select", "[Google Mail]/All Mail"),
         ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
         ("select", "INBOX"),
     ]
@@ -893,6 +994,9 @@ def test_sweep_state_endpoint_full_payload(db, sweep_config, tmp_path):
     assert payload["mailbox"]["resolved_all_mail"] == "[Gmail]/All Mail"
     assert payload["mailbox"]["last_searched"] == "[Gmail]/All Mail"
     assert payload["mailbox"]["last_search_mode"] == "negated"
+    # successful discovery: diagnostics are explicitly cleared (not garbage)
+    assert payload["mailbox"]["discovery_error"] is None
+    assert payload["mailbox"]["list_sample"] is None
     assert payload["trained_categories"]["count"] == 2
     assert payload["trained_categories"]["names"] == ["FOCUS", "URGENT"]
     assert payload["category_source"]["backend"] == "llama_cpp"
@@ -926,6 +1030,8 @@ def test_sweep_state_endpoint_empty_categories_is_rendered_not_broken():
     assert payload["category_source"]["centroids_exists"] is False
     assert payload["category_source"]["centroids_entries"] is None
     assert payload["mailbox"]["resolved_all_mail"] is None
+    assert "discovery_error" in payload["mailbox"]
+    assert "list_sample" in payload["mailbox"]
     assert payload["last_skip_reason"] in (
         "no_trained_categories", "none", "gated_unread", "disabled"
     )
