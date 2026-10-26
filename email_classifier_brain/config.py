@@ -10,6 +10,7 @@ Configuration is loaded from a `.env` file in the project root.
 Copy `.env.example` to `.env` and fill in your values.
 """
 
+import datetime
 import email.header
 import logging
 import os
@@ -247,18 +248,55 @@ class _SweepStats:
         self._gated = 0
         self._candidates = 0
         self._labeled = 0
+        self._skipped_no_categories = 0
+        self._mailbox_last = ""
+        self._last_search_mode = None
+        self._last_skip_reason = ""
+        self._trained_categories_last = 0
+        self._last_cycle_at = ""
+
+    def _stamp_now(self) -> None:
+        """(lock held) Marker that a labeled sweep-cycle event just happened."""
+        self._last_cycle_at = datetime.datetime.now().isoformat(timespec="seconds")
 
     def record(self, attempt: bool = False, gated: bool = False,
-               candidates: int = 0, labeled: int = 0) -> None:
-        """Record sweep events. `attempt=True` marks one sweep-phase execution;
-        gated/candidates/labeled are the outcome deltas of that execution."""
+               candidates: int = 0, labeled: int = 0,
+               skipped_no_categories: bool = False) -> None:
+        """Record sweep events. `attempt=True` marks one cycle that reached
+        the gate probe (an empty-vocabulary cycle never does — it is its own
+        counter below, WI-103 debug round); gated/candidates/labeled/
+        skipped_no_categories are the outcome deltas of a cycle."""
         with self._lock:
             if attempt:
                 self._attempts += 1
             if gated:
                 self._gated += 1
-            self._candidates += candidates
-            self._labeled += labeled
+                self._last_skip_reason = "gated_unread"
+                self._stamp_now()
+            if skipped_no_categories:
+                self._skipped_no_categories += 1
+                self._last_skip_reason = "no_trained_categories"
+                self._stamp_now()
+            if candidates:
+                self._candidates += candidates
+                self._last_skip_reason = ""
+                self._stamp_now()
+            if labeled:
+                self._labeled += labeled
+                self._stamp_now()
+
+    def note_mailbox(self, name) -> None:
+        """Record the mailbox actually searched in the last sweep fetch."""
+        with self._lock:
+            self._mailbox_last = str(name) if name else "INBOX"
+
+    def note_search_mode(self, mode) -> None:
+        with self._lock:
+            self._last_search_mode = str(mode) if mode else None
+
+    def note_trained_categories(self, count: int) -> None:
+        with self._lock:
+            self._trained_categories_last = int(count)
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -267,6 +305,12 @@ class _SweepStats:
                 "read_sweep_gated_total": self._gated,
                 "read_sweep_candidates_total": self._candidates,
                 "read_sweep_labeled_total": self._labeled,
+                "read_sweep_skipped_no_categories_total": self._skipped_no_categories,
+                "read_sweep_mailbox_last": self._mailbox_last,
+                "read_sweep_last_search_mode": self._last_search_mode,
+                "read_sweep_last_skip_reason": self._last_skip_reason,
+                "read_sweep_trained_categories_count": self._trained_categories_last,
+                "read_sweep_last_cycle_at": self._last_cycle_at,
             }
 
     def reset(self) -> None:
@@ -275,6 +319,12 @@ class _SweepStats:
             self._gated = 0
             self._candidates = 0
             self._labeled = 0
+            self._skipped_no_categories = 0
+            self._mailbox_last = ""
+            self._last_search_mode = None
+            self._last_skip_reason = ""
+            self._trained_categories_last = 0
+            self._last_cycle_at = ""
 
 
 sweep_stats = _SweepStats()

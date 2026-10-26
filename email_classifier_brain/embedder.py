@@ -125,7 +125,12 @@ _centroid_cache = None  # {label: L2 vector}, None = not loaded
 
 def load_centroids(path: str | None = None) -> dict:
     """Load the shipped per-class centroids (with provenance + gate
-    calibration). Cached after first load."""
+    calibration). Cached after first load.
+
+    An empty-but-valid artifact parses to {} (WI-103 debug round: the
+    previous `next(iter(...))` crashed with StopIteration on exactly that
+    input — an empty vocabulary must resolve to [] + the loud
+    get_available_categories() warning, not to a mysterious crash)."""
     global _centroid_cache
     if _centroid_cache is not None and path is None:
         return _centroid_cache
@@ -133,6 +138,9 @@ def load_centroids(path: str | None = None) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         artifact = json.load(f)
     centroids = artifact["centroids_l2"]
+    if not centroids:
+        _centroid_cache = {}
+        return {}
     dim = len(next(iter(centroids.values())))
     for label, vec in centroids.items():
         if len(vec) != dim:

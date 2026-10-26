@@ -572,3 +572,87 @@ def get_update_errors():
         raise HTTPException(status_code=500, detail="Could not read update history")
 
     return logs
+
+
+@router.get("/admin/sweep-state", dependencies=[Depends(get_api_key)])
+def get_sweep_state():
+    """
+    WI-103 debug endpoint: the read-mail sweep's complete self-diagnosis —
+    everything needed to answer "why is/ isn't the sweep running" remotely,
+    without journal greps. Always returns 200 with best-effort data; every
+    read is individually guarded so a broken diagnostic source renders as
+    an explicit error string instead of masking the sweep's state.
+    """
+    snap = config.sweep_stats.snapshot()
+
+    reason = snap.get("read_sweep_last_skip_reason") or "none"
+    if not config.ENABLE_READ_SWEEP:
+        reason = "disabled"
+
+    # Mailbox / search-mode state (read-only peeks at the client singleton)
+    try:
+        resolved_all_mail = getattr(imap_client.gmail_client, "_all_mail_name", None)
+        last_search_mode = getattr(imap_client.gmail_client, "last_sweep_search_mode", None)
+    except Exception as e:  # pragma: no cover - mock/degraded client shapes
+        resolved_all_mail = None
+        last_search_mode = None
+        logger.warning(f"imap_client state unavailable for sweep-state: {e}")
+
+    # Category source diagnostics — the root-cause surface for the
+    # "no trained categories" skip (vocabulary source vs classifier's source)
+    categorito = {
+        "backend": config.EMBEDDER_BACKEND,
+        "centroids_path": str(config.CENTROIDS_PATH),
+        "centroids_abspath": os.path.abspath(str(config.CENTROIDS_PATH)),
+        "centroids_exists": os.path.exists(config.CENTROIDS_PATH),
+        "centroids_entries": None,
+        "centroids_error": None,
+    }
+    try:
+        import embedder
+        categorito["centroids_entries"] = len(
+            embedder.load_centroids(config.CENTROIDS_PATH)
+        )
+    except Exception as e:
+        categorito["centroids_error"] = f"{type(e).__name__}: {e}"
+
+    try:
+        # canonical sorted rendering for a stable remote-debug payload
+        names = sorted(classify.get_available_categories())
+    except Exception as e:
+        names = []
+        categorito["centroids_error"] = (
+            f"get_available_categories raised: {type(e).__name__}: {e}"
+        )
+    try:
+        categorito["label_mapping_entries"] = len(
+            getattr(classify, "_label_mapping", {}) or {}
+        )
+    except Exception:
+        categorito["label_mapping_entries"] = None
+
+    counters = {
+        key: value for key, value in snap.items() if key.endswith("_total")
+    }
+
+    return {
+        "enabled": bool(config.ENABLE_READ_SWEEP),
+        "batch_size": config.READ_SWEEP_BATCH_SIZE,
+        "last_skip_reason": reason,
+        "mailbox": {
+            "resolved_all_mail": resolved_all_mail,
+            "last_searched": snap.get("read_sweep_mailbox_last") or None,
+            "last_search_mode": last_search_mode,
+        },
+        "last_cycle": {
+            "at": snap.get("read_sweep_last_cycle_at") or None,
+            "skip_reason": reason,
+            "search_mode": last_search_mode,
+        },
+        "counters": counters,
+        "trained_categories": {
+            "count": len(names),
+            "names": names,
+        },
+        "category_source": categorito,
+    }

@@ -36,8 +36,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import logging
+
 if TYPE_CHECKING:
     from setfit import SetFitModel  # type-checking only; never imported at runtime
+
+logger = logging.getLogger(__name__)
 
 import email
 import email.message
@@ -103,6 +107,9 @@ def _load_label_mapping() -> dict[int, str]:
 _model = None
 _label_mapping = {}
 _st_loaded = False
+# once-per-process flag: the EMPTY-vocabulary ERROR (get_available_categories)
+# fires a single time so a broken source is loud without spamming every cycle
+_vocabulary_warned = False
 
 
 def _get_st():
@@ -351,15 +358,62 @@ def get_available_categories() -> list[str]:
     """Return the list of all category labels the model was trained on.
 
     llama.cpp backend: the shipped centroids' keys (the artifact that
-    defines the production vocabulary). Falls back to the SetFit-era
-    label_mapping when the centroids artifact is absent (tests / pre-deploy).
+    defines the production vocabulary). An unreadable/missing artifact
+    falls back to the SetFit-era label_mapping — which is EMPTY on the
+    llama path unless the ST stack has actually been lazily loaded in this
+    process. That silent fallback is exactly what kept the WI-103 read
+    sweep skipped on the Pi ("no trained categories" every cycle while
+    classification itself worked), so two vaccinations were added
+    (2026-10-26 debug round):
+      - the fallback logs a LOUD warning naming both candidate paths, their
+        absolute resolution and existence (see /admin/sweep-state);
+      - an EMPTY final resolution logs a once-per-process ERROR —
+        predictions may still run per-email, but the label filter (UNSEEN
+        fetch, read sweep) would match nothing.
+    Never fabricates labels: an empty source resolution returns [].
     """
+    global _vocabulary_warned
+    categories: list[str] = []
+
     if _config.EMBEDDER_BACKEND == "llama_cpp":
         try:
-            return sorted(_embedder.load_centroids(_config.CENTROIDS_PATH).keys())
-        except OSError:
-            return sorted(_label_mapping.values())
-    return sorted(_label_mapping.values())
+            categories = sorted(_embedder.load_centroids(_config.CENTROIDS_PATH).keys())
+        except OSError as e:
+            mapping_path = os.path.join(MODEL_DIR, "label_mapping.json")
+            logger.warning(
+                "get_available_categories: centroids artifact unreadable "
+                "(path=%r, abspath=%r, exists=%s; %s); falling back to the "
+                "SetFit-era label_mapping (path=%r; exists=%s, entries=%d). "
+                "That fallback is empty unless the ST path ran in this "
+                "process — if classification works, check the model-artifact "
+                "install / configured CENTROIDS_PATH.",
+                _config.CENTROIDS_PATH, os.path.abspath(str(_config.CENTROIDS_PATH)),
+                os.path.exists(_config.CENTROIDS_PATH), e,
+                mapping_path, os.path.exists(mapping_path), len(_label_mapping),
+            )
+            categories = sorted(_label_mapping.values())
+    else:
+        categories = sorted(_label_mapping.values())
+
+    if not categories and not _vocabulary_warned:
+        _vocabulary_warned = True
+        logger.error(
+            "get_available_categories resolved an EMPTY vocabulary "
+            "(backend=%s, centroids path=%r exists=%s, label_mapping "
+            "entries=%d). Per-email predictions may still work, but the "
+            "label filter (UNSEEN fetch, read sweep) matches nothing and "
+            "the read sweep skips every cycle. Inspect "
+            "GET /admin/sweep-state for the resolved source state.",
+            _config.EMBEDDER_BACKEND, _config.CENTROIDS_PATH,
+            os.path.exists(_config.CENTROIDS_PATH), len(_label_mapping),
+        )
+    return categories
+
+
+def _reset_centroid_cache() -> None:
+    """Test/diagnostic hook: forget the cached centroids artifact so the
+    next load_centroids() re-reads the configured path."""
+    _embedder._centroid_cache = None
 
 
 # ---------------------------------------------------------------------------

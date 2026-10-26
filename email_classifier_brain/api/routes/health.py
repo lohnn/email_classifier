@@ -123,9 +123,27 @@ def get_stats(
     """
     stats = database.get_stats(start_time, end_time)
     truncation = config.truncation_stats.snapshot()
+    sweep = config.sweep_stats.snapshot()
+    # skip_reason enum: none|no_trained_categories|gated_unread|disabled.
+    # "disabled" is synthesized live (a disabled sweep records nothing); an
+    # empty value means no skip/no fetch happened since process start.
+    skip_reason = sweep.get("read_sweep_last_skip_reason") or "none"
+    if not config.ENABLE_READ_SWEEP:
+        skip_reason = "disabled"
     return {
         "stats": stats,
         "model_inputs_total": truncation["model_inputs_total"],
         "model_inputs_truncated": truncation["model_inputs_truncated"],
-        **config.sweep_stats.snapshot(),
+        "read_sweep_attempts_total": sweep["read_sweep_attempts_total"],
+        "read_sweep_gated_total": sweep["read_sweep_gated_total"],
+        "read_sweep_candidates_total": sweep["read_sweep_candidates_total"],
+        "read_sweep_labeled_total": sweep["read_sweep_labeled_total"],
+        "read_sweep_mailbox_last": sweep["read_sweep_mailbox_last"],
+        "read_sweep_last_skip_reason": skip_reason,
+        "read_sweep_skipped_no_categories_total": sweep[
+            "read_sweep_skipped_no_categories_total"
+        ],
+        "read_sweep_trained_categories_count": sweep[
+            "read_sweep_trained_categories_count"
+        ],
     }

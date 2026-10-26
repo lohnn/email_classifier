@@ -65,6 +65,11 @@ class GmailClient:
         # Resolved All Mail mailbox name for the read sweep (WI-103); None
         # until a LIST-\All or a verified conventional-name SELECT resolves it.
         self._all_mail_name: Optional[str] = None
+        # How the last sweep candidate search ran (diagnostics for
+        # GET /admin/sweep-state): "negated" = server-side SEEN NOT
+        # X-GM-LABELS worked; "plain_seen" = fallback scan; None = no sweep
+        # fetch ran in this process yet.
+        self.last_sweep_search_mode: Optional[str] = None
 
         if not self.user or not self.password:
             # We don't raise error immediately to allow importing the module,
@@ -487,6 +492,10 @@ class GmailClient:
                     if typ != 'OK' or not data[0]:
                         return []
                     email_ids = data[0].split()[::-1]
+
+                self.last_sweep_search_mode = (
+                    "plain_seen" if fallback else "negated"
+                )
 
                 qualifying = self._scan_qualifying_metadata(
                     email_ids, set(known_labels), limit=limit, skip_ids=skip_ids,
