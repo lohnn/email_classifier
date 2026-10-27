@@ -401,6 +401,14 @@ rclone config  # → New remote → name it "gdrive" → Google Drive → authen
 
 After training, `retrain.sh` handles the upload automatically.
 
+**The sweep vocabulary is git-owned, not Drive-owned (WI-103):** the Pi's
+rclone remote is `drive.file`-scoped, so its bucket view can hide files the
+Mac's uploads created — and every `rclone sync` MIRRORS, meaning a limited
+view wipes local-extra files inside `model/`. Both model syncs in
+`run_service.sh` therefore run with `--exclude label_centroids.json`; the
+repo-tracked artifact (see the WI-103 note below) survives every sync and
+future retrain PRs refresh it together with `build_label_centroids` output.
+
 ## Security
 
 State-modifying and administrative endpoints are protected by an **API Key**
