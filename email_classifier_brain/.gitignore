@@ -12,8 +12,13 @@ build/
 venv/
 env/
 
-# Trained model output (synced via Google Drive, not Git)
-model/
+# Trained model output (synced via Google Drive, not Git).
+# `model/*` (contents, not the dir) so a repo-tracked exception can
+# re-include a file: the sweep's vocabulary artifact is repo-tracked
+# precisely because model/ is a GDrive-mirror target whose sync can erase
+# local-extra files (WI-103 durability).
+model/*
+!model/label_centroids.json
 
 # IDE / Editor
 .idea/
