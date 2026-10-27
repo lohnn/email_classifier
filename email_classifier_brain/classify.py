@@ -361,7 +361,7 @@ def get_available_categories() -> list[str]:
     defines the production vocabulary). An unreadable/missing artifact
     falls back to the SetFit-era label_mapping — which is EMPTY on the
     llama path unless the ST stack has actually been lazily loaded in this
-    process. That silent fallback is exactly what kept the WI-103 read
+    process. That silent fallback is exactly what kept the read
     sweep skipped on the Pi ("no trained categories" every cycle while
     classification itself worked), so two vaccinations were added
     (2026-10-26 debug round):

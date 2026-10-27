@@ -387,6 +387,8 @@ INFERENCE ONLY — training (train.py/evaluate.py) stays on SetFit/ST.
 
 ## Google Drive — Model Storage
 
+> **Full retrain → ship → verify runbook:** see [RETRAIN-AND-DEPLOY.md](RETRAIN-AND-DEPLOY.md) — the LoRA/GGUF rollout, vocabulary-ownership rules (why model syncs exclude `label_centroids.json`), the drive.file bucket-view caveat, and the post-deploy verification battery.
+
 The trained model (~490 MB) is stored in Google Drive instead of Git. Use
 [rclone](https://rclone.org/) to sync:
 
@@ -401,12 +403,12 @@ rclone config  # → New remote → name it "gdrive" → Google Drive → authen
 
 After training, `retrain.sh` handles the upload automatically.
 
-**The sweep vocabulary is git-owned, not Drive-owned (WI-103):** the Pi's
+**The sweep vocabulary is git-owned, not Drive-owned:** the Pi's
 rclone remote is `drive.file`-scoped, so its bucket view can hide files the
 Mac's uploads created — and every `rclone sync` MIRRORS, meaning a limited
 view wipes local-extra files inside `model/`. Both model syncs in
 `run_service.sh` therefore run with `--exclude label_centroids.json`; the
-repo-tracked artifact (see the WI-103 note below) survives every sync and
+repo-tracked artifact (see the note below) survives every sync and
 future retrain PRs refresh it together with `build_label_centroids` output.
 
 ## Security
@@ -451,7 +453,7 @@ The service uses `APScheduler` to handle recurring tasks:
 | **Re-classify**    | 12 hrs           | `RECLASSIFY_INTERVAL_HOURS`, `ENABLE_RECLASSIFY_JOB` | Updates local history labels if the model has improved.     |
 | **Auto-Update**    | 1 day            | `ZERO_CORRECTION_WARN_DAYS` (warn threshold)         | Pushes training data to Git, emits loop-health signals, and triggers a service refresh. |
 
-### Read-mail backfill sweep (WI-103)
+### Read-mail backfill sweep
 
 **Enabled by default** (`ENABLE_READ_SWEEP`; set it to `false` to disable).
 The classification job has two strictly ordered phases. The UNSEEN phase (new
@@ -488,7 +490,7 @@ emails are labelled per classification cycle — roughly 1440/day on the default
 5-minute cadence, so multi-thousand-email history sweeps over days instead of
 blasting the mailbox.
 
-**Self-diagnosis (WI-103 debug round):** sweep activity is observable via
+**Self-diagnosis:** sweep activity is observable via
 `GET /stats` — `read_sweep_attempts_total` (cycles that reached the gate
 probe), `read_sweep_gated_total`, `read_sweep_candidates_total`,
 `read_sweep_labeled_total`, `read_sweep_skipped_no_categories_total`,

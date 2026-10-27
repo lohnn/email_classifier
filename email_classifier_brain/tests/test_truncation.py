@@ -168,7 +168,7 @@ class TestFormatModelInputTruncation:
 
 
 # ---------------------------------------------------------------------------
-# Truncation prevalence counter (observable signal, W-022)
+# Truncation prevalence counter (observable signal)
 # ---------------------------------------------------------------------------
 
 class TestTruncationStats:

@@ -1,4 +1,4 @@
-"""WI-103 debug round — category-source robustness (sweep root cause).
+"""Read-sweep debug round — category-source robustness (sweep root cause).
 
 The read sweep skips with "no trained categories" when
 classify.get_available_categories() resolves empty. These tests pin the

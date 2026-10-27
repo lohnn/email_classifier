@@ -5,7 +5,7 @@ jobs/classification.py — Email Classification Job
 Fetches unprocessed emails from IMAP, classifies them, applies
 labels, and logs results to the database.
 
-Two strictly ordered phases (WI-103):
+Two strictly ordered phases:
   1. UNSEEN phase — classify new mail (as always).
   2. Read sweep — label older already-read mail that was never
      classified, HARD-GATED behind a fully drained unread queue, at a
@@ -32,8 +32,7 @@ def _classify_and_log(client, e_id: str, msg, results: list) -> bool:
     the database. Returns True iff the email was classified AND its label
     application succeeded.
 
-    The DB log row is the system's processed-marker for the read sweep
-    (WI-103), so it is written ONLY after Gmail accepted the label: a read
+    The DB log row is the system's processed-marker for the read sweep, so it is written ONLY after Gmail accepted the label: a read
     email whose label never lands must stay eligible for the next sweep
     cycle instead of being marked processed while unlabeled (the DB-says-
     labeled / Gmail-says-nothing drift class).
@@ -109,7 +108,7 @@ def _classify_and_log(client, e_id: str, msg, results: list) -> bool:
 
 def _read_sweep_phase(client, results) -> int:
     """
-    WI-103 read-mail backfill phase. Returns the number of read emails
+    Read-mail backfill phase. Returns the number of read emails
     fetched (candidates) this phase.
 
     HARD GATE — "unread queue fully drained", enforced in code:
@@ -127,8 +126,8 @@ def _read_sweep_phase(client, results) -> int:
     own: after a restart it simply re-derives the remaining history from
     Gmail labels + DB rows.
 
-    Category source is read LIVE at sweep time (WI-103 debug round,
-    2026-10-26): the same get_available_categories() the classifier uses is
+    Category source is read LIVE at sweep time (in the 2026-10-26
+    debug round): the same get_available_categories() the classifier uses is
     consulted HERE, after the unread phase — not the job-start snapshot.
     Vocabulary sources populate lazily in-process or resolve on disk only
     once restored/installed, and the frozen snapshot made the sweep skip
@@ -217,7 +216,7 @@ def classification_job(limit: int = 20, trigger: str = "scheduled"):
                 error_count += 1
 
         # ------------------------------------------------------------------
-        # WI-103 read-mail sweep — hard-gated, paced, never interleaved with
+        # Read-mail sweep — hard-gated, paced, never interleaved with
         # the unread phase. Runs only if the unread phase wasn't cancelled.
         # A sweep failure must not fail a run whose unread phase succeeded.
         # ------------------------------------------------------------------

@@ -12,7 +12,7 @@
 #   3) install the systemd units (this dir's units/ + email-embedder.service
 #      if not already present) + daemon-reload;
 #   4) create the model dir. The GGUF itself flows afterwards via the
-#      upload/install endpoints: bootstrap once → coordinator uploads via
+#      upload/install endpoints: bootstrap once → the deploy operator uploads via
 #      /admin/upload-model-artifact + /admin/install-model-artifact → the
 #      path-unit auto-reloads the embedder. Zero-touch from here.
 #
@@ -118,7 +118,7 @@ cat <<'NEXT'
 NEXT STEPS (zero-touch model updates):
   1. ensure the brain's .env has EMBEDDER_BACKEND=llama_cpp and
      LLAMA_MODEL_FILE pointing at this model dir ($MODEL_DIR/merged_text_q8_0.gguf).
-  2. the coordinator uploads the GGUF via the brain's
+  2. the deploy operator uploads the GGUF via the brain's
      /admin/upload-model-artifact + /admin/install-model-artifact
      (Tailscale-only, sha256-checked, atomic install).
   3. the path unit above restarts the embedder automatically. Done.
