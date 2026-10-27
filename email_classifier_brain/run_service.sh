@@ -61,9 +61,12 @@ if [ -f "$UPDATE_MARKER" ]; then
     CURRENT_COMMIT=$(git rev-parse HEAD)
     log_event "info" "Starting update from commit $CURRENT_COMMIT"
 
-    # 2. Sync latest model from Google Drive (non-fatal)
+    # 2. Sync latest model from Google Drive (non-fatal).
+    #    --exclude label_centroids.json: the sweep vocabulary is GIT-OWNED
+    #    (WI-103) — the Pi's rclone grant is drive.file-scoped and sync
+    #    mirrors, so an unchecked sync erases the repo-tracked artifact.
     echo "Syncing model from Google Drive..."
-    if $RCLONE_CMD sync "$GDRIVE_REMOTE:$GDRIVE_MODEL_PATH/" "$MODEL_DIR/"; then
+    if $RCLONE_CMD sync "$GDRIVE_REMOTE:$GDRIVE_MODEL_PATH/" "$MODEL_DIR/" --exclude label_centroids.json; then
         log_event "info" "Model synced from Google Drive"
     else
         log_event "warning" "Google Drive model sync failed, using existing model"
@@ -142,7 +145,11 @@ mkdir -p "$STORAGE_DIR"
 # Ensure model directory exists and has content
 if [ ! -f "${MODEL_DIR}/config.json" ]; then
     echo "Model config.json missing. Syncing model from Google Drive..."
-    $RCLONE_CMD sync "$GDRIVE_REMOTE:$GDRIVE_MODEL_PATH/" "$MODEL_DIR/" --progress
+    # --exclude label_centroids.json: same WI-103 protection as the update
+    # sync — the drive.file-scoped mirror must not erase the git-owned
+    # sweep vocabulary (this repair path re-runs on every startup while
+    # config.json stays invisible to the Pi's grant).
+    $RCLONE_CMD sync "$GDRIVE_REMOTE:$GDRIVE_MODEL_PATH/" "$MODEL_DIR/" --progress --exclude label_centroids.json
 fi
 
 DB_FILE="${STORAGE_DIR}/email_history.db"
