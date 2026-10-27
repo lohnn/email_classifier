@@ -460,7 +460,8 @@ selected degrades explicitly (warning + INBOX-scoped cycle), never silently;
 the INBOX selection is restored after every sweep. Discovery covers accounts
 served under the googlemail.com prefix (the literal fallback chain tries
 `[Gmail]/All Mail` **and** `[Google Mail]/All Mail`, each verified by an
-actual SELECT), and on failure `GET /admin/sweep-state`'s
+actual SELECT — sent as a QUOTED mailbox string, since live Gmail rejects
+the bare special-char name with `BAD Could not parse command`), and on failure `GET /admin/sweep-state`'s
 `mailbox.discovery_error` / `mailbox.list_sample` carry the raw LIST
 response plus per-limb SELECT results, so a live-vs-expected naming delta
 self-reports instead of requiring journal greps. Cost note: until the

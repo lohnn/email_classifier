@@ -54,6 +54,26 @@ ALL_MAIL_FALLBACK_NAMES = (
 _LIST_QUOTED_NAME_PATTERN = re.compile(r'"([^"]*)"\s*$')
 
 
+def _imap_quote_mailbox(name: str) -> str:
+    """Idempotent IMAP mailbox-name quoting for SELECT.
+
+    imaplib does NOT quote SELECT arguments: a mailbox name containing IMAP
+    specials ([, ], the hierarchy character, spaces) must be sent as a
+    quoted string, else the server answers 'BAD Could not parse command'.
+    Live proof (WI-103 follow-up 7): Gmail's real 'SELECT [Gmail]/All Mail'
+    — bare — is rejected exactly that way, while the quoted form works.
+
+    Idempotent: one surrounding quote pair is stripped if present, then the
+    name is re-quoted exactly once. Only All Mail limbs flow through here —
+    bare-atom INBOX selects elsewhere in this file stay untouched."""
+    if not name:
+        return name
+    stripped = name
+    if len(stripped) >= 2 and stripped.startswith('"') and stripped.endswith('"'):
+        stripped = stripped[1:-1]
+    return f'"{stripped}"'
+
+
 def _imap_quote_label(label: str) -> str:
     """Return label properly quoted and escaped for use in IMAP commands.
 
@@ -403,21 +423,30 @@ class GmailClient:
         limb_notes: list = []
 
         def _try_select(name: str, note: bool = False) -> bool:
+            # Wire form is always the QUOTED mailbox string — live Gmail
+            # BADs the bare special-char name (WI-103 follow-up 7).
+            wire_name = _imap_quote_mailbox(name)
             try:
-                typ, data = self.connection.select(name)
+                typ, data = self.connection.select(wire_name)
                 if typ == "OK":
                     if note:
-                        limb_notes.append(f"SELECT {name!r} succeeded")
+                        limb_notes.append(f"SELECT {name!r} (sent {wire_name!r}) succeeded")
                     return True
                 if note:
-                    limb_notes.append(f"SELECT {name!r} -> typ={typ!r}")
+                    limb_notes.append(f"SELECT {name!r} (sent {wire_name!r}) -> typ={typ!r}")
                 return False
             except _IMAP_ERRORS as e:
                 if note:
-                    limb_notes.append(f"SELECT {name!r} raised {type(e).__name__}: {e}")
+                    limb_notes.append(
+                        f"SELECT {name!r} (sent {wire_name!r}) raised "
+                        f"{type(e).__name__}: {e}"
+                    )
                 return False
 
         if self._all_mail_name:
+            # Normalize the cache: it always holds the LOGICAL (unquoted)
+            # name; _try_select quotes for the wire (idempotently).
+            self._all_mail_name = self._all_mail_name.strip('"')
             if _try_select(self._all_mail_name):
                 self._all_mail_discovery_error = None
                 self._all_mail_list_sample = None
