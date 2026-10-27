@@ -34,11 +34,19 @@ _IMAP_ERRORS = (imaplib.IMAP4.error, OSError)
 # giant command the server may reject anyway.
 MAX_NEGATED_SEARCH_CHARS = 4000
 
-# Conventional Gmail All Mail name — the read sweep's fallback when LIST
-# cannot discover an RFC 6154 \All special-use mailbox. Only trusted after a
-# successful SELECT; a non-Gmail server with neither means the sweep warns
-# and runs INBOX-scoped for that cycle.
+# Conventional Gmail All Mail names — the read sweep's literal fallbacks
+# when LIST cannot discover an RFC 6154 \All special-use mailbox. Each is
+# trusted only after a successful SELECT; a server where none resolves
+# (non-Gmail, or unexpected naming) means the sweep warns (with the raw
+# LIST sample captured for /admin/sweep-state) and runs INBOX-scoped for
+# that cycle. Live Gmail quirk (WI-103 follow-up 4): accounts served under
+# the googlemail.com domain expose '[Google Mail]/...' prefixes instead of
+# '[Gmail]/...'.
 ALL_MAIL_FALLBACK_NAME = "[Gmail]/All Mail"
+ALL_MAIL_FALLBACK_NAMES = (
+    "[Gmail]/All Mail",
+    "[Google Mail]/All Mail",
+)
 
 # A LIST untagged line's mailbox name: the final quoted token
 # ("(\flags) "delimiter" "name"). Selectively matched by the read sweep's
@@ -70,6 +78,12 @@ class GmailClient:
         # X-GM-LABELS worked; "plain_seen" = fallback scan; None = no sweep
         # fetch ran in this process yet.
         self.last_sweep_search_mode: Optional[str] = None
+        # All Mail discovery diagnostics (WI-103 follow-up 4): on discovery
+        # failure they carry the raw LIST response sample and the exact
+        # per-limb SELECT results so live-vs-mock deltas self-report via
+        # GET /admin/sweep-state. Both cleared on successful resolution.
+        self._all_mail_discovery_error: Optional[str] = None
+        self._all_mail_list_sample: Optional[str] = None
 
         if not self.user or not self.password:
             # We don't raise error immediately to allow importing the module,
@@ -345,6 +359,23 @@ class GmailClient:
             return None
         return f"SEEN {not_chain}"
 
+    @staticmethod
+    def _list_sample(entries, cap: int = 600) -> str:
+        """Raw-world evidence: the LIST response sample (first lines plus
+        any line mentioning 'all'), truncated for the sweep-state payload."""
+        lines = []
+        for entry in entries[:10]:
+            if isinstance(entry, bytes):
+                lines.append(entry.decode("utf-8", errors="ignore"))
+            elif isinstance(entry, tuple):
+                # imaplib turns some responses into tuples; flatten safely
+                lines.append(" ".join(str(part) for part in entry))
+            else:
+                lines.append(str(entry))
+        all_plus_first = [ln for ln in lines if "all" in ln.lower()] or lines
+        sample = f"{len(entries)} entries: " + " || ".join(all_plus_first[:5])
+        return sample[:cap]
+
     def _select_all_mail(self) -> bool:
         """
         Select the account's All Mail mailbox for the read sweep (WI-103:
@@ -352,66 +383,102 @@ class GmailClient:
 
         Resolution order (resolved name is cached on the client instance):
           1. the name resolved by a previous call;
-          2. LIST + the RFC 6154 \\All special-use attribute (mirrors
-             _supplement_mailbox_names, so localized Gmail UIs resolve);
-          3. the conventional Gmail name "[Gmail]/All Mail", verified by
-             actually selecting it before it may be cached;
-          4. give up: warn and return False — the caller stays on the
-             already-selected INBOX, so a non-Gmail server without an All
-             Mail mailbox degrades explicitly (warned, INBOX-scoped cycle),
-             never silently.
+          2. LIST + the RFC 6154 \\All special-use attribute (covers ANY
+             localized folder NAME — the attribute is protocol-level);
+          3. the conventional Gmail literals, IN ORDER, each verified by an
+             actual SELECT before it may be cached:
+             "[Gmail]/All Mail" → "[Google Mail]/All Mail" (accounts served
+             under the googlemail.com domain use the Google Mail prefix);
+          4. give up: warn (including the raw LIST sample) and return False
+             — the caller stays on the already-selected INBOX, so behavior
+             degrades explicitly, never silently. The full list sample and
+             per-limb select results persist on the client as
+             _all_mail_list_sample / _all_mail_discovery_error for
+             GET /admin/sweep-state, and are cleared on next success.
 
         Only the Session's SELECTION changes here; every other IMAP helper
         in this file expects INBOX, so the sweep's caller must restore INBOX
         afterwards (it does, mirroring _labels_search_in_mailboxes).
         """
-        def _try_select(name: str) -> bool:
+        limb_notes: list = []
+
+        def _try_select(name: str, note: bool = False) -> bool:
             try:
-                typ, _data = self.connection.select(name)
-                if typ == 'OK':
+                typ, data = self.connection.select(name)
+                if typ == "OK":
+                    if note:
+                        limb_notes.append(f"SELECT {name!r} succeeded")
                     return True
-            except _IMAP_ERRORS:
-                pass
-            return False
+                if note:
+                    limb_notes.append(f"SELECT {name!r} -> typ={typ!r}")
+                return False
+            except _IMAP_ERRORS as e:
+                if note:
+                    limb_notes.append(f"SELECT {name!r} raised {type(e).__name__}: {e}")
+                return False
 
         if self._all_mail_name:
             if _try_select(self._all_mail_name):
+                self._all_mail_discovery_error = None
+                self._all_mail_list_sample = None
                 return True
             # Cached name stopped resolving (renamed/deleted mailbox):
             # forget it and re-resolve below.
             self._all_mail_name = None
 
+        sample: Optional[str] = None
         try:
             typ, data = self.connection.list('""', '*')
-            if typ == 'OK' and data:
-                for entry in data:
-                    text = (entry.decode('utf-8', errors='ignore')
-                            if isinstance(entry, bytes) else str(entry))
-                    flags = text.split(')', 1)[0].lower()
-                    # Name = the LAST quoted token of the LIST line ("(\flags)
-                    # "delimiter" "name"). Don't split on whitespace — mailbox
-                    # names contain spaces ("All Mail") — and don't reuse the
-                    # split-on-'/' parsing from _supplement_mailbox_names,
-                    # which leaves the delimiter's closing quote+space glued
-                    # to the name (' "Gmail/…') on quoted-"/" servers.
-                    name_match = _LIST_QUOTED_NAME_PATTERN.search(text)
-                    name = name_match.group(1) if name_match else ""
-                    if '\\all' in flags and name:
-                        if _try_select(name):
-                            self._all_mail_name = name
-                            return True
+            if typ == "OK":
+                sample = self._list_sample(list(data) if data else [])
+                self._all_mail_list_sample = sample
+                if data:
+                    for entry in data:
+                        text = (entry.decode("utf-8", errors="ignore")
+                                if isinstance(entry, bytes) else str(entry))
+                        flags = text.split(")", 1)[0].lower()
+                        # Name = the LAST quoted token of the LIST line
+                        # ("(\flags) "delimiter" "name"). Don't split on
+                        # whitespace — mailbox names contain spaces ("All
+                        # Mail") — and don't reuse the split-on-'/' parsing
+                        # from _supplement_mailbox_names, which leaves the
+                        # delimiter's closing quote+space glued to the name
+                        # (' "Gmail/…') on quoted-"/" servers.
+                        name_match = _LIST_QUOTED_NAME_PATTERN.search(text)
+                        name = name_match.group(1) if name_match else ""
+                        if "\\all" in flags and name:
+                            if _try_select(name):
+                                limb_notes.append(f"LIST \\All attribute resolved {name!r}")
+                                self._all_mail_name = name
+                                self._all_mail_discovery_error = None
+                                self._all_mail_list_sample = None
+                                return True
+                            limb_notes.append(
+                                f"LIST found \\All on {name!r} but SELECT failed"
+                            )
+            else:
+                limb_notes.append(f"LIST returned typ={typ!r}")
         except _IMAP_ERRORS as e:
-            logger.info(f"Read sweep: IMAP LIST for All Mail discovery failed ({e}).")
+            limb_notes.append(f"LIST raised {type(e).__name__}: {e}")
+            if sample is None:
+                self._all_mail_list_sample = None
 
-        # Conventional Gmail name, but only trusted once a select succeeds —
-        # a non-Gmail server may have neither directory nor mailbox.
-        if _try_select(ALL_MAIL_FALLBACK_NAME):
-            self._all_mail_name = ALL_MAIL_FALLBACK_NAME
-            return True
+        # Literal fallbacks, each SELECT-verified before it may be cached.
+        # The Google Mail prefix covers accounts served under
+        # googlemail.com — the live-Gmail failure behind WI-103 follow-up 4.
+        for literal in ALL_MAIL_FALLBACK_NAMES:
+            if _try_select(literal, note=True):
+                self._all_mail_name = literal
+                self._all_mail_discovery_error = None
+                self._all_mail_list_sample = None
+                return True
 
+        self._all_mail_discovery_error = "; ".join(limb_notes)[:600]
         logger.warning(
             "Read sweep: no All Mail mailbox could be selected (LIST found no "
-            f"\\All mailbox and {ALL_MAIL_FALLBACK_NAME!r} unavailable); staying on INBOX."
+            "\\All mailbox; literal fallbacks %r unavailable); staying on INBOX. "
+            "LIST sample: %s",
+            list(ALL_MAIL_FALLBACK_NAMES), self._all_mail_list_sample or "<none>",
         )
         return False
 

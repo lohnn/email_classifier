@@ -589,7 +589,10 @@ def get_sweep_state():
     if not config.ENABLE_READ_SWEEP:
         reason = "disabled"
 
-    # Mailbox / search-mode state (read-only peeks at the client singleton)
+    # Mailbox / search-mode state (read-only peeks at the client singleton).
+    # Discovery diagnostics are strings on the real client; ONLY str values
+    # are surfaced so degraded/mock client shapes render as null, not as
+    # repr garbage (WI-103 follow-up 4).
     try:
         resolved_all_mail = getattr(imap_client.gmail_client, "_all_mail_name", None)
         last_search_mode = getattr(imap_client.gmail_client, "last_sweep_search_mode", None)
@@ -597,6 +600,16 @@ def get_sweep_state():
         resolved_all_mail = None
         last_search_mode = None
         logger.warning(f"imap_client state unavailable for sweep-state: {e}")
+
+    def _disc_value(attr_name):
+        try:
+            value = getattr(imap_client.gmail_client, attr_name, None)
+            return value if isinstance(value, str) else None
+        except Exception:
+            return None
+
+    discovery_error = _disc_value("_all_mail_discovery_error")
+    list_sample = _disc_value("_all_mail_list_sample")
 
     # Category source diagnostics — the root-cause surface for the
     # "no trained categories" skip (vocabulary source vs classifier's source)
@@ -643,6 +656,8 @@ def get_sweep_state():
             "resolved_all_mail": resolved_all_mail,
             "last_searched": snap.get("read_sweep_mailbox_last") or None,
             "last_search_mode": last_search_mode,
+            "discovery_error": discovery_error,
+            "list_sample": list_sample,
         },
         "last_cycle": {
             "at": snap.get("read_sweep_last_cycle_at") or None,
