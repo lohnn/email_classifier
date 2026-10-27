@@ -499,6 +499,15 @@ counters, the trained category list, and the category-source diagnostics
 or a parse error) — no journal greps required. Counters reset on process
 restart (same lifetime as the truncation counters).
 
+**Vocabulary durability:** the sweep's category source,
+`model/label_centroids.json`, is repo-tracked (gitignore exception via
+`model/*` + `!model/label_centroids.json`) while the rest of `model/` stays a
+GDrive-sync mirror target — so git delivery (`git pull`, and `git reset
+--hard` in the update wrapper) guarantees the artifact even if a bucket sync
+erases local-extra files, and future retrain PRs must refresh the tracked
+artifact together with the `build_label_centroids` output (same content,
+same path).
+
 **Safety rules:**
 
 - Emails already carrying a trained-category label are never candidates — the
