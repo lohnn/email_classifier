@@ -99,11 +99,23 @@ class FakeMailboxConn:
         )
 
     def select(self, name, *args, **kwargs):
-        self.select_calls.append(name)
-        self.timeline.append(("select", name))
-        if str(name) in self.failing_names:
+        """Mimic live Gmail's parser (WI-103 follow-up 7): a mailbox name
+        containing IMAP specials ([, ], spaces) is only acceptable as a
+        QUOTED string — a bare name gets 'BAD Could not parse command'."""
+        raw = name if isinstance(name, str) else str(name)
+        self.select_calls.append(raw)
+        self.timeline.append(("select", raw))
+        stripped = raw
+        if len(stripped) >= 2 and stripped.startswith('"') and stripped.endswith('"'):
+            stripped = stripped[1:-1]
+        has_specials = any(ch in stripped for ch in "[] ")
+        if has_specials and not (raw != stripped):  # bare (not quote-wrapped)
+            raise imaplib.IMAP4.error(
+                "SELECT command error: BAD [b'Could not parse command']"
+            )
+        if stripped in self.failing_names:
             return ("NO", [b"No such mailbox"])
-        if "All Mail" in str(name) or "[Google Mail]/" in str(name):
+        if "All Mail" in stripped or "[Google Mail]/" in stripped:
             self.mailbox = "ALL"
         else:
             self.mailbox = "INBOX"
@@ -193,9 +205,11 @@ def test_read_sweep_fetches_only_unlabeled_read_mail():
     assert [gid for gid, _msg_obj in result] == ["1004", "1001"]  # newest first
     # Server-side reduction: SEEN + NOT of the known labels
     assert conn.search_calls[-1] == 'SEEN NOT X-GM-LABELS "URGENT"'
-    # All Mail was selected BEFORE the search, INBOX restored afterwards
+    # All Mail was selected BEFORE the search, INBOX restored afterwards.
+    # The specials in the name force IMAP QUOTING on the wire (WI-103
+    # follow-up 7: bare name = 'BAD Could not parse command').
     assert conn.timeline == [
-        ("select", FakeMailboxConn.ALL_NAME),
+        ("select", '"[Gmail]/All Mail"'),
         ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
         ("select", "INBOX"),
     ]
@@ -219,9 +233,9 @@ def test_read_sweep_negation_rejected_falls_back_to_plain_seen():
     # First attempt used the negated criteria, then the fallback used plain SEEN
     assert conn.search_calls[0] == 'SEEN NOT X-GM-LABELS "URGENT"'
     assert conn.search_calls[1] == "SEEN"
-    # All Mail was selected before BOTH searches; INBOX restored at the end
+    # All Mail was selected (quoted) before BOTH searches; INBOX restored
     assert conn.timeline == [
-        ("select", FakeMailboxConn.ALL_NAME),
+        ("select", '"[Gmail]/All Mail"'),
         ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
         ("search", "SEEN"),
         ("select", "INBOX"),
@@ -302,7 +316,7 @@ def test_read_sweep_no_dangerous_server_response_is_tolerated():
     assert conn.search_calls == ['SEEN NOT X-GM-LABELS "URGENT"', "SEEN"]
     assert [gid for gid, _m in result] == ["7001"]
     # Selection still bracketed the whole cycle, including the fallback path
-    assert conn.timeline[0] == ("select", FakeMailboxConn.ALL_NAME)
+    assert conn.timeline[0] == ("select", '"[Gmail]/All Mail"')
     assert conn.timeline[-1] == ("select", "INBOX")
     assert sweep_client2.last_sweep_search_mode == "plain_seen"
 
@@ -335,7 +349,8 @@ def test_read_sweep_all_mail_discovered_via_list_special_use():
     original_select = conn.select
 
     def select_any(name, *args, **kwargs):
-        if name == localized_all:
+        stripped = name.strip('"') if isinstance(name, str) else str(name)
+        if stripped == localized_all:
             conn.select_calls.append(name)
             conn.timeline.append(("select", name))
             conn.mailbox = "ALL"
@@ -369,8 +384,8 @@ def test_read_sweep_all_mail_name_cached_across_cycles():
     assert conn.list_calls == list_calls_after_first == 1
     # Both cycles still selected All Mail and restored INBOX
     assert conn.select_calls == [
-        FakeMailboxConn.ALL_NAME, "INBOX",
-        FakeMailboxConn.ALL_NAME, "INBOX",
+        '"[Gmail]/All Mail"', "INBOX",
+        '"[Gmail]/All Mail"', "INBOX",
     ]
 
 
@@ -391,8 +406,8 @@ def test_read_sweep_discovers_google_mail_prefix_literal():
     assert client._all_mail_name == "[Google Mail]/All Mail"
     assert client._all_mail_discovery_error is None
     assert conn.timeline == [
-        ("select", "[Gmail]/All Mail"),
-        ("select", "[Google Mail]/All Mail"),
+        ("select", '"[Gmail]/All Mail"'),
+        ("select", '"[Google Mail]/All Mail"'),
         ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
         ("select", "INBOX"),
     ]
@@ -414,7 +429,8 @@ def test_read_sweep_attrs_resolve_localized_all_mail_name():
     original_select = conn.select
 
     def select_any(name, *args, **kwargs):
-        if name == localized_all:
+        stripped = name.strip('"') if isinstance(name, str) else str(name)
+        if stripped == localized_all:
             conn.select_calls.append(name)
             conn.timeline.append(("select", name))
             conn.mailbox = "ALL"
@@ -428,6 +444,47 @@ def test_read_sweep_attrs_resolve_localized_all_mail_name():
     assert [gid for gid, _m in result] == ["12101"]
     assert client._all_mail_name == localized_all
     assert client._all_mail_discovery_error is None
+
+
+def test_select_quoting_is_idempotent_for_cached_names():
+    """A cached name may carry a stale quote layer (an older version stored
+    the wire form): discovery re-quotes idempotently — exactly ONE quote
+    pair on the wire, cache keeps the logical (unquoted) name."""
+    conn = FakeMailboxConn(all_mail=[_msg("12401", True, [], "R")])
+    client = _client(conn)
+    client._all_mail_name = '"[Gmail]/All Mail"'  # stale quoted cache
+
+    result = client.fetch_read_unprocessed_emails(known_labels=["URGENT"])
+
+    assert [gid for gid, _m in result] == ["12401"]
+    assert conn.select_calls[0] == '"[Gmail]/All Mail"'   # one layer, not two
+    assert '""' not in conn.select_calls[0]
+    assert client._all_mail_name == "[Gmail]/All Mail"    # logical cache
+
+
+def test_select_failure_even_quoted_populates_bad_evidence():
+    """Even a quoted limb can fail (broken/misbaving server): the sweep
+    degrades to INBOX and discovery_error carries the exact BAD text —
+    the live-evidence shape from WI-103 follow-up 7."""
+    conn = FakeMailboxConn(all_mail=[_msg("12402", True, [], "R")])
+    client = _client(conn)
+
+    def always_bad(name, *args, **kwargs):
+        conn.select_calls.append(name)
+        conn.timeline.append(("select", name))
+        raise imaplib.IMAP4.error(
+            "SELECT command error: BAD [b'Could not parse command']"
+        )
+
+    conn.select = always_bad
+
+    # Degraded INBOX-scoped cycle (no INBOX candidates -> empty result)
+    assert client.fetch_read_unprocessed_emails(known_labels=["URGENT"]) == []
+    assert client._all_mail_name is None
+    assert client._all_mail_discovery_error is not None
+    assert "BAD [b'Could not parse command']" in client._all_mail_discovery_error
+    # The wire form was quoted even on the failing attempts
+    assert conn.select_calls[0] == '"[Gmail]/All Mail"'
 
 
 def test_read_sweep_no_all_mail_populates_discovery_diagnostics():
@@ -475,7 +532,7 @@ def test_read_sweep_falls_back_to_literal_all_mail_when_list_fails():
     assert [gid for gid, _m in result] == ["9101"]
     assert client._all_mail_name == FakeMailboxConn.ALL_NAME
     assert conn.timeline == [
-        ("select", FakeMailboxConn.ALL_NAME),
+        ("select", '"[Gmail]/All Mail"'),
         ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
         ("select", "INBOX"),
     ]
@@ -496,14 +553,14 @@ def test_read_sweep_no_all_mail_stays_on_inbox():
     # Sweep ran INBOX-scoped: the INBOX candidate was found and returned
     assert [gid for gid, _m in result] == ["9201"]
     assert client._all_mail_name is None
-    # Attempted BOTH literal fallbacks (Gmail + Google Mail prefixes) before
-    # giving up; never selected All Mail; restored INBOX
+    # Attempted BOTH literal fallbacks (Gmail + Google Mail prefixes, quoted
+    # on the wire) before giving up; never selected All Mail; restored INBOX
     assert conn.select_calls == [
-        FakeMailboxConn.ALL_NAME, "[Google Mail]/All Mail", "INBOX",
+        '"[Gmail]/All Mail"', '"[Google Mail]/All Mail"', "INBOX",
     ]
     assert conn.timeline == [
-        ("select", FakeMailboxConn.ALL_NAME),
-        ("select", "[Google Mail]/All Mail"),
+        ("select", '"[Gmail]/All Mail"'),
+        ("select", '"[Google Mail]/All Mail"'),
         ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
         ("select", "INBOX"),
     ]
