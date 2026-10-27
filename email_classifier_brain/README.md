@@ -387,6 +387,8 @@ INFERENCE ONLY — training (train.py/evaluate.py) stays on SetFit/ST.
 
 ## Google Drive — Model Storage
 
+> **Full retrain → ship → verify runbook:** see [RETRAIN-AND-DEPLOY.md](RETRAIN-AND-DEPLOY.md) — the LoRA/GGUF rollout, vocabulary-ownership rules (why model syncs exclude `label_centroids.json`), the drive.file bucket-view caveat, and the post-deploy verification battery.
+
 The trained model (~490 MB) is stored in Google Drive instead of Git. Use
 [rclone](https://rclone.org/) to sync:
 
