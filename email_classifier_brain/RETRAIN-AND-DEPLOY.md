@@ -3,8 +3,7 @@
 Operational runbook for the jarvis email-classifier deployment: how to retrain
 (train → centroids → artifacts), ship a new model (GGUF + vocabulary), and roll
 a code update onto the Pi — including the pitfalls that cost real debugging
-time in Oct 2026 (see WI-103, PRs #90–#96, and `dreams` artifacts I-214–I-218,
-W-138/W-139, SHADOW-034 in the HIVE archive).
+time in Oct 2026 (see PRs #90–#96).
 
 Audience: a future agent session, or a human, doing any of:
 (a) a LoRA/GGUF retrain + rollout, (b) a code deploy, (c) recovering a
@@ -20,7 +19,7 @@ misbehaving deployment.
 | systemd units | `email-classifier.service` (runs `run_service.sh`), `email-embedder.service` (static `llama-server`, `:8090`, loopback), `email-embedder-reload.path/.service` (GGUF-change reload) | installed by `bootstrap_llama_cpp.sh` with paths baked in — change all three together (see unit file NOTE) |
 | Trainer / dev box | this container (`/workspace/projects/email_classifier`) | has venv + full test suite; **no rclone**; `retrain.sh` needs a rclone-capable box |
 | User's Mac | rclone with `gdrive` remote (full Drive scope), web browser for OAuth | the only place that can (re)fill the model bucket |
-| HIVE coordinator | this workspace | keyless admin over Tailscale, clamped rclone remote, expiring-SSH access |
+| Deploy operator workstation | this workspace | keyless admin over Tailscale, clamped rclone remote, expiring-SSH access |
 
 Runtime env on the Pi (`.env`, not in repo): `EMBEDDER_BACKEND=llama_cpp`,
 `LLAMA_ENDPOINT=http://127.0.0.1:8090`, `LLAMA_TIMEOUT_SECONDS=180` (Pi A72
@@ -89,7 +88,8 @@ notes the llama-seam decision). Sequence for a fresh LoRA rollout:
 
 1. PR against `main` → merge (true merges were used for #90–#96; pull handles
    any shape).
-2. Trigger from a Tailscale-scoped box (the coordinator container qualifies):
+2. Trigger from a Tailscale-scoped box (a Tailscale-joined workstation
+   qualifies):
    ```
    curl -X POST 'http://100.79.150.106:8008/admin/trigger-update'
    ```
@@ -171,6 +171,6 @@ sweep-state shows new `centroids_entries` + `trained_categories` across the
 cycle → `/health` green → one classification sanity test.
 
 ---
-*Maintained by the HIVE coordinator & `email-brain-ml`. Sources: WI-103 arc
-(PRs #90–#96), lived diagnosis of three production faults, and the
-`dreams` artifacts I-214–I-218 / W-138 / W-139 / SNG-056.*
+*Maintained by the deploy operator & `email-brain-ml`. Sources: the
+read-mail backfill sweep arc (PRs #90–#96) and lived diagnosis of three
+production faults.*

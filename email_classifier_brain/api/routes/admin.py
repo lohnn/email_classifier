@@ -424,7 +424,7 @@ def install_model_artifact(request: Request, staged_name: str = Query(...,
     """
     Atomically move a previously staged+verified artifact into its ACTIVE
     location (GGUF → the llama.cpp model path; ST components → model/).
-    NO auto-restart, no auto-activation beyond the move — the human/coordinator
+    NO auto-restart, no auto-activation beyond the move — the human operator
     decides when to flip; the target service loads on its next restart.
     """
     peer = _require_trusted_peer(request)
@@ -577,7 +577,7 @@ def get_update_errors():
 @router.get("/admin/sweep-state", dependencies=[Depends(get_api_key)])
 def get_sweep_state():
     """
-    WI-103 debug endpoint: the read-mail sweep's complete self-diagnosis —
+    Read-sweep debug endpoint: the read-mail sweep's complete self-diagnosis —
     everything needed to answer "why is/ isn't the sweep running" remotely,
     without journal greps. Always returns 200 with best-effort data; every
     read is individually guarded so a broken diagnostic source renders as
@@ -592,7 +592,7 @@ def get_sweep_state():
     # Mailbox / search-mode state (read-only peeks at the client singleton).
     # Discovery diagnostics are strings on the real client; ONLY str values
     # are surfaced so degraded/mock client shapes render as null, not as
-    # repr garbage (WI-103 follow-up 4).
+    # repr garbage on non-str shapes.
     try:
         resolved_all_mail = getattr(imap_client.gmail_client, "_all_mail_name", None)
         last_search_mode = getattr(imap_client.gmail_client, "last_sweep_search_mode", None)

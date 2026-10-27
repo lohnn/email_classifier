@@ -1,4 +1,4 @@
-"""WI-103 — read-mail backfill sweep.
+"""Read-mail backfill sweep.
 
 Hard gating: read-email work may only run when the unread (UNSEEN) queue is
 fully drained. Coverage here:
@@ -99,7 +99,7 @@ class FakeMailboxConn:
         )
 
     def select(self, name, *args, **kwargs):
-        """Mimic live Gmail's parser (WI-103 follow-up 7): a mailbox name
+        """Mimic live Gmail's parser (quoting round): a mailbox name
         containing IMAP specials ([, ], spaces) is only acceptable as a
         QUOTED string — a bare name gets 'BAD Could not parse command'."""
         raw = name if isinstance(name, str) else str(name)
@@ -206,8 +206,8 @@ def test_read_sweep_fetches_only_unlabeled_read_mail():
     # Server-side reduction: SEEN + NOT of the known labels
     assert conn.search_calls[-1] == 'SEEN NOT X-GM-LABELS "URGENT"'
     # All Mail was selected BEFORE the search, INBOX restored afterwards.
-    # The specials in the name force IMAP QUOTING on the wire (WI-103
-    # follow-up 7: bare name = 'BAD Could not parse command').
+    # The specials in the name force IMAP QUOTING on the wire (a bare
+    # name = 'BAD Could not parse command').
     assert conn.timeline == [
         ("select", '"[Gmail]/All Mail"'),
         ("search", 'SEEN NOT X-GM-LABELS "URGENT"'),
@@ -390,7 +390,7 @@ def test_read_sweep_all_mail_name_cached_across_cycles():
 
 
 def test_read_sweep_discovers_google_mail_prefix_literal():
-    """Live-Gmail shape behind WI-103 follow-up 4: LIST carries no \All
+    """Live-Gmail shape behind the All Mail discovery round: LIST carries no \All
     attribute, the English '[Gmail]/All Mail' literal is unselectable, and
     the account's legacy prefix '[Google Mail]/All Mail' resolves."""
     conn = FakeMailboxConn(
@@ -465,7 +465,7 @@ def test_select_quoting_is_idempotent_for_cached_names():
 def test_select_failure_even_quoted_populates_bad_evidence():
     """Even a quoted limb can fail (broken/misbaving server): the sweep
     degrades to INBOX and discovery_error carries the exact BAD text —
-    the live-evidence shape from WI-103 follow-up 7."""
+    the live-evidence shape from the quoting round."""
     conn = FakeMailboxConn(all_mail=[_msg("12402", True, [], "R")])
     client = _client(conn)
 
@@ -859,7 +859,7 @@ def test_sweep_respects_job_cancellation(db, sweep_config):
 # ---------------------------------------------------------------------------
 
 def test_sweep_config_default_enabled():
-    """WI-103 follow-up: the sweep ships ENABLED by default (gradual pacing
+    """The sweep ships ENABLED by default (gradual pacing
     unchanged); disabling is the explicit opt-out."""
     assert config.ENABLE_READ_SWEEP is True
     assert config.READ_SWEEP_BATCH_SIZE == 5
@@ -893,7 +893,7 @@ def test_stats_surfaces_read_sweep_counters(db, sweep_config):
     assert data["read_sweep_gated_total"] == 1
     assert data["read_sweep_candidates_total"] == 1
     assert data["read_sweep_labeled_total"] == 1
-    # WI-103 debug round: additive self-diagnosis fields. Run 2's sweep
+    # debug round: additive self-diagnosis fields. Run 2's sweep
     # fetch searched INBOX (client mock has no All Mail resolution).
     assert data["read_sweep_mailbox_last"] == "INBOX"
     assert data["read_sweep_last_skip_reason"] == "none"
@@ -904,7 +904,7 @@ def test_stats_surfaces_read_sweep_counters(db, sweep_config):
 
 
 # ---------------------------------------------------------------------------
-# WI-103 debug round — root cause: category source must be read LIVE
+# Debug round — root cause: category source must be read LIVE
 # ---------------------------------------------------------------------------
 
 def test_sweep_reads_categories_live_at_sweep_time(db, sweep_config):
@@ -1010,7 +1010,7 @@ def test_runs_records_mailbox_last(db, sweep_config):
 
 
 # ---------------------------------------------------------------------------
-# WI-103 debug round — GET /admin/sweep-state (coordinator's remote-debug)
+# Debug round — GET /admin/sweep-state (ops remote-debug)
 # ---------------------------------------------------------------------------
 
 def test_sweep_state_endpoint_full_payload(db, sweep_config, tmp_path):
@@ -1042,7 +1042,7 @@ def test_sweep_state_endpoint_full_payload(db, sweep_config, tmp_path):
          return_value=["URGENT", "FOCUS"]):
         payload = admin.get_sweep_state()
 
-    # Must be JSON-safe for the coordinator's remote read
+    # Must be JSON-safe for the operator's remote read
     _json.dumps(payload)
 
     assert payload["enabled"] is True

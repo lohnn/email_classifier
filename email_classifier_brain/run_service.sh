@@ -63,7 +63,7 @@ if [ -f "$UPDATE_MARKER" ]; then
 
     # 2. Sync latest model from Google Drive (non-fatal).
     #    --exclude label_centroids.json: the sweep vocabulary is GIT-OWNED
-    #    (WI-103) — the Pi's rclone grant is drive.file-scoped and sync
+    #    (read-mail backfill sweep) — the Pi's rclone grant is drive.file-scoped and sync
     #    mirrors, so an unchecked sync erases the repo-tracked artifact.
     echo "Syncing model from Google Drive..."
     if $RCLONE_CMD sync "$GDRIVE_REMOTE:$GDRIVE_MODEL_PATH/" "$MODEL_DIR/" --exclude label_centroids.json; then
@@ -145,7 +145,7 @@ mkdir -p "$STORAGE_DIR"
 # Ensure model directory exists and has content
 if [ ! -f "${MODEL_DIR}/config.json" ]; then
     echo "Model config.json missing. Syncing model from Google Drive..."
-    # --exclude label_centroids.json: same WI-103 protection as the update
+    # --exclude label_centroids.json: same sweep-artifact protection as the update
     # sync — the drive.file-scoped mirror must not erase the git-owned
     # sweep vocabulary (this repair path re-runs on every startup while
     # config.json stays invisible to the Pi's grant).

@@ -127,7 +127,7 @@ def load_centroids(path: str | None = None) -> dict:
     """Load the shipped per-class centroids (with provenance + gate
     calibration). Cached after first load.
 
-    An empty-but-valid artifact parses to {} (WI-103 debug round: the
+    An empty-but-valid artifact parses to {} (debug round: the
     previous `next(iter(...))` crashed with StopIteration on exactly that
     input — an empty vocabulary must resolve to [] + the loud
     get_available_categories() warning, not to a mysterious crash)."""

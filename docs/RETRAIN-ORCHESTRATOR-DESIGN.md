@@ -17,7 +17,7 @@ pipeline for the email classifier that:
 - tracks state across restarts (a ledger, not a log),
 - runs the GPU-heavy training on the Mac host with **native Metal (MPS)** speed,
 - ships results (GGUF + centroids → Pi; vocabulary → repo PR) using the exact
-  mechanisms proven in the WI-103 arc,
+  mechanisms proven in the read-mail backfill arc (PRs #90–#96),
 - returns to idle and never requires a human except to approve the PR it opens.
 
 **Non-goals:** distributed/multi-host training; CUDA/NVIDIA (none present);
@@ -167,9 +167,11 @@ loss = re-derive from Pi + git, both self-healing).
 - Container holds: the compose stack, an expiring SSH **private key** for
   studio (authorized_keys `expiry-time` line, same pattern as jarvis access),
   and a read-only view of nothing else. No ADMIN_API_KEY needed anywhere
-  (Tailscale CGNAT bypass carries it — same as the coordinator).
+  (Tailscale CGNAT bypass carries it — same as the deploy operator's
+  workstation).
 - Host runner: plain script, no sudo, only touches its own dirs + the data repo.
-- Pi: bounded by the same trust we already granted the coordinator (drive.file
+- Pi: bounded by the same trust we already granted the deploy operator's
+  workstation (drive.file
   bucket posture stays untouched; nothing requires widening it).
 - Revocation = delete one authorized_keys line (host) — mirrored from the
   Proven Pi pattern.

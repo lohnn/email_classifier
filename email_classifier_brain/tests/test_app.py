@@ -75,7 +75,7 @@ def test_get_stats_empty(client):
     assert data["model_inputs_truncated"] >= 0
 
 def test_stats_surfaces_truncation_prevalence(client):
-    """GET /stats exposes body-truncation counts as an observable metric (W-022)."""
+    """GET /stats exposes body-truncation counts as an observable metric."""
     import config
     config.truncation_stats.reset()
     try:

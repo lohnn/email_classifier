@@ -52,7 +52,7 @@ except ValueError:
     RECLASSIFY_INTERVAL_HOURS = RECHECK_INTERVAL_HOURS
 
 # ---------------------------------------------------------------------------
-# Read-mail backfill sweep (WI-103)
+# Read-mail backfill sweep
 # ---------------------------------------------------------------------------
 # Once the unread (UNSEEN) queue is fully drained, the classifier may label
 # older already-read (\Seen) mail that was never classified — gradually, a
@@ -233,11 +233,11 @@ truncation_stats = _TruncationStats()
 
 
 class _SweepStats:
-    """Process-global counters for the read-mail backfill sweep (WI-103).
+    """Process-global counters for the read-mail backfill sweep.
 
-    Observable signal, per the W-022 rule that a prevalence count that only
-    lands in a log file is invisible: gated/candidate/labelled counts surface
-    via GET /stats. Thread-safe for the same reason as _TruncationStats (the
+    Observable signal — a prevalence count that only lands in a log file is
+    invisible, so it must surface somewhere queryable: these
+    gated/candidate/labelled counts surface via GET /stats. Thread-safe for the same reason as _TruncationStats (the
     classification job runs on the JobQueue worker thread while /stats is
     served from the main thread).
     """
@@ -264,7 +264,7 @@ class _SweepStats:
                skipped_no_categories: bool = False) -> None:
         """Record sweep events. `attempt=True` marks one cycle that reached
         the gate probe (an empty-vocabulary cycle never does — it is its own
-        counter below, WI-103 debug round); gated/candidates/labeled/
+        counter below); gated/candidates/labeled/
         skipped_no_categories are the outcome deltas of a cycle."""
         with self._lock:
             if attempt:

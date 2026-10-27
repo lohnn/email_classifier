@@ -116,10 +116,10 @@ def get_stats(
 
     Also returns body-truncation prevalence (how many model inputs built in
     this process had their body capped to fit the E5 context window,
-    config.MAX_BODY_CHARS) and the read-mail sweep counters (WI-103:
+    config.MAX_BODY_CHARS) and the read-mail sweep counters (
     attempts, gate-blocks, fetched candidates, labelled emails). These are
     the observable signals for the silent accuracy leak and the sweep's
-    gating behaviour, respectively (W-022).
+    gating behaviour), respectively.
     """
     stats = database.get_stats(start_time, end_time)
     truncation = config.truncation_stats.snapshot()

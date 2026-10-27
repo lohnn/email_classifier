@@ -23,13 +23,13 @@ class StatsResponse(BaseModel):
     stats: dict
     model_inputs_total: int = 0
     model_inputs_truncated: int = 0
-    # Read-mail sweep prevalence (WI-103): attempts / gate-blocks / fetched
-    # candidates / labelled emails, per process lifetime (W-022 observability).
+    # Read-mail sweep prevalence: attempts / gate-blocks / fetched
+    # candidates / labelled emails, per process lifetime (observability).
     read_sweep_attempts_total: int = 0
     read_sweep_gated_total: int = 0
     read_sweep_candidates_total: int = 0
     read_sweep_labeled_total: int = 0
-    # WI-103 debug round — self-diagnosis surface:
+    # Debug-round addition — self-diagnosis surface:
     read_sweep_mailbox_last: str = ""          # mailbox actually searched by the last sweep fetch
     read_sweep_last_skip_reason: str = "none"  # none|no_trained_categories|gated_unread|disabled
     read_sweep_skipped_no_categories_total: int = 0

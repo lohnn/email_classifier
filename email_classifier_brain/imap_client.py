@@ -28,7 +28,7 @@ LABEL_TOKEN_PATTERN = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"|([^"\s()]+)')
 _IMAP_ERRORS = (imaplib.IMAP4.error, OSError)
 
 # Size cap for the read sweep's composed `SEEN NOT X-GM-LABELS ...` SEARCH
-# criteria (WI-103). With dozens of trained categories the line stays well
+# criteria. With dozens of trained categories the line stays well
 # under this; crossing it means an absurd label vocabulary and we fall back
 # to a plain SEEN scan with client-side filtering instead of shipping a
 # giant command the server may reject anyway.
@@ -39,7 +39,7 @@ MAX_NEGATED_SEARCH_CHARS = 4000
 # trusted only after a successful SELECT; a server where none resolves
 # (non-Gmail, or unexpected naming) means the sweep warns (with the raw
 # LIST sample captured for /admin/sweep-state) and runs INBOX-scoped for
-# that cycle. Live Gmail quirk (WI-103 follow-up 4): accounts served under
+# that cycle. Live Gmail quirk (discovery round): accounts served under
 # the googlemail.com domain expose '[Google Mail]/...' prefixes instead of
 # '[Gmail]/...'.
 ALL_MAIL_FALLBACK_NAME = "[Gmail]/All Mail"
@@ -60,7 +60,7 @@ def _imap_quote_mailbox(name: str) -> str:
     imaplib does NOT quote SELECT arguments: a mailbox name containing IMAP
     specials ([, ], the hierarchy character, spaces) must be sent as a
     quoted string, else the server answers 'BAD Could not parse command'.
-    Live proof (WI-103 follow-up 7): Gmail's real 'SELECT [Gmail]/All Mail'
+    Live proof (quoting round): Gmail's real 'SELECT [Gmail]/All Mail'
     — bare — is rejected exactly that way, while the quoted form works.
 
     Idempotent: one surrounding quote pair is stripped if present, then the
@@ -90,7 +90,7 @@ class GmailClient:
         self.user = os.getenv("IMAP_USER") or (os.getenv("MY_EMAIL") or "").split(",")[0].strip()
         self.password = os.getenv("IMAP_PASSWORD")
         self.connection = None
-        # Resolved All Mail mailbox name for the read sweep (WI-103); None
+        # Resolved All Mail mailbox name for the read sweep; None
         # until a LIST-\All or a verified conventional-name SELECT resolves it.
         self._all_mail_name: Optional[str] = None
         # How the last sweep candidate search ran (diagnostics for
@@ -98,7 +98,7 @@ class GmailClient:
         # X-GM-LABELS worked; "plain_seen" = fallback scan; None = no sweep
         # fetch ran in this process yet.
         self.last_sweep_search_mode: Optional[str] = None
-        # All Mail discovery diagnostics (WI-103 follow-up 4): on discovery
+        # All Mail discovery diagnostics (discovery round): on discovery
         # failure they carry the raw LIST response sample and the exact
         # per-limb SELECT results so live-vs-mock deltas self-report via
         # GET /admin/sweep-state. Both cleared on successful resolution.
@@ -198,7 +198,7 @@ class GmailClient:
     ) -> List[Tuple[bytes, str]]:
         """
         Phase-1 metadata scan shared by the unread fetch and the read-mail
-        sweep (WI-103): batched X-GM-LABELS + X-GM-MSGID fetches, no bodies.
+        sweep: batched X-GM-LABELS + X-GM-MSGID fetches, no bodies.
 
         Walks `email_ids` newest-first and returns [(seq_id, gmail_id)] for
         emails that carry NONE of `known_labels_set` and are NOT in
@@ -327,7 +327,7 @@ class GmailClient:
         known_labels — i.e. the unread queue still holds unprocessed mail.
 
         Metadata-only (no body download) and early-stopping. This is the
-        hard-gate probe for the read-mail sweep (WI-103): the sweep may only
+        hard-gate probe for the read-mail sweep: the sweep may only
         start when this returns False. Any probe failure returns True —
         fail closed: never sweep read mail while the unread state is unknown.
         """
@@ -398,7 +398,7 @@ class GmailClient:
 
     def _select_all_mail(self) -> bool:
         """
-        Select the account's All Mail mailbox for the read sweep (WI-103:
+        Select the account's All Mail mailbox for the read sweep (
         the backlog is archived history, which is invisible from INBOX).
 
         Resolution order (resolved name is cached on the client instance):
@@ -424,7 +424,7 @@ class GmailClient:
 
         def _try_select(name: str, note: bool = False) -> bool:
             # Wire form is always the QUOTED mailbox string — live Gmail
-            # BADs the bare special-char name (WI-103 follow-up 7).
+            # BADs the bare special-char name (quoting round).
             wire_name = _imap_quote_mailbox(name)
             try:
                 typ, data = self.connection.select(wire_name)
@@ -494,7 +494,7 @@ class GmailClient:
 
         # Literal fallbacks, each SELECT-verified before it may be cached.
         # The Google Mail prefix covers accounts served under
-        # googlemail.com — the live-Gmail failure behind WI-103 follow-up 4.
+        # googlemail.com — the live-Gmail failure behind the discovery round.
         for literal in ALL_MAIL_FALLBACK_NAMES:
             if _try_select(literal, note=True):
                 self._all_mail_name = literal
@@ -521,7 +521,7 @@ class GmailClient:
         Fetch READ (\\Seen) emails that do not carry any of the known_labels
         and are not in skip_ids. Returns [(gmail_id, msg)], newest first.
 
-        SCOPE (WI-103 follow-up): the sweep runs in the account's All Mail
+        SCOPE: the sweep runs in the account's All Mail
         mailbox — archived read history is the actual backlog and is
         invisible from INBOX. The UNSEEN phase and the
         has_unprocessed_unseen_emails() hard gate remain INBOX-scoped:
