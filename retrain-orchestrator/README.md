@@ -67,7 +67,9 @@ Everything the app writes sits in the sandbox container dir:
     └── orchestrator.log    # the log that "Open log" opens
 ```
 
-- **Erase all data…** empties exactly that directory (ask-then-wipe).
+- **Erase all data…** empties exactly that directory (ask-then-wipe; the
+  confirm dialog shows the resolved path and "N file(s) / X byte(s) would
+  be removed", and fresh defaults are rewritten after the wipe).
 - **Uninstall** = drag the app to Trash; delete the container dir above if
   you want zero residue. The login-item registration dissolves when the
   app is removed (macOS cleans orphaned entries; nothing else is global —
@@ -76,13 +78,31 @@ Everything the app writes sits in the sandbox container dir:
   outbound-network client only (P2's pre-flight `/health` and mirror POST
   need it). No file grants beyond the container.
 
+### If the data dir looks empty (diagnostic of record, 2026-10-28)
+
+The app writes `state.json` + `orchestrator.log` **unconditionally at every
+launch** — an empty data dir after a launch is NOT expected and means the
+app is writing elsewhere (most likely the ad-hoc signature embedded no
+sandbox entitlements, so the app runs unsandboxed and lands in
+`~/Library/Application Support/RetrainOrchestrator/`). Capture these facts
+and send them back:
+
+```bash
+ls -la "$HOME/Library/Containers/com.lohnn.retrain-orchestrator/Data/Library/Application Support/RetrainOrchestrator/" 2>&1
+ls -la "$HOME/Library/Application Support/RetrainOrchestrator/" 2>&1
+find "$HOME/Library/Containers/com.lohnn.retrain-orchestrator" -type f 2>/dev/null | head -20
+codesign -d --entitlements - /Applications/RetrainOrchestrator.app 2>&1
+```
+
 ## Checklist to verify P1 (paste results back)
 
 1. App launches, menu bar only.
 2. Menu contains Run now / Settings… / Open log / Erase all data… / Quit.
 3. Settings: change threshold to 42 → Save → Quit → relaunch → still 42.
 4. Open log opens a readable `orchestrator.log` inside the container dir.
-5. Erase all data → confirm → `state.json` + log gone; fresh state written.
+5. Erase all data → confirm → wipe count in the dialog/log matches; fresh
+   default `state.json` rewritten. (Precondition: two expected files exist
+   beforehand — see "If the data dir looks empty" above if not.)
 6. "Run now" writes a trigger-policy evaluation line to the log (and, if
    notifications are allowed, posts the skip/fire verdict).
 7. Exit code and paste of any build errors from `./build_app.sh`.

@@ -148,9 +148,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     @objc private func eraseAllData(_ sender: Any?) {
+        let pre = Erase.inventory(directory: ledger.directory)
         let alert = NSAlert()
         alert.messageText = "Erase all data?"
-        alert.informativeText = "This empties the app's sandboxed data directory (state.json, logs, everything). Settings reset to defaults. The login-item toggle is not affected."
+        alert.informativeText = """
+            This empties the app's sandboxed data directory:
+            \(ledger.directory.path)
+
+            \(pre.files) file(s), \(pre.bytes) byte(s) would be removed; fresh defaults will be rewritten afterwards. The login-item toggle is not affected.
+            """
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Erase")
         alert.addButton(withTitle: "Cancel")
@@ -161,7 +167,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         do {
             let n = try Erase.wipe(directory: ledger.directory)
-            state = ledger.load()  // fresh defaults, persisted again
+            // The dialog promised "fresh defaults will be rewritten" — make
+            // that an actual write (update, not load: load alone never
+            // persists anything).
+            state = ledger.update { _ in }
             runLog.warning("Erase all data: wiped \(n) item(s) in \(ledger.directory.path); fresh state created")
             notifier.postAlways(
                 title: "Erase complete",

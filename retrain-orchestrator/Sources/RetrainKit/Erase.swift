@@ -24,4 +24,29 @@ public enum Erase {
         }
         return deleted
     }
+
+    /// What a wipe WOULD remove: recursively counted files + total bytes.
+    /// Shown in the Erase confirmation dialog so the operator always sees
+    /// the resolved target and the real before-state (acceptance finding
+    /// 2026-10-28: "no data in the specified folder to begin with" — the
+    /// dialog must name exactly what it would touch).
+    public static func inventory(directory: URL) -> (files: Int, bytes: Int64) {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+            options: []
+        ) else {
+            return (0, 0)
+        }
+        var files = 0
+        var bytes: Int64 = 0
+        for case let url as URL in enumerator {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+            if values?.isDirectory == true { continue }
+            files += 1
+            bytes += Int64(values?.fileSize ?? 0)
+        }
+        return (files, bytes)
+    }
 }
