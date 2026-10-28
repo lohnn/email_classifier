@@ -1,30 +1,37 @@
-# Design — Retraining Orchestrator (split-brain: container clock, Mac GPU)
+# Design — Native Retraining App + Status Mirror (v2)
 
-**Status:** PROPOSAL — no build started. Approve → implement per §9.
+**Status:** PROPOSAL v2 — decisions locked in a Q&A with the operator on
+2026-10-27/28 (§9 Decision log). No build started. **v2 replaces the
+split-brain container design entirely**: the orchestrator is a native,
+sandboxed macOS menu-bar application ("the app").
+
 **Companion doc:** [RETRAIN-AND-DEPLOY.md](../email_classifier_brain/RETRAIN-AND-DEPLOY.md)
-**Origin:** user wish — *"a durable and transferable method that I just do
-`docker compose up`, and then it keeps track of time for automatic retraining
-and runs the flow"* — plus the 2026-10-27 platform-constraint analysis.
+**Origin:** the operator's wish for a durable, transferable, hands-off
+retraining loop — iterated v1 (docker compose split-brain) →
+operator pivot to a native always-on app.
 
 ---
 
 ## 1. Goal
 
-One command (`docker compose up -d`) starts a permanently-running retraining
-pipeline for the email classifier that:
+A native macOS app in `/Applications` that, once running (optionally
+"start with the system"), operates the full email-classifier retraining
+pipeline automatically:
 
-- keeps its own clock (schedule + retrain-worthiness triggers),
-- tracks state across restarts (a ledger, not a log),
-- runs the GPU-heavy training on the Mac host with **native Metal (MPS)** speed,
-- ships results (GGUF + centroids → Pi; vocabulary → repo PR) using the exact
-  mechanisms proven in the read-mail backfill arc (PRs #90–#96),
-- returns to idle and never requires a human except to approve the PR it opens.
+- keeps its own clock and trigger policy (§4),
+- trains locally with the Mac's **MPS/Metal** GPU (no container can do this —
+  platform constraint of record, see §2),
+- ships results to the classifier service **and mirrors them into the GDrive
+  model store** so no trainer-side rclone/sync setup is ever needed (§7),
+- reports everything: native notifications + log + a **status mirror** on the
+  classifier so any future session (or human) can ask *"what's the status of
+  the last retraining?"* and get time + status over the network (§6).
 
 **Non-goals:** distributed/multi-host training; CUDA/NVIDIA (none present);
-auto-merge of the retrain PR (human review stays); touch the classifier's
-runtime data (`storage/`) — read-only awareness.
+human review gates (operator chose **fully automatic**, §9); touching the
+classifier's runtime data (`storage/`) — read-only awareness.
 
-## 2. Platform constraint (why split-brain)
+## 2. Platform constraint (why native)
 
 GPU access from Linux containers on **macOS is impossible in 2026, on both
 runtimes**: Docker Desktop's Linux VM is blind to Metal (Hypervisor.framework
@@ -34,164 +41,149 @@ open May 2026; earlier [discussion #62](https://github.com/apple/container/discu
 Mac-native PyTorch acceleration is MPS, host-side only
 ([Apple: Accelerated PyTorch on Mac](https://developer.apple.com/metal/pytorch/)).
 
-Therefore: **everything except the GPU-touching step lives in the container;
-the GPU step runs natively on the Mac host** and is bridged over SSH. This is
-the same split the Pi already embodies (orchestrator brain + remote actuator)
-and it reuses the proven expiring-key circulation pattern.
+A sandboxed menu-bar app gets the GPU the honest way and dissolves the
+container/host bridge completely. The GPU steps are themselves Metal-backed:
+`train.py` runs on PyTorch **MPS**; the centroid builder embeds through a
+local `llama-server` whose llama.cpp build uses **Metal** by default on
+Apple Silicon.
 
-The host GPU step is itself Metal-accelerated: `llama.cpp` on Apple Silicon
-uses Metal by default (brew install), so both `train.py` (PyTorch MPS) and the
-centroid embedding pass run on the GPU.
+## 3. The app contract
 
-## 3. Architecture
+| Property | Behavior |
+|---|---|
+| Install | drag `.app` into `/Applications`; first run bootstraps its sandboxed runtime (embedded python runtime + torch MPS build, portable `llama-server` binary, data-repo clone) **inside `~/Library/Containers/<app-id>/`** |
+| Always running | menu-bar app (no dock icon by default); **"Start with the system"** toggle uses standard login-item services; runs headless (no screen attached is fine — status is queryable over the network, notifications arrive whenever a screen is) |
+| Status bar | icon with state (idle / health-checking / training / shipping / last-run time); menu: *Run now*, *Settings…*, *Open log*, *Erase all data…*, *Quit* |
+| Settings window | trigger threshold, weekly-cadence toggle + interval, autonomy mode, notification categories — everything §4/§6 promises, operator-editable **as the classifier matures** (explicit requirement) |
+| Uninstall | drag `.app` to Trash; the app is **sandboxed**, so its footprint is the container dir `~/Library/Containers/<app-id>/`; **"Erase all data…"** performs the guaranteed wipe. No global pollution: no `/usr/local`, no brew dependency (the `llama-server` binary downloads into the container dir) |
+| GPU | PyTorch **MPS** for training; Metal `llama-server` for embedding/centroids; device log line at every step (`mps` verified) |
 
-```
-┌─────────────────────────────── Mac (studio) ───────────────────────────────┐
-│  ┌──────────────────────────────┐     ┌─────────────────────────────────┐  │
-│  │ orchestrator container       │     │ host (native macOS, MPS/Metal)  │  │
-│  │ (docker compose)             │     │                                 │  │
-│  │  • clock / trigger policy    │ SSH │  retrain-runner.sh:             │  │
-│  │  • ledger (state.json)       ├────►│   pull data repo                │  │
-│  │  • Pi-side verify + ship     │ key │   train.py  (PyTorch MPS)       │  │
-│  │  • HTTP → Pi (keyless,.CG)   │     │   llama-server (local, Metal)   │  │
-│  │  • artifact dir (bind mount) │◄────┤   build_label_centroids.py      │  │
-│  └──────────────┬───────────────┘mount│   → artifacts + manifest        │  │
-│                 │                    └─────────────────────────────────┘  │
-│        bind dir: ~/jarvis-orchestrator/{state,artifacts,logs}               │
-└──────────────┬──────────────────────────────────────────────────────────────┘
-               │ Tailscale (trusted CGNAT → keyless admin)
-        ┌──────▼──────────────┐
-        │ Pi (jarvis :8008)   │  upload/install GGUF → trigger-update → sweep-state
-        └─────────────────────┘
-```
+## 4. Trigger policy (decisions locked)
 
-**The bind-mount channel** is the honest bridge: on macOS the `artifacts/`
-directory is a real Mac folder; the host runner drops artifacts + a
-`manifest.json` (sha256s) into it; the container picks them up — no network
-copy between halves on the same machine. If the orchestrator later runs on a
-*non*-Mac Docker host, the SSH/scp flag replaces the mount (.flag in config).
+The app re-runs the pipeline when:
 
-## 4. Components (proposed tree)
+1. **≥ `corrections_threshold` (default 10, Settings-editable)** new confirmed
+   corrections since `ledger.last_train.count`, **OR**
+2. **weekly cadence**: 7 days since `last_train` **AND ≥ 1 new confirmed
+   correction** (a week with fresh data must not be ignored).
+
+**Zero-corrections rule (operator-set):** if no new confirmed corrections
+exist at all, the pipeline **does not run** — instead it pushes a
+`skipped: no new training data` event to the classifier's status mirror (§6)
+and waits for the next cycle. All values live in the **Settings window** (the
+operator wants to re-tune them as the classifier matures).
+
+## 5. Pipeline (per retrain run)
 
 ```
-retrain-orchestrator/
-  docker-compose.yml          # one service, bind mounts, restart: unless-stopped
-  Dockerfile                  # python:3.13-slim + openssh-client + deps
-  orchestrator/
-    config.py                 # env + config.yaml: schedule, thresholds, paths, SSH
-    trigger.py                # retrain-worthiness policy (§6)
-    ledger.py                 # state.json read/append (atomic write + fsync)
-    runner_bridge.py          # SSH exec to host runner (expiring key aware)
-    shipper.py                # sha-verify artifacts → Pi upload/install → PR body
-    verify.py                 # Pi sweep-state + /health + update-log SHA checks
-    main.py                   # APScheduler loop + POST /run-now + GET /status
-  tests/                      # pytest: trigger policy, ledger, shipper fakes
-mac-runner/
-  retrain-runner.sh           # the ONLY host-executed script (§5)
-  bootstrap.sh                # one-time: host venv, rclone config check, llama.cpp
-                              #   (brew install llama.cpp), data-repo clone check
-  launchd/                    # optional no-Docker variant (template plist)
-docs/RETRAIN-ORCHESTRATOR-DESIGN.md   # this file
+pre-flight  GET {pi}/health         → unreachable ⇒ push "skipped: classifier
+                                      unreachable" event, exit clean (retry
+                                      on the next trigger; no retry storm)
+1. pull     data repo (git, HTTPS + Keychain-stored PAT)
+2. train    venv python train.py             (PyTorch MPS; device logged)
+3. embed    llama-server (local, Metal) on the NEW merged GGUF
+            → build_label_centroids.py       (validates FINDINGS §16 or aborts)
+4. ship GGUF     sha-pinned POST /admin/upload-model-artifact → install
+                 (the GGUF merge step itself is the known P4 automation gap —
+                 RETRAIN-AND-DEPLOY.md §3)
+5. ship vocab    open centroids PR (repo-tracked path) via Keychain PAT
+6. deploy        POST /admin/trigger-update  → verify end-state
+                 (journal SHA, sweep-state across a cycle)
+7. mirror        POST /admin/retrain-events  → event + ledger snapshot (§6)
+   notify        native macOS notifications per category + log line
 ```
 
-Deps (container): `apscheduler`, `httpx`, `pyyaml`, `paramiko` **or** system
-ssh (prefer system ssh — expiring-key UX identical to the Pi flow). No secrets
-in the image; everything via mounted config + key file.
+**Autonomy: fully automatic (operator decision).** All seven steps run
+unattended; every step has a defined failure path (abort the pipeline — never
+deploy a half-state — notify + mirror the failure). The Settings dial
+(`ask-before-run` → `auto-train + gated ship` → `full automatic`) is kept for
+reversibility, defaulting to `full automatic`.
 
-## 5. The host runner (the GPU step — single file, single venv)
+Pre-flight detail: if the classifier is unreachable, the run is skipped (not
+deferred-by-retry-storm) — the skip itself is mirrored so the operator can see
+*why* nothing ran. A training run while the classifier is down would produce
+artifacts nobody can accept; the health check makes "the target must exist"
+an explicit precondition.
 
-`retrain-runner.sh` executes ONLY on the Mac host:
+## 6. Observability (decisions locked)
 
-1. `git -C ../email_classifier_data pull` (training data).
-2. `venv/bin/python email_classifier_brain/train.py` — PyTorch MPS
-   (`device = mps if torch.backends.mps.is_available() else cpu`; log device).
-3. Start a local `llama-server` (`llama.cpp`, Metal) serving the **fresh merged
-   GGUF** this train produced, then
-   `python build_label_centroids.py --endpoint http://127.0.0.1:4503/...`
-   (validates FINDINGS §16 dev/test or aborts), stop the server.
-4. Write `artifacts/{merged_text_q8_0.gguf?, label_centroids.json,
-   MODEL_INFO.json, manifest.json}` — manifest carries sha256 + provenance
-   (data-repo SHA, train args, model eval JSON).
-5. Append a run report line to `logs/runner.log` (the orchestrator's ledger
-   mirrors it).
+- **Native notifications**, per-category switches in Settings: run started /
+  finished / failed / PR opened / deploy verified / skipped. Failures are
+  pinned (delivered even when other categories are muted + highlighted in the
+  log window).
+- **Log**: always-on, structured, one file per run inside the container dir.
+- **Status mirror on the classifier** (the operator's explicit request — so
+  the operator, the deploy automation, or a fresh session can later ask
+  *"what's the status of the last retraining?"* and get time + status over HTTP):
+  `POST /admin/retrain-events` records
+  `{event, at, run_id, status, eval, data_sha, artifact_shas, durations,
+  error}`, and `GET /admin/retrain-events` serves latest + history. The app is
+  the source of truth; the classifier holds the queryable mirror that persists
+  when the Mac is offline. Storage side (history file vs table) is a P1
+  implementation decision with the GET shape fixed either way.
 
-Bootstrap (`bootstrap.sh`, run once): creates `~/jarvis-orchestrator/venv`,
-installs torch (MPS build), llama.cpp, clones/contrôles the data repo, prints
-the SSH public key / adds the authorized_keys line handed to it (same
-expiry-time pattern as the Pi).
+## 7. The bucket-mirror rule (operator decision — replaces trainer-side rclone)
 
-**Trim option:** if the LoRA/GGUF merge isn't yet automatable, phase 1 runner
-mode = `--stonly`: train the SetFit path + rebuild centroids against the
-**serving** GGUF on the Pi via a port-forward (`ssh -L 4503` or Tailscale
-direct) — no GGUF shipping; still a quality-progression retrain. The design
-does not depend on that being permanent.
-
-## 6. Trigger policy (the clock)
-
-A retrain is warranted when ANY holds (all thresholds in `config.yaml`):
-
-- **corrections**: ≥ `min_new_confirmed` (default 10) new confirmed corrections
-  since `ledger.last_train.corrections_total` (source: classifier
-  `/admin/retrain-status` + notifications deltas);
-- **calendar**: `cron` fallback (default: none — corrections-driven only, per
-  the user's "keeps track of time" = the SCHEDULER keeps time, not a blind
-  cadence);
-- **manual**: `curl -X POST http://localhost:8080/run-now` (orchestrator's
-  local-only endpoint);
-- **veto watches** (before firing, abort + log if): classifier `/health` not ok,
-  sweep-state vocabulary empty (an already-sick system isn't retrained on top
-  of), another job still running (ledger lockfile).
-
-After firing, the orchestrator: waits for runner completion (SSH poll), verifies
-manifest shas, opens the **centroids PR** (task documented in
-RETRAIN-AND-DEPLOY.md §3.3-3.4), uploads GGUF sha-pinned → install → reload,
-fires `trigger-update`, re-reads `sweep-state` across a cycle, and appends the
-verdict to the ledger. Human touches remain exactly two: merge the PR, glance
-at the report.
-
-## 7. Ledger (`state.json` — append + snapshot)
+**When the trainer pushes a model update to the classifier, the CLASSIFIER
+updates the GDrive store.** Concretely: after a successful GGUF install, the
+Pi (which now holds the received payload) pushes it into the model bucket
+with its own rclone grant:
 
 ```
-{ "last_train":  { "at", "data_sha", "model_eval": {dev_acc, test_acc}, "artifacts": {...} },
-  "corrections_total_at_train": N,
-  "deploys":      [ { "at", "sha", "verified": bool, "sweep_state_after": {...} } ],
-  "runs":         [ { "started", "finished", "trigger": "manual|policy", "status", "error": null } ],
-  "lock":         null | {"since", "reason"} }
+rclone copy llama_model/merged_text_q8_0.gguf gdrive:email-classifier-model/
 ```
 
-Write policy: temp file + rename + fsync (the file is the truth across reboots;
-loss = re-derive from Pi + git, both self-healing).
+- This is **additive** (`copy`, never `sync`).
+- Because the Pi's grant is `drive.file`-scoped, the Pi-created copy is
+  immediately visible to the Pi itself — this also *gradually heals* the
+  bucket visibility asymmetry (the Oct-27 vortex lesson).
+- The trainer (Mac) therefore needs **no rclone and no bucket access at all**.
+- Non-fatal on failure: mirrored + logged; the vocabulary file remains
+  git-owned (PR-carried), the GGUF remains install-endpoint-delivered.
+- The existing `model/` mirror-sync exclusion (#94/#95) is unchanged — the
+  bucket-mirror writes target `email-classifier-model/`, never the mirrored
+  `model/` dir conflict domain.
 
 ## 8. Security posture
 
-- Container holds: the compose stack, an expiring SSH **private key** for
-  studio (authorized_keys `expiry-time` line, same pattern as jarvis access),
-  and a read-only view of nothing else. No ADMIN_API_KEY needed anywhere
-  (Tailscale CGNAT bypass carries it — same as the deploy operator's
-  workstation).
-- Host runner: plain script, no sudo, only touches its own dirs + the data repo.
-- Pi: bounded by the same trust we already granted the deploy operator's
-  workstation (drive.file
-  bucket posture stays untouched; nothing requires widening it).
-- Revocation = delete one authorized_keys line (host) — mirrored from the
-  Proven Pi pattern.
+- Sandboxed app; container-dir-only footprint; portable binaries inside it.
+- GitHub PAT: macOS Keychain.
+- Pi: keyless via Tailscale CGNAT bypass (unchanged).
+- GDrive: the trainer needs nothing; the Pi's existing `drive.file` grant is
+  used for the bucket-mirror (§7) — **no new grants, no widened scopes** (the
+  Oct-27 lesson: re-route artifacts instead of widening grants).
+- Git-tracked vocabulary PRs: human-visible on GitHub, auto-opened via PAT.
+- The expiring-SSH access model (used incidentally during the diagnosis arc)
+  is not required by this design.
 
-## 9. Implementation plan (on approval)
+## 9. Decision log (operator, 2026-10-27/28)
 
-| Phase | Deliverable | Test |
+| # | Question | Decision |
 |---|---|---|
-| P1 skeleton | compose + orchestrator + ledger + `/status` | unit tests, compose up, no SSH |
-| P2 bridge | runner bootstrap + SSH exec, `--dry-run` mode (runner echoes plan) | manual dry-run on studio |
-| P3 st-only live | runner `--stonly` (SetFit retrain + centroids vs served GGUF) | one real run + Pi trigger |
-| P4 full LoRA | GGUF merge + upload/install + reload path alignment | one full cycle end-to-end |
-| P5 hardening | veto watches, failure replay, docs | chaos drill (kill mid-run) |
+| Q1 | Trigger | **≥ 10 confirmed corrections OR 7 days (only if ≥ 1 new correction); zero-corrections ⇒ skip + "no new training data" event** (later refined from an initial 5). All values Settings-editable. |
+| Q2 | Observability | **Native notifications + always-on log + classifier status mirror** (`/admin/retrain-events`). |
+| Q3 | Autonomy | **(c) Fully automatic** — runs unattended on an always-on, usually-headless Mac; notifications informational. Dial kept for reversibility. |
+| + | Bucket | **The classifier mirrors received model updates into the GDrive store** — trainer needs no rclone. |
+| + | Pre-flight | **`/health` check before every run; unreachable ⇒ skip + event, no retry storm.** |
+| + | v1 container design | **Discarded.** Native app replaces the split-brain container; ends the GPU-constraint workaround. |
 
-Estimated: P1–P3 a session; P4 depends on the LoRA-merge automation gap
-(out-of-repo today — see RETRAIN-AND-DEPLOY.md §3).
+## 10. Implementation plan
 
-## 10. Open questions
+| Phase | Deliverable | Dependencies |
+|---|---|---|
+| P1 | Swift menu-bar app skeleton (sandbox, menu, Settings, ledger, login-item toggle, notifications) + **classifier `/admin/retrain-events` POST+GET** | Mac-side build (CLT only, no full Xcode); coordinator authors source, operator runs one build script |
+| P2 | Runner pipeline unattended: data pull → train (MPS) → centroids (local Metal llama-server) → status mirror + pre-flight | P1 + embedded runtime bootstrap + `llama-server` download |
+| P3 | GGUF merge automation (the current gap) — evaluate whether the llama.cpp finetune/merge path is tractable on Metal, else keep manual-merge + pipeline pickup | P2 |
+| P4 | Ship path unattended: upload/install → reload → trigger-update → acceptance reads + status mirror + bucket-mirror (§7) | P2/P3 + #95/#96 already live |
+| P5 | Hardening: retry policy, skip-storm protection, log rotation, erase-and-quit correctness | P4 |
 
-1. Trigger threshold: 10 corrections a sensible default?
-2. Alerts: log-only, or a webhook/notification into the classifier's own UI?
-3. May the orchestrator run unattended on schedule, or manual-only until
-   confidence builds? (P3 default proposal: manual-only; schedule armed at P4.)
+Build-loop reality: the coordinator cannot compile Swift (Linux container).
+The operator runs one build script on the Mac; errors paste back; iterate.
+Keep the Swift surface deliberately small (menu + subprocess orchestration).
+
+## 11. Open questions (small, for P1)
+
+1. Classifier-side event storage: `update_history.json` appends vs a new
+   `retrain_events` table (GET shape fixed either way).
+2. Whether the SetFit-path quality retrain (no GGUF merge) ships at P2 as a
+   standalone "vocabulary refresh + eval progression" mode while P3 is open.
