@@ -143,6 +143,10 @@ public final class Ledger {
     }
 
     /// Load → mutate → save in one locked step. Returns the new state.
+    /// Discarding the result is a legitimate call pattern (the login-item
+    /// toggle and Settings' Save both re-read via their own paths), hence
+    /// @discardableResult — build round 3's only warnings were both this.
+    @discardableResult
     public func update(_ mutate: (inout AppState) -> Void) -> AppState {
         lock.lock()
         defer { lock.unlock() }
