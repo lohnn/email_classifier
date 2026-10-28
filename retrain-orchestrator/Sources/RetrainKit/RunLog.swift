@@ -25,20 +25,40 @@ final class RunLog {
 
     func write(level: String, _ message: String) {
         let line = "\(Self.stamp.string(from: Date())) [\(level)] \(message)\n"
+        let data = Data(line.utf8)
         queue.sync {
-            let data = Data(line.utf8)
-            let fm = FileManager.default
-            if !fm.fileExists(atPath: fileURL.path) {
-                try? fm.createDirectory(at: directory(), withIntermediateDirectories: true)
-                fm.createFile(atPath: fileURL.path, contents: data, attributes: nil)
-                return
-            }
-            if let handle = FileHandle(forWritingTo: fileURL) {
-                defer { try? handle.close() }
-                try? handle.seekToEnd()
-                try? handle.write(contentsOf: data)
+            do {
+                try appendBytes(data)
+            } catch {
+                // A failed log-append in the log path must report, never
+                // vanish: stderr is the fallback channel when the file
+                // itself is the broken channel.
+                let note = "[retrain-orchestrator] log append failed: \(error)\n"
+                _ = try? FileHandle.standardError.write(contentsOf: Data(note.utf8))
             }
         }
+    }
+
+    /// One append; throws on any failure so `write` can route it to stderr.
+    /// Era note (build round 1): modern SDKs declare
+    /// `FileHandle(forWritingTo:)` THROWING + non-Optional — the old
+    /// failable-Optional form is gone; value-returning `seekToEnd`/`write`
+    /// results are discarded explicitly so every toolchain era compiles
+    /// warning-free.
+    private func appendBytes(_ data: Data) throws {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: fileURL.path) {
+            try fm.createDirectory(at: directory(), withIntermediateDirectories: true)
+            guard fm.createFile(atPath: fileURL.path, contents: data, attributes: nil) else {
+                throw CocoaError(.fileWriteUnknown,
+                                 userInfo: [NSFilePathErrorKey: fileURL.path])
+            }
+            return
+        }
+        let handle = try FileHandle(forWritingTo: fileURL)
+        defer { _ = try? handle.close() }
+        _ = try handle.seekToEnd()
+        _ = try handle.write(contentsOf: data)
     }
 
     private func directory() -> URL {
