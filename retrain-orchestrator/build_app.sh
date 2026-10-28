@@ -73,6 +73,23 @@ echo "==> verify"
 spctl --assess --type execute "$APP" 2>/dev/null || \
     echo "note: Gatekeeper refuses ad-hoc local builds — expected; launching locally is unaffected (no quarantine attribute on locally-built apps)"
 
+# T1 root-cause guard (2026-10-28): 'codesign --verify' certifies signature
+# validity, NOT that the entitlements blob made it into the signature. An
+# ad-hoc app without its app-sandbox entitlement runs UNSANDBOXED and its
+# state lands in ~/Library/Application Support instead of the container
+# dir — which surfaced as "the Erase target folder is empty" at runtime.
+# Assert presence here so that failure mode dies at build time.
+echo "==> assert sandbox entitlements are embedded (assert, not imply)"
+ENT_DUMP="$(/usr/bin/codesign -d --entitlements - "$APP" 2>&1 || true)"
+if ! printf '%s' "$ENT_DUMP" | /usr/bin/grep -aq "app-sandbox"; then
+    echo "FATAL: no app-sandbox entitlement found in the signed bundle." >&2
+    echo "       The app would run unsandboxed and write OUTSIDE its container dir." >&2
+    echo "--- codesign -d --entitlements - gave: ---" >&2
+    printf '%s\n' "$ENT_DUMP" >&2
+    exit 1
+fi
+printf '%s\n' "$ENT_DUMP" | sed 's/^/    /'
+
 cat <<DONE
 
 BUILD COMPLETE (compile-side — runtime acceptance still needs your eyes):
