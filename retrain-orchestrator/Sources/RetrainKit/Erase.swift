@@ -5,11 +5,11 @@ import Foundation
 /// anything future phases add) while keeping the directory itself. The
 /// caller recreates fresh state afterwards.
 
-enum Erase {
+public enum Erase {
     /// Empty a directory without removing the directory itself.
     /// Returns the count of top-level entries deleted.
     @discardableResult
-    static func wipe(directory: URL) throws -> Int {
+    public static func wipe(directory: URL) throws -> Int {
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         let contents = try fm.contentsOfDirectory(

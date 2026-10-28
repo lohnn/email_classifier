@@ -12,21 +12,21 @@ import Foundation
 /// an operator restarting an older binary against a newer state.json must
 /// never lose their Settings to a hard decode failure.
 
-struct NotificationSettings: Codable, Equatable {
-    var runStarted: Bool = true
-    var runFinished: Bool = true
-    var runFailed: Bool = true       // failures are PINNED (§6): always delivered
-    var prOpened: Bool = true
-    var deployVerified: Bool = true
-    var skipped: Bool = true
+public struct NotificationSettings: Codable, Equatable {
+    public var runStarted: Bool = true
+    public var runFinished: Bool = true
+    public var runFailed: Bool = true       // failures are PINNED (§6): always delivered
+    public var prOpened: Bool = true
+    public var deployVerified: Bool = true
+    public var skipped: Bool = true
 }
 
-enum AutonomyMode: String, Codable, CaseIterable {
+public enum AutonomyMode: String, Codable, CaseIterable {
     case askBeforeRun = "ask_before_run"
     case gatedShip = "gated_ship"
     case fullAutomatic = "full_automatic"
 
-    var label: String {
+    public var label: String {
         switch self {
         case .askBeforeRun: return "Ask before each run"
         case .gatedShip: return "Auto-train, gated shipping"
@@ -35,26 +35,26 @@ enum AutonomyMode: String, Codable, CaseIterable {
     }
 }
 
-struct AppState: Codable, Equatable {
+public struct AppState: Codable, Equatable {
     // --- ledger ---
-    var createdAt: Date = Date()
-    var updatedAt: Date = Date()
-    var lastTrainStartedAt: Date?
-    var lastTrainFinishedAt: Date?
-    var lastTrainStatus: String?      // "ok" | "failed" | "skipped" | nil (never ran)
-    var lastRunID: String?
+    public var createdAt: Date = Date()
+    public var updatedAt: Date = Date()
+    public var lastTrainStartedAt: Date?
+    public var lastTrainFinishedAt: Date?
+    public var lastTrainStatus: String?      // "ok" | "failed" | "skipped" | nil (never ran)
+    public var lastRunID: String?
     /// Confirmed-corrections count at the time of the last train (§4).
     /// P2 resets this after each successful train; until then it stays 0.
-    var correctionsBaseline: Int = 0
-    var runCounter: Int = 0
+    public var correctionsBaseline: Int = 0
+    public var runCounter: Int = 0
 
     // --- trigger policy (§4; Settings-editable) ---
-    var correctionsThreshold: Int = 10
-    var weeklyCadenceEnabled: Bool = true
-    var weeklyCadenceDays: Int = 7
-    var autonomy: AutonomyMode = .fullAutomatic
-    var notifications: NotificationSettings = NotificationSettings()
-    var loginItemEnabled: Bool = false
+    public var correctionsThreshold: Int = 10
+    public var weeklyCadenceEnabled: Bool = true
+    public var weeklyCadenceDays: Int = 7
+    public var autonomy: AutonomyMode = .fullAutomatic
+    public var notifications: NotificationSettings = NotificationSettings()
+    public var loginItemEnabled: Bool = false
 
     private enum Keys: String, CodingKey {
         case createdAt, updatedAt, lastTrainStartedAt, lastTrainFinishedAt
@@ -63,9 +63,9 @@ struct AppState: Codable, Equatable {
         case autonomy, notifications, loginItemEnabled
     }
 
-    init() {}
+    public init() {}
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
@@ -86,24 +86,24 @@ struct AppState: Codable, Equatable {
 }
 
 /// Atomic `state.json` persistence inside the sandbox container dir.
-final class Ledger {
+public final class Ledger {
     /// The app's data dir: Application Support inside the sandbox container.
     /// Everything the app writes lives here (design §3: container-dir-only
     /// footprint); "Erase all data" wipes exactly this directory.
-    static func defaultDirectory() -> URL {
+    public static func defaultDirectory() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("RetrainOrchestrator", isDirectory: true)
     }
 
-    let directory: URL
-    var stateFileURL: URL { directory.appendingPathComponent("state.json") }
+    public let directory: URL
+    public var stateFileURL: URL { directory.appendingPathComponent("state.json") }
     private let lock = NSLock()
 
-    init(directory: URL) {
+    public init(directory: URL) {
         self.directory = directory
     }
 
-    func load() -> AppState {
+    public func load() -> AppState {
         lock.lock()
         defer { lock.unlock() }
         return loadLocked()
@@ -125,7 +125,7 @@ final class Ledger {
     }
 
     /// Atomically persist a state (write-to-temp + rename via .atomic).
-    func save(_ state: AppState) throws {
+    public func save(_ state: AppState) throws {
         lock.lock()
         defer { lock.unlock() }
         try saveLocked(state)
@@ -143,7 +143,7 @@ final class Ledger {
     }
 
     /// Load → mutate → save in one locked step. Returns the new state.
-    func update(_ mutate: (inout AppState) -> Void) -> AppState {
+    public func update(_ mutate: (inout AppState) -> Void) -> AppState {
         lock.lock()
         defer { lock.unlock() }
         var state = loadLocked()

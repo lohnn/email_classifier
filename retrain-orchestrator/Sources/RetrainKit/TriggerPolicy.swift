@@ -12,20 +12,20 @@ import Foundation
 /// "no new training data" reason. A quiet wait (some corrections, neither
 /// threshold nor cadence) is NOT an event — nothing triggered.
 
-enum SkipReason: String, Equatable {
+public enum SkipReason: String, Equatable {
     /// Zero-corrections rule violated: mirrored as a skipped event in P2.
     case noNewTrainingData
     /// Threshold not reached and cadence not due: plain waiting, no event.
     case notDue
 }
 
-enum TriggerDecision: Equatable {
+public enum TriggerDecision: Equatable {
     case fire(reason: String)
     case skip(reason: SkipReason, detail: String)
 }
 
-struct TriggerPolicy {
-    static func evaluate(
+public struct TriggerPolicy {
+    public static func evaluate(
         state: AppState,
         newCorrections: Int,
         now: Date = Date()

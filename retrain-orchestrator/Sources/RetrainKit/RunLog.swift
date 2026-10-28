@@ -4,8 +4,8 @@ import Foundation
 /// P1 writes one `orchestrator.log`; per-run files arrive with P2 execution
 /// (log rotation is P5). The file is also what menu > Open log opens.
 
-final class RunLog {
-    let fileURL: URL
+public final class RunLog {
+    public let fileURL: URL
     private let queue = DispatchQueue(label: "retrain.orchestrator.log")
 
     private static let stamp: DateFormatter = {
@@ -15,15 +15,15 @@ final class RunLog {
         return f
     }()
 
-    init(directory: URL) {
+    public init(directory: URL) {
         fileURL = directory.appendingPathComponent("orchestrator.log")
     }
 
-    func info(_ message: String) { write(level: "INFO", message) }
-    func warning(_ message: String) { write(level: "WARN", message) }
-    func error(_ message: String) { write(level: "ERROR", message) }
+    public func info(_ message: String) { write(level: "INFO", message) }
+    public func warning(_ message: String) { write(level: "WARN", message) }
+    public func error(_ message: String) { write(level: "ERROR", message) }
 
-    func write(level: String, _ message: String) {
+    public func write(level: String, _ message: String) {
         let line = "\(Self.stamp.string(from: Date())) [\(level)] \(message)\n"
         let data = Data(line.utf8)
         queue.sync {
@@ -66,7 +66,7 @@ final class RunLog {
     }
 
     /// Tail of the log (for a future in-app log window; "Open log" uses the file).
-    func readTail(maxBytes: Int = 65536) -> String {
+    public func readTail(maxBytes: Int = 65536) -> String {
         guard let data = try? Data(contentsOf: fileURL) else { return "" }
         let start = data.count > maxBytes ? data.count - maxBytes : 0
         let chunk = data.subdata(in: start..<data.count)
