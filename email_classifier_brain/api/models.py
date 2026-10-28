@@ -5,9 +5,13 @@ api/models.py — Pydantic Request/Response Models
 Shared data models for all API endpoints.
 """
 
-from typing import List, Literal, Optional
+import math
+import os
+import re
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CorrectionRequest(BaseModel):
@@ -85,3 +89,66 @@ class JobRunEntry(BaseModel):
     emails_updated: Optional[int]
     error_count: int
     error_message: Optional[str]
+
+
+# ---------------------------------------------------------------------------
+# Retrain-event status mirror (POST/GET /admin/retrain-events) — design §6.
+#
+# Field set per docs/RETRAIN-ORCHESTRATOR-DESIGN.md §6, validated strictly:
+# unknown fields are rejected (extra="forbid") so a drift between the
+# orchestrator app and this mirror surfaces as a 422, never as silently
+# dropped data. `event`/`status` are closed enums — the mirror is a ledger,
+# not free text. For skipped events the skip reason ("no new training
+# data", "classifier unreachable") rides in `error` with status="skipped".
+# ---------------------------------------------------------------------------
+
+class RetrainEventRequest(BaseModel):
+    """One event of one retraining run, as pushed by the orchestrator Mac.
+
+    Idempotency on the POST endpoint: (run_id, event) is the uniqueness
+    key — see api/routes/admin.py post_retrain_event.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    event: Literal[
+        "run_started", "run_finished", "run_failed",
+        "pr_opened", "deploy_verified", "skipped",
+    ]
+    at: datetime
+    run_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    status: Literal["ok", "failed", "skipped"]
+    eval: Optional[Dict[str, Any]] = None
+    data_sha: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{7,64}$")
+    artifact_shas: Optional[Dict[str, str]] = None
+    durations: Optional[Dict[str, float]] = None
+    error: Optional[str] = Field(default=None, max_length=2000)
+
+    @field_validator("artifact_shas")
+    @classmethod
+    def _check_artifact_names(cls, value: Optional[Dict[str, str]]):
+        """Keys must be basename-only filenames (they name shipped model
+        artifacts, never paths); values must be full lowercase sha256."""
+        if value is None:
+            return None
+        for name, sha in value.items():
+            if (not name or os.path.basename(name) != name
+                    or name in (".", "..") or "/" in name or "\\" in name):
+                raise ValueError(f"Artifact name must be a basename: {name!r}")
+            if not re.fullmatch(r"[a-f0-9]{64}", sha or ""):
+                raise ValueError(
+                    f"artifact_shas['{name}'] is not a 64-char lowercase sha256"
+                )
+        return value
+
+    @field_validator("durations")
+    @classmethod
+    def _check_durations(cls, value: Optional[Dict[str, float]]):
+        """Step durations are finite, non-negative seconds."""
+        if value is None:
+            return None
+        for step, seconds in value.items():
+            if not math.isfinite(seconds) or seconds < 0:
+                raise ValueError(
+                    f"durations['{step}'] must be a finite, non-negative number of seconds"
+                )
+        return value

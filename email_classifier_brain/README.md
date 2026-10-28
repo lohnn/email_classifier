@@ -347,6 +347,8 @@ Requires `X-API-Key` header validated against `ADMIN_API_KEY`.
 | `POST` | `/admin/push-training-data`      | Manually push `TrainingData/` to Git.                |
 | `GET`  | `/admin/update-errors`           | Get history of automated update failures.            |
 | `GET`  | `/admin/retrain-status`          | Whether training data is ahead of the deployed model (`retrain_worthwhile` + both commit ids). |
+| `POST` | `/admin/retrain-events`          | Record one retraining-orchestrator event into the status mirror (strict validation; idempotent — the `(run_id, event)` pair is the uniqueness key, retries return the first record without appends). |
+| `GET`  | `/admin/retrain-events`          | Retrain status mirror: `{latest, history}` — newest-first across the ~50 newest events (`retrain_events.json` JSONL). |
 | `POST` | `/admin/upload-model-artifact`   | **Tailscale/localhost ONLY** — stream a model artifact (.gguf/.safetensors/.json/.pkl) into staging; sha256 computed + echoed; optional `sha256_expected`. |
 | `POST` | `/admin/install-model-artifact`  | **Tailscale/localhost ONLY** — atomically install a staged artifact (GGUF → llama model path, ST pieces → model/). No auto-restart. |
 | `POST` | `/logs/{id}/repair-gmail-labels` | User-triggered Gmail label resync from the DB for one email (removes stale trained-category labels + UNSURE, applies expected category + VERIFIED). Works for archived/trashed mail. Returns a JSON action report. |
@@ -567,6 +569,23 @@ the training data contains commits the deployed model was never trained
 on; training itself is never automatic — `./retrain.sh` on the trainer
 machine stays the invocation path, and `GET /admin/retrain-status` exposes
 the same state.
+
+### Retrain-event status mirror (`/admin/retrain-events`)
+
+The native retraining orchestrator (macOS menu-bar app, see
+`docs/RETRAIN-ORCHESTRATOR-DESIGN.md`) pushes each event of a retraining
+run here — `POST /admin/retrain-events` records
+`{event, at, run_id, status, eval, data_sha, artifact_shas, durations,
+error}` (strictly validated), and `GET /admin/retrain-events` serves
+`{latest, history}` so anyone can ask *what's the status of the last
+retraining?* over HTTP, even while the Mac is offline. Storage is
+`retrain_events.json` in the service workdir (decision 2026-10-28:
+event-per-line JSONL, ~50 newest kept — not SQLite, not
+update_history.json-only); the app stays the source of truth, this is the
+queryable mirror. Every recorded event also appends one human-readable
+line to `update_history.json`. POST is idempotent: `(run_id, event)` is
+the uniqueness key, so the app's at-least-once delivery cannot create
+duplicate entries (retries return the first record unchanged).
 
 ### Corrections vs. archive & delete (known behaviors)
 

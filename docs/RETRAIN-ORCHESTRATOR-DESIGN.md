@@ -119,8 +119,9 @@ an explicit precondition.
   `{event, at, run_id, status, eval, data_sha, artifact_shas, durations,
   error}`, and `GET /admin/retrain-events` serves latest + history. The app is
   the source of truth; the classifier holds the queryable mirror that persists
-  when the Mac is offline. Storage side (history file vs table) is a P1
-  implementation decision with the GET shape fixed either way.
+  when the Mac is offline. Storage side (decided with the operator
+  2026-10-28, see Q1): `retrain_events.json` JSONL in the service workdir
+  — event-per-line, ~50 newest kept, GET shape fixed as {latest, history}.
 
 ## 7. The bucket-mirror rule (operator decision — replaces trainer-side rclone)
 
@@ -183,7 +184,10 @@ Keep the Swift surface deliberately small (menu + subprocess orchestration).
 
 ## 11. Open questions (small, for P1)
 
-1. Classifier-side event storage: `update_history.json` appends vs a new
-   `retrain_events` table (GET shape fixed either way).
+1. **DECIDED 2026-10-28 (with the operator):** classifier-side event
+   storage = `retrain_events.json` JSONL in the service workdir,
+   event-per-line, keep the ~50 newest, GET shape {latest, history}; one
+   human-readable `update_history.json` line per recorded event. Not
+   SQLite; not update_history.json-only.
 2. Whether the SetFit-path quality retrain (no GGUF merge) ships at P2 as a
    standalone "vocabulary refresh + eval progression" mode while P3 is open.

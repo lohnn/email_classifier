@@ -17,10 +17,11 @@ import classify
 import config
 import database
 import imap_client
+import retrain_store
 from api.security import is_trusted_ip
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
-from api.models import CandidateCategoryRequest, CorrectionRequest
+from api.models import CandidateCategoryRequest, CorrectionRequest, RetrainEventRequest
 from api.security import get_api_key
 from job_queue import job_queue
 from jobs.correction import check_corrections_job, force_check_corrections_job
@@ -489,6 +490,66 @@ def retrain_status():
     invocation path; this is the readable signal.
     """
     return get_retrain_status()
+
+
+@router.post("/admin/retrain-events", dependencies=[Depends(get_api_key)])
+def post_retrain_event(req: RetrainEventRequest):
+    """
+    Record one retraining-orchestrator event into the status mirror
+    (design §6). The Mac orchestrator app is the source of truth; this
+    mirror persists when the Mac is offline so the operator, deploy
+    automation, or a fresh session can ask "what's the status of the last
+    retraining?" over HTTP.
+
+    Validation is strict: unknown fields (extra="forbid"), unknown
+    event/status values, and malformed identifiers are rejected with 422
+    rather than coerced — a schema drift between app and mirror must fail
+    loudly, never silently drop data. For skipped events the skip reason
+    ("no new training data", "classifier unreachable") rides in `error`
+    with status="skipped".
+
+    IDEMPOTENCY (documented per design): the (run_id, event) PAIR is the
+    uniqueness key. One run emits several events under one run_id
+    (run_started → run_finished / …); a RETRIED POST of a pair that is
+    already recorded — same payload or not — returns 200 with
+    status="already_recorded" and the FIRST recording, changing nothing,
+    so the app's at-least-once delivery degrades to exactly-once
+    recording. Distinct events of the same run each record normally.
+    Dedup covers the retained window: the store keeps the ~50 newest
+    events (retrain_events.json JSONL, design §11 Q1 decision).
+
+    Every RECORDED (non-duplicate) event also appends one human-readable
+    line to update_history.json; duplicates never touch the human file.
+
+    Returns: {"status": "recorded"|"already_recorded",
+              "duplicate": bool, "event": <stored event>}.
+    """
+    event_dict = req.model_dump(mode="json")
+    result = retrain_store.record_retrain_event(event_dict)
+    return {
+        "status": "recorded" if result["recorded"] else "already_recorded",
+        "duplicate": result["duplicate"],
+        "event": result["event"],
+    }
+
+
+@router.get("/admin/retrain-events", dependencies=[Depends(get_api_key)])
+def get_retrain_events():
+    """
+    The retrain status mirror as of now (design §6 GET shape, fixed):
+    {"latest": <event | null>, "history": [<event>, …]}.
+
+    `latest` is the newest recorded event (null before the first run);
+    `history` is newest-first across the retained window (~50 newest), so
+    `latest == history[0]` by construction. Timeline semantics (thresholds,
+    cadence, corrections baseline) live in the orchestrator's own ledger —
+    this endpoint only mirrors what the app pushed.
+    """
+    events = retrain_store.load_retrain_events()  # oldest → newest
+    return {
+        "latest": events[-1] if events else None,
+        "history": list(reversed(events)),
+    }
 
 
 @router.post("/admin/check-corrections", dependencies=[Depends(get_api_key)])
