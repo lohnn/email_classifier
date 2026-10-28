@@ -15,17 +15,29 @@ execution lands in P2, GGUF merge automation in P3/P4, bucket-mirror in P4.
   + interval (default 7 days, requires ≥ 1 new correction), autonomy dial
   (default fully automatic; kept for reversibility), notification category
   switches (failures pinned), Start-with-the-system login-item toggle
+- **Classifier connection** (Settings › "Classifier connection"): the base
+  URL is an editable setting (host AND port, defaults to
+  `http://jarvis:8008`; `classifierURL` in `state.json`), plus a
+  **Test connection** button that probes `GET <url>/health` and renders
+  exactly what `/health` returned (HTTP code, `status`, per-check truth —
+  a 503 or `model <not loaded>` renders as what it is, never smoothed to
+  green). Probe happens ONLY on button press — no background poller in P1.
+- **Menu-bar indicator dot** next to the state text: gray = not probed,
+  green = last probe reachable + healthy, red = last probe failed or
+  unhealthy; hover tooltip carries the last probe result + timestamp.
+  Driven only by explicit probes, same no-poller rule.
 - **Ledger** `state.json` — trigger-policy fields, last-train timestamps,
-  corrections baseline; written atomically. Trigger policy evaluated by
-  *Run now* (reporting only at P1)
+  corrections baseline, classifier URL; written atomically. Trigger policy
+  evaluated by *Run now* (reporting only at P1)
 - **Run log** inside the container dir; *Open log* reveals it
 - **Erase all data…** — ask-then-wipe of the app's data dir (truly empty
   afterwards; Settings reset to defaults)
 - **Login item** via `SMAppService` (macOS 13+): applies immediately,
   survives restarts; NOT wiped by Erase-all-data (it is a launch setting)
 
-Not yet (by phase design): training pipeline execution (P2), classifier
-network calls (P2), GGUF merge (P3/P4), GDrive bucket-mirror (§7, P4).
+Not yet (by phase design): training pipeline execution (P2), the automatic
+pre-flight/polling cadence (P2), GGUF merge (P3/P4), GDrive bucket-mirror
+(§7, P4).
 
 ## Build on the Mac (Command Line Tools only)
 
@@ -105,7 +117,12 @@ codesign -d --entitlements - /Applications/RetrainOrchestrator.app 2>&1
    beforehand — see "If the data dir looks empty" above if not.)
 6. "Run now" writes a trigger-policy evaluation line to the log (and, if
    notifications are allowed, posts the skip/fire verdict).
-7. Exit code and paste of any build errors from `./build_app.sh`.
+7. Settings › Classifier connection: press **Test connection** with the
+   default `http://jarvis:8008` (Tailscale up) → menu-bar dot turns green
+   and `/health`'s truth (status + checks) renders in the window; change
+   the port to something dead → dot turns red and the reachable/probe
+   verdict flips.
+8. Exit code and paste of any build errors from `./build_app.sh`.
 
 ## Repo layout
 

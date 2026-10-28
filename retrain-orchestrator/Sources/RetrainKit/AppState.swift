@@ -56,11 +56,21 @@ public struct AppState: Codable, Equatable {
     public var notifications: NotificationSettings = NotificationSettings()
     public var loginItemEnabled: Bool = false
 
+    /// Classifier base URL (host AND port) — the probe + P2 pre-flight
+    /// target. Never hardcoded elsewhere: Settings carries and edits it.
+    /// Default (proposed to the operator 2026-10-28): the MagicDNS short
+    /// name of the jarvis peer — on the operator's Mac with Tailscale
+    /// running this resolves un-edited (the short-name caching/poisoning
+    /// caveat of record is a Docker-INSIDE-CONTAINER issue, not Mac-side).
+    /// Fully editable, e.g. to the raw CGNAT IP http://100.79.150.106:8008
+    /// if MagicDNS is off there.
+    public var classifierURL: String = "http://jarvis:8008"
+
     private enum Keys: String, CodingKey {
         case createdAt, updatedAt, lastTrainStartedAt, lastTrainFinishedAt
         case lastTrainStatus, lastRunID, correctionsBaseline, runCounter
         case correctionsThreshold, weeklyCadenceEnabled, weeklyCadenceDays
-        case autonomy, notifications, loginItemEnabled
+        case autonomy, notifications, loginItemEnabled, classifierURL
     }
 
     public init() {}
@@ -82,6 +92,7 @@ public struct AppState: Codable, Equatable {
         notifications = try c.decodeIfPresent(NotificationSettings.self, forKey: .notifications)
             ?? NotificationSettings()
         loginItemEnabled = try c.decodeIfPresent(Bool.self, forKey: .loginItemEnabled) ?? false
+        classifierURL = try c.decodeIfPresent(String.self, forKey: .classifierURL) ?? "http://jarvis:8008"
     }
 }
 

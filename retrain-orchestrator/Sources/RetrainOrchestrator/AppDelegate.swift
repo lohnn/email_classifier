@@ -13,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var runLog: RunLog!
     private var notifier: Notifier!
     private var settingsController: SettingsWindowController?
+    /// Menu-bar indicator (T3): nil = not probed yet (gray), true/false =
+    /// last explicit probe verdict. Probes happen ONLY on the Settings
+    /// button press at P1 — no background poller (P2 wires the cadence).
+    private var connection: (reachable: Bool?, detail: String) = (nil, "not probed yet")
 
     // MARK: lifecycle
 
@@ -44,17 +48,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func buildStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = item.button {
-            if let image = NSImage(systemSymbolName: "arrow.trianglehead.2.clockwise.rotate.90",
-                                   accessibilityDescription: "Retrain orchestrator") {
-                image.isTemplate = true
-                button.image = image
-                button.title = " \(statusLabel())"
-            } else {
-                button.title = "↻ \(statusLabel())"
-            }
-            button.font = NSFont.menuBarFont(ofSize: 0)
-        }
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.addItem(withTitle: "Run now", action: #selector(runNow(_:)), keyEquivalent: "")
@@ -69,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         menu.addItem(quit)
         item.menu = menu
         statusItem = item
+        refreshStatusText()
     }
 
     private func statusLabel() -> String {
@@ -80,14 +74,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return "idle · last \(f.string(from: finished))"
     }
 
-    private func refreshMenuTitle() {
+    /// One writer for the status-bar visuals: adaptive template glyph +
+    /// label whose leading run keeps the DEFAULT (menu-bar-adaptive) color
+    /// while the trailing state dot carries the explicit probe color —
+    /// gray (unknown) / green (reachable) / red (unreachable) — plus a
+    /// tooltip naming the last probe result.
+    private func refreshStatusText() {
         guard let button = statusItem?.button else { return }
-        let label = statusLabel()
-        if button.image != nil {
-            button.title = " \(label)"
-        } else {
-            button.title = "↻ \(label)"
+        if button.image == nil,
+           let image = NSImage(systemSymbolName: "arrow.trianglehead.2.clockwise.rotate.90",
+                               accessibilityDescription: "Retrain orchestrator") {
+            image.isTemplate = true
+            button.image = image
         }
+        button.font = NSFont.menuBarFont(ofSize: 0)
+
+        let dot: (color: NSColor, word: String)
+        switch connection.reachable {
+        case .some(true): dot = (.systemGreen, "reachable")
+        case .some(false): dot = (.systemRed, "unreachable")
+        case .none: dot = (.systemGray, "not probed")
+        }
+
+        let prefix = button.image == nil ? "↻" : ""
+        let text = NSMutableAttributedString(string: "\(prefix) \(statusLabel())")
+        text.append(NSAttributedString(
+            string: "  ●",
+            attributes: [
+                .foregroundColor: dot.color,
+                .font: NSFont.menuBarFont(ofSize: 0),
+            ]
+        ))
+        button.attributedTitle = text
+        button.toolTip = "Retrain orchestrator — classifier: \(dot.word) (\(connection.detail))"
     }
 
     // MARK: actions
@@ -115,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 title: title, body: "\(detail). (Pipeline lands in P2.)"
             )
         }
-        refreshMenuTitle()
+        refreshStatusText()
     }
 
     private func describe(_ decision: TriggerDecision) -> String {
@@ -134,6 +153,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 runLog: runLog,
                 onSaved: { [weak self] in
                     self?.applySavedSettings()
+                },
+                onProbe: { [weak self] reachable, detail in
+                    guard let self = self else { return }
+                    self.connection = (reachable, detail)
+                    self.refreshStatusText()
                 }
             )
         }
@@ -191,7 +215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func applySavedSettings() {
         state = ledger.load()
         runLog.info("Settings saved (threshold \(state.correctionsThreshold), cadence \(state.weeklyCadenceEnabled ? "\(state.weeklyCadenceDays)d" : "off"), autonomy \(state.autonomy.rawValue))")
-        refreshMenuTitle()
+        refreshStatusText()
     }
 
     // MARK: notification presentation while running

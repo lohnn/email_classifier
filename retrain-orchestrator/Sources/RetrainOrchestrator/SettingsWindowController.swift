@@ -10,6 +10,9 @@ final class SettingsWindowController: NSObject {
     private let ledger: Ledger
     private let runLog: RunLog
     private let onSaved: () -> Void
+    /// Fired after every Test-connection probe: (reachable, short detail).
+    /// Drives the menu-bar dot/tooltip — same no-background-poller rule.
+    private let onProbe: (Bool, String) -> Void
     private var window: NSWindow?
 
     // controls
@@ -23,11 +26,22 @@ final class SettingsWindowController: NSObject {
         checkboxWithTitle: "Start with the system (login item)",
         target: nil, action: nil
     )
+    // connection controls (operator request T2)
+    private let urlField = NSTextField(string: "http://jarvis:8008")
+    private let testButton = NSButton(title: "Test connection", target: nil, action: nil)
+    private let probeResult = NSTextField(wrappingLabelWithString: "Not probed yet.")
 
-    init(ledger: Ledger, runLog: RunLog, onSaved: @escaping () -> Void) {
+    enum URLValidation {
+        case ok(String)
+        case invalid(String)
+    }
+
+    init(ledger: Ledger, runLog: RunLog, onSaved: @escaping () -> Void,
+         onProbe: @escaping (Bool, String) -> Void) {
         self.ledger = ledger
         self.runLog = runLog
         self.onSaved = onSaved
+        self.onProbe = onProbe
         super.init()
         loginItemCheckbox.target = self
         loginItemCheckbox.action = #selector(loginItemToggled(_:))
@@ -65,6 +79,9 @@ final class SettingsWindowController: NSObject {
         categoryChecks[.deployVerified]?.state = state.notifications.deployVerified ? .on : .off
         categoryChecks[.skipped]?.state = state.notifications.skipped ? .on : .off
         loginItemCheckbox.state = LoginItem.isEnabled() ? .on : .off
+        urlField.stringValue = state.classifierURL
+        // probeResult intentionally NOT reset here: it reflects the last
+        // actual probe, which a state reload does not invalidate.
     }
 
     // MARK: UI assembly
@@ -102,6 +119,16 @@ final class SettingsWindowController: NSObject {
             autonomyPopup,
         ])
 
+        testButton.target = self
+        testButton.action = #selector(testConnectionClicked(_:))
+        probeResult.isSelectable = true  // operator copies the truthful render
+
+        let urlRow = row([
+            label("Classifier URL"),
+            width(urlField, 260),
+        ])
+        let testRow = row([testButton])
+
         let notifGrid = NSGridView(views: [
             [categoryChecks[.runStarted]!, categoryChecks[.runFinished]!, categoryChecks[.prOpened]!],
             [categoryChecks[.deployVerified]!, categoryChecks[.skipped]!, categoryChecks[.runFailed]!],
@@ -124,6 +151,11 @@ final class SettingsWindowController: NSObject {
             note("The cadence fires only when at least 1 new correction exists. Zero new corrections means the pipeline skips and waits (a skipped event is mirrored once running, P2)."),
             sectionLabel("Autonomy"),
             autonomyRow,
+            sectionLabel("Classifier connection"),
+            urlRow,
+            testRow,
+            probeResult,
+            note("Probes GET <url>/health only when you press Test connection — no background polling in P1. Give host AND port, e.g. http://jarvis:8008 (MagicDNS) or http://100.79.150.106:8008 (raw Tailscale IP)."),
             sectionLabel("Notifications"),
             notifGrid,
             note("Failures are pinned: always delivered, even when every other category is muted."),
@@ -138,7 +170,7 @@ final class SettingsWindowController: NSObject {
         stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 12, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 520))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 640))
         content.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
@@ -151,10 +183,11 @@ final class SettingsWindowController: NSObject {
         spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         stack.setCustomSpacing(16, after: cadenceRow)
         stack.setCustomSpacing(16, after: autonomyRow)
+        stack.setCustomSpacing(16, after: probeResult)
         stack.setCustomSpacing(16, after: notifGrid)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -237,6 +270,14 @@ final class SettingsWindowController: NSObject {
     }
 
     @objc private func saveClicked(_ sender: NSButton?) {
+        let classifierURLValue: String
+        switch Self.validateURL(urlField.stringValue) {
+        case .ok(let value):
+            classifierURLValue = value
+        case .invalid(let why):
+            showError(why)
+            return
+        }
         let threshold = clampInt(thresholdField.stringValue, range: 1...500, fallback: 10)
         let days = clampInt(cadenceDaysField.stringValue, range: 1...90, fallback: 7)
         let autonomyIndex = min(max(autonomyPopup.indexOfSelectedItem, 0), AutonomyMode.allCases.count - 1)
@@ -247,6 +288,7 @@ final class SettingsWindowController: NSObject {
             s.weeklyCadenceEnabled = cadenceCheckbox.state == .on
             s.weeklyCadenceDays = days
             s.autonomy = autonomy
+            s.classifierURL = classifierURLValue
             s.notifications.runStarted = categoryChecks[.runStarted]?.state == .on
             s.notifications.runFinished = categoryChecks[.runFinished]?.state == .on
             s.notifications.runFailed = true  // pinned by contract
@@ -256,6 +298,114 @@ final class SettingsWindowController: NSObject {
         }
         onSaved()
         closeWindow()
+    }
+
+    // MARK: classifier connection probe
+
+    /// Normalize + validate the classifier base URL: scheme must be
+    /// http/https, host must be present; port is recommended but not
+    /// forced (operator may serve on 80/443). Returns the trimmed value
+    /// with trailing slashes stripped so "…/health" joins cleanly.
+    static func validateURL(_ raw: String) -> URLValidation {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix("/") { text.removeLast() }
+        guard !text.isEmpty else {
+            return .invalid("Classifier URL must not be empty.")
+        }
+        guard let components = URLComponents(string: text),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host, !host.isEmpty else {
+            return .invalid("Classifier URL must be a full http(s) URL with a host (and ideally a port), e.g. http://jarvis:8008")
+        }
+        return .ok(text)
+    }
+
+    private static let stampFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    @objc private func testConnectionClicked(_ sender: NSButton?) {
+        let value: String
+        switch Self.validateURL(urlField.stringValue) {
+        case .ok(let v): value = v
+        case .invalid(let why):
+            probeResult.stringValue = why
+            return
+        }
+
+        // The "did my URL change take" check probes what is IN THE FIELD,
+        // not what was last saved — exactly the operator's use case.
+        testButton.isEnabled = false
+        probeResult.stringValue = "Probing \(value)/health …"
+        guard let healthURL = URL(string: value + "/health") else {
+            testButton.isEnabled = true
+            probeResult.stringValue = "Invalid URL: \(value)"
+            return
+        }
+        var request = URLRequest(url: healthURL)
+        request.timeoutInterval = 5.0
+        request.httpMethod = "GET"
+        let started = Date()
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.testButton.isEnabled = true
+                self.renderProbe(data: data, response: response, error: error, at: started)
+            }
+        }
+        task.resume()
+    }
+
+    /// Render whatever /health truthfully returned (W-121 discipline:
+    /// reachability by body truth, never by status code alone), then hand
+    /// the verdict to the menu-bar indicator.
+    private func renderProbe(data: Data?, response: URLResponse?, error: Error?, at started: Date) {
+        let stamp = Self.stampFormat.string(from: started)
+        if let error = error {
+            probeResult.stringValue = "Unreachable (\(stamp)): \(error.localizedDescription)"
+            onProbe(false, "unreachable, \(stamp)")
+            return
+        }
+        guard let http = response as? HTTPURLResponse else {
+            probeResult.stringValue = "Non-HTTP response (\(stamp))"
+            onProbe(false, "non-HTTP response, \(stamp)")
+            return
+        }
+
+        var bodySummary = ""
+        var statusSaysOk = true
+        if let data = data,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let status = json["status"] as? String {
+                bodySummary = "status=\(status)"
+                statusSaysOk = (status == "ok")
+            }
+            if let checks = json["checks"] as? [String: Any] {
+                let flat = checks
+                    .map { "\($0.key)=\($0.value)" }
+                    .sorted()
+                    .joined(separator: ", ")
+                if !flat.isEmpty {
+                    bodySummary += (bodySummary.isEmpty ? "" : "; ") + flat
+                }
+            }
+        }
+
+        // Reachable-and-healthy = HTTP 200 AND /health's own status ok.
+        // A 503 or a body saying the model is not loaded renders truthfully
+        // and counts as NOT healthy for the indicator.
+        let reachable = http.statusCode == 200 && statusSaysOk
+        probeResult.stringValue = "HTTP \(http.statusCode)\(bodySummary.isEmpty ? "" : " — \(bodySummary)") (\(stamp))"
+        let detail = "HTTP \(http.statusCode)\(bodySummary.isEmpty ? "" : ", \(bodySummary)"), \(stamp)"
+        onProbe(reachable, detail)
+        if reachable {
+            runLog.info("Connection probe OK: \(probeResult.stringValue)")
+        } else {
+            runLog.warning("Connection probe FAILED: \(probeResult.stringValue)")
+        }
     }
 
     @objc private func cancelClicked(_ sender: NSButton?) {
