@@ -9,7 +9,9 @@ training data management, and update control.
 import hashlib
 import json
 import logging
+import math
 import os
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -636,6 +638,232 @@ def get_training_snapshot(request: Request):
         },
         background=BackgroundTask(os.unlink, merged),
     )
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary receive — pipeline step 6 (design §5, 2026-10-29): the centroid
+# artifact the Mac built against the MERGED GGUF comes back here, and the
+# CLASSIFIER (which owns git) validates + commits + pushes it. The commit
+# lands on a vocab/<run_id> branch only — main untouched, the live service
+# unaffected (P2 stages; GGUF-install + vocab-activate is the P4 pair).
+# TAILSCALE/LOCALHOST PEER ONLY, same wall as the snapshot/artifact routes.
+# Commit+push runs in a TEMP CLONE — the running service's working tree is
+# never touched (never-a-half-state on this very box).
+# ---------------------------------------------------------------------------
+
+# Strict shape contract per embedder.load_centroids + the tracked
+# label_centroids.json: required top-level keys, no extras (drift between
+# the orchestrator's builder and this mirror must surface loudly).
+_VOCAB_TOP_KEYS = {"version", "model", "provenance", "centroids_l2", "unsure_gate"}
+_VOCAB_RUN_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+
+
+def _reject_json_constant(name: str):
+    raise ValueError(f"non-finite JSON constant {name} not allowed in a shipped artifact")
+
+
+def _validate_centroids_artifact(raw: bytes) -> dict:
+    try:
+        artifact = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid centroids JSON: {e}")
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid centroids JSON: {e}")
+
+    if not isinstance(artifact, dict):
+        raise HTTPException(status_code=422, detail="Centroids artifact must be a JSON object")
+    unknown = set(artifact) - _VOCAB_TOP_KEYS
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown top-level keys (drift between builder and mirror): {sorted(unknown)}")
+    missing = _VOCAB_TOP_KEYS - set(artifact)
+    if missing:
+        raise HTTPException(status_code=422, detail=f"Missing top-level keys: {sorted(missing)}")
+
+    if not isinstance(artifact["version"], int) or isinstance(artifact["version"], bool):
+        raise HTTPException(status_code=422, detail="version must be an integer")
+    model = artifact["model"]
+    if not isinstance(model, dict) or not isinstance(model.get("gguf"), str) or not model["gguf"]:
+        raise HTTPException(status_code=422, detail="model.gguf must be a non-empty string")
+    if not isinstance(model.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", model.get("sha256", "")):
+        raise HTTPException(status_code=422, detail="model.sha256 must be a 64-char lowercase sha256")
+    prov = artifact["provenance"]
+    if not isinstance(prov, dict) or not isinstance(prov.get("corpus_commit"), str):
+        raise HTTPException(status_code=422, detail="provenance.corpus_commit must be a string")
+    if not isinstance(prov.get("dim"), int) or prov["dim"] <= 0:
+        raise HTTPException(status_code=422, detail="provenance.dim must be a positive integer")
+
+    cents = artifact["centroids_l2"]
+    if not isinstance(cents, dict) or not cents:
+        raise HTTPException(status_code=422, detail="centroids_l2 must be a non-empty object")
+    dim = None
+    for label, vec in cents.items():
+        if not isinstance(label, str) or not label:
+            raise HTTPException(status_code=422, detail="centroids_l2 keys must be non-empty strings")
+        if not isinstance(vec, list) or not vec:
+            raise HTTPException(status_code=422, detail=f"centroids_l2[{label!r}] must be a non-empty array")
+        for v in vec:
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+                raise HTTPException(status_code=422, detail=f"centroids_l2[{label!r}] contains a non-finite value")
+        if dim is None:
+            dim = len(vec)
+        elif len(vec) != dim:
+            raise HTTPException(status_code=422, detail=f"centroids_l2[{label!r}] has dim {len(vec)}, expected {dim}")
+    if prov["dim"] != dim:
+        raise HTTPException(status_code=422, detail=f"provenance.dim {prov['dim']} != actual vector dim {dim}")
+
+    gate = artifact["unsure_gate"]
+    if not isinstance(gate, dict):
+        raise HTTPException(status_code=422, detail="unsure_gate must be an object")
+    for key in ("confidence_threshold", "delta_threshold"):
+        v = gate.get(key)
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v) or not 0 <= v <= 1:
+            raise HTTPException(status_code=422, detail=f"unsure_gate.{key} must be a finite value in [0, 1]")
+    if not isinstance(gate.get("calibration"), dict) or not gate["calibration"]:
+        raise HTTPException(status_code=422, detail="unsure_gate.calibration must be a non-empty object")
+    return artifact
+
+
+def _file_sha256(raw: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _receive_centroids(root: Path, run_id: str, raw: bytes) -> dict:
+    """Validate-then-publish flow shared by the endpoint and tests: temp
+    clone → atomic commit on vocab/<run_id> → push to the monorepo's own
+    origin. Never touches the live working tree. Returns a dict report."""
+    import shutil
+
+    branch = f"vocab/{run_id}"
+    vocab_relpath = "email_classifier_brain/model/label_centroids.json"
+    try:
+        origin_url = subprocess.run(
+            ["git", "-C", str(root), "remote", "get-url", "origin"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        raise HTTPException(status_code=500, detail=f"Monorepo {root} has no 'origin' remote; cannot publish vocabulary")
+
+    # Branch-existing check BEFORE cloning (cheap ls-remote): an existing
+    # branch means this run already published — compare content.
+    remote_sha = subprocess.run(
+        ["git", "-C", str(root), "ls-remote", origin_url, f"refs/heads/{branch}"],
+        capture_output=True, text=True,
+    ).stdout.split()
+    if remote_sha:
+        tmp = tempfile.mkdtemp(prefix="vocab-check-")
+        try:
+            subprocess.run(["git", "clone", "--no-hardlinks", "--quiet", "--no-checkout",
+                            str(root), tmp], check=True, capture_output=True)
+            subprocess.run(["git", "-C", tmp, "fetch", "--quiet", origin_url, branch],
+                           check=True, capture_output=True)
+            existing = subprocess.run(
+                ["git", "-C", tmp, "show", f"FETCH_HEAD:{vocab_relpath}"],
+                capture_output=True,
+            )
+            if existing.returncode == 0 and existing.stdout == raw:
+                published = subprocess.run(
+                    ["git", "-C", tmp, "rev-parse", "FETCH_HEAD"],
+                    capture_output=True, text=True,
+                ).stdout.strip()
+                return {"status": "already_recorded", "branch": branch,
+                        "commit": published, "pushed": True, "origin": origin_url}
+            raise HTTPException(
+                status_code=409,
+                detail=f"Branch {branch} already exists with DIFFERENT vocabulary content; "
+                       f"use a new run_id (the first record wins).",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    tmp = tempfile.mkdtemp(prefix="vocab-commit-")
+    try:
+        subprocess.run(["git", "clone", "--no-hardlinks", "--quiet", str(root), tmp],
+                       check=True, capture_output=True)
+        target = os.path.join(tmp, vocab_relpath)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as f:
+            f.write(raw)
+        subprocess.run(["git", "-C", tmp, "add", vocab_relpath], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", tmp,
+             "-c", "user.name=retrain-orchestrator",
+             "-c", "user.email=retrain-orchestrator@jarvis",
+             "commit", "-qm",
+             f"Vocabulary from retrain run {run_id} (model sha256 {json.loads(raw.decode('utf-8'))['model']['sha256'][:12]})"],
+            check=True, capture_output=True,
+        )
+        commit = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        # Push by the RESOLVED monorepo-origin URL — the temp clone's own
+        # "origin" is the local source checkout, never the published remote.
+        pushed = subprocess.run(
+            ["git", "-C", tmp, "push", origin_url, f"HEAD:refs/heads/{branch}"],
+            capture_output=True, text=True,
+        )
+        return {
+            "status": "committed",
+            "branch": branch,
+            "commit": commit,
+            "pushed": pushed.returncode == 0,
+            "push_error": None if pushed.returncode == 0 else pushed.stderr.strip()[-400:],
+            "origin": origin_url,
+        }
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@router.post("/admin/receive-centroids", dependencies=[Depends(get_api_key)])
+async def receive_centroids(
+    request: Request,
+    run_id: str = Query(..., description="Retrain run id — becomes the vocab/<run_id> branch"),
+    sha256_expected: str | None = Query(None, description="Optional integrity check on the posted artifact"),
+):
+    """
+    Receive the retrain orchestrator's centroid artifact (pipeline step 6):
+    strict validation (shape per embedder.load_centroids; unknown keys = 422;
+    NaN/Inf rejected; dims cross-checked against provenance.dim), then the
+    CLASSIFIER commits it as email_classifier_brain/model/
+    label_centroids.json on branch vocab/<run_id> and pushes to origin —
+    human-visible on GitHub, main untouched, the live service unaffected
+    (activation with the paired GGUF is P4's never-a-half-state pair).
+
+    IDEMPOTENCY: (run_id, content) — reposting the SAME content for the
+    same run_id is a no-op already_recorded; the same run_id with DIFFERENT
+    content is a 409 (the first record wins; use a new run_id).
+
+    README/design note: commit identity is retrain-orchestrator
+    <retrain-orchestrator@jarvis>.
+    """
+    peer = _require_trusted_peer(request)
+    if not re.fullmatch(_VOCAB_RUN_ID_RE, run_id or ""):
+        raise HTTPException(status_code=422, detail=f"Invalid run_id: {run_id!r} "
+                            f"(must match {_VOCAB_RUN_ID_RE})")
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(status_code=422, detail="Empty body — POST the label_centroids.json bytes")
+    if sha256_expected and _file_sha256(raw) != sha256_expected.strip().lower():
+        raise HTTPException(status_code=400,
+                            detail=f"sha256 mismatch: got {_file_sha256(raw)}, expected {sha256_expected}")
+    artifact = _validate_centroids_artifact(raw)
+
+    result = _receive_centroids(_monorepo_root(), run_id, raw)
+    if result["status"] == "committed" and not result["pushed"]:
+        append_update_history(
+            "warning",
+            f"Vocabulary for run {run_id} committed on {result['branch']} "
+            f"({result['commit'][:12]}) but the PUSH FAILED: {result['push_error']}. "
+            "It is NOT human-visible on GitHub until pushed — retry POST /admin/receive-centroids.",
+        )
+    else:
+        append_update_history(
+            "info",
+            f"Vocabulary artifact for run {run_id} received from peer {peer}: "
+            f"{result['status']} on {result['branch']} "
+            f"({result['commit'][:12]}, pushed={result['pushed']}). "
+            "Inert until the paired GGUF install activates it (P4 pair).",
+        )
+    return result
 
 
 @router.post("/admin/push-training-data", dependencies=[Depends(get_api_key)])
