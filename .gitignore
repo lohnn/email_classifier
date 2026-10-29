@@ -2,3 +2,16 @@ email_classifier_data/
 .env
 .idea/
 .DS_Store
+
+# Retrain-lab scratch (Oct-13 arc). The §16 validation corpus + provenance
+# scripts ARE tracked (P2 snapshot needs them wipe-proof); the volatile
+# remaining subdirs stay out until P2/P3 adopt them.
+retrain_2026-10-13/checkpoints/
+retrain_2026-10-13/embedder/
+retrain_2026-10-13/eval/
+retrain_2026-10-13/logs/
+retrain_2026-10-13/model/
+retrain_2026-10-13/splits/
+retrain_2026-10-13/train_jarvis/
+retrained_model_2026-10-13/
+email_classifier_brain/.update_request

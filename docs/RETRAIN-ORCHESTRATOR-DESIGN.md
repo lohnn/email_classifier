@@ -51,7 +51,7 @@ Apple Silicon.
 
 | Property | Behavior |
 |---|---|
-| Install | drag `.app` into `/Applications`; first run bootstraps its sandboxed runtime (embedded python runtime + torch MPS build, portable `llama-server` binary, data-repo clone) **inside `~/Library/Containers/<app-id>/`** |
+| Install | drag `.app` into `/Applications`; first run bootstraps its sandboxed runtime (uv-managed python + PyTorch-MPS wheels, portable Metal `llama-server` binary, HTTP training snapshot from the classifier — no git, no PAT) **inside `~/Library/Containers/<app-id>/`** |
 | Always running | menu-bar app (no dock icon by default); **"Start with the system"** toggle uses standard login-item services; runs headless (no screen attached is fine — status is queryable over the network, notifications arrive whenever a screen is) |
 | Status bar | icon with state (idle / health-checking / training / shipping / last-run time); menu: *Run now*, *Settings…*, *Open log*, *Erase all data…*, *Quit* |
 | Settings window | trigger threshold, weekly-cadence toggle + interval, autonomy mode, notification categories — everything §4/§6 promises, operator-editable **as the classifier matures** (explicit requirement) |
@@ -75,29 +75,52 @@ operator wants to re-tune them as the classifier matures).
 
 ## 5. Pipeline (per retrain run)
 
+Superseded 2026-10-29 (§9, "git ownership"): the Mac holds **no GitHub PAT,
+no git client, opens no PR** — the classifier (Pi) owns git. The trainer
+receives code+data as an HTTP snapshot and returns artifacts over
+peer-only HTTP; the Pi does all git via its existing proven paths.
+
 ```
 pre-flight  GET {pi}/health         → unreachable ⇒ push "skipped: classifier
                                       unreachable" event, exit clean (retry
                                       on the next trigger; no retry storm)
-1. pull     data repo (git, HTTPS + Keychain-stored PAT)
-2. train    venv python train.py             (PyTorch MPS; device logged)
-3. embed    llama-server (local, Metal) on the NEW merged GGUF
-            → build_label_centroids.py       (validates FINDINGS §16 or aborts)
-4. ship GGUF     sha-pinned POST /admin/upload-model-artifact → install
-                 (the GGUF merge step itself is the known P4 automation gap —
-                 RETRAIN-AND-DEPLOY.md §3)
-5. ship vocab    open centroids PR (repo-tracked path) via Keychain PAT
-6. deploy        POST /admin/trigger-update  → verify end-state
-                 (journal SHA, sweep-state across a cycle)
-7. mirror        POST /admin/retrain-events  → event + ledger snapshot (§6)
-   notify        native macOS notifications per category + log line
+1. snapshot GET /admin/training-snapshot (peer-only) → unpack into the
+            container dir: deployed brain code (config.py, trainers) +
+            training-data corpus + the validated §16 splits. Training-side
+            consistency BY CONSTRUCTION: the Mac trains with the same
+            config.py/input formatting the deployment runs.
+2. train    venv python  (embedded runtime; PyTorch MPS, device logged)
+            LoRA on the EmbeddingGemma text tower. The in-repo trainer is
+            a P2 artifact (none exists in-repo today — the Oct-13 finetune
+            tooling lived outside the repo).
+3. MERGE    human-in-the-loop CHECKPOINT until P3 (Mode A decision, §9):
+            the run pauses, mirrors "run finished (merge required)" +
+            pinned notification with instructions; the operator merges the
+            LoRA into the merged GGUF by hand. P3 automates exactly this
+            step. (The merge itself is llama.cpp CPU tooling — proven once,
+            Oct 13.)
+4. embed    llama-server (local, Metal) on the MERGED GGUF
+            → build_label_centroids.py (validates FINDINGS §16 or aborts)
+5. ship GGUF   sha-pinned POST /admin/upload-model-artifact — STAGED ONLY
+               (activated in P4 together with the vocabulary pair).
+6. ship vocab  POST /admin/receive-centroids (peer-only) → the Pi validates
+               and commits label_centroids.json on branch vocab/<run_id>,
+               pushes it (human-visible on GitHub; main untouched). INERT
+               until P4 deploys the GGUF+vocabulary PAIR — activation
+               ordering is a P4 design item; P2 never changes the running
+               classifier.
+7. mirror      POST /admin/retrain-events per step + notifications per
+               category + per-run log line
 ```
 
-**Autonomy: fully automatic (operator decision).** All seven steps run
-unattended; every step has a defined failure path (abort the pipeline — never
-deploy a half-state — notify + mirror the failure). The Settings dial
+**Autonomy: fully automatic (operator decision).** Steps 1–2 and 4–7 run
+unattended; step 3 is the deliberate human checkpoint until P3. Every step
+has a defined failure path (abort the pipeline — never deploy or stage a
+half-state — notify + mirror the failure). The Settings dial
 (`ask-before-run` → `auto-train + gated ship` → `full automatic`) is kept for
-reversibility, defaulting to `full automatic`.
+reversibility, defaulting to `full automatic`. First P2 cut ships behind
+**Run now only**; the unattended timer lands as its own commit after the
+operator validates one full manual run.
 
 Pre-flight detail: if the classifier is unreachable, the run is skipped (not
 deferred-by-retry-storm) — the skip itself is mirrored so the operator can see
@@ -148,16 +171,25 @@ rclone copy llama_model/merged_text_q8_0.gguf gdrive:email-classifier-model/
 ## 8. Security posture
 
 - Sandboxed app; container-dir-only footprint; portable binaries inside it.
-- GitHub PAT: macOS Keychain.
-- Pi: keyless via Tailscale CGNAT bypass (unchanged).
+- **GitHub: the Mac app holds no PAT, no git client, opens no PR**
+  (2026-10-29, the bucket-mirror §7 rule generalized to git). The
+  classifier owns all git: training data and code reach the trainer as an
+  HTTP snapshot; the vocabulary returns as an HTTP POST that the Pi
+  commits and pushes on a `vocab/<run_id>` branch (existing proven Pi push
+  path — verified 2026-10-29, no new grants needed).
+- Trust root: **Tailscale membership** — the new snapshot/centroids
+  endpoints sit behind the same Tailscale/localhost-peer-only wall as the
+  model-artifact routes; the Pi stays keyless via the CGNAT bypass
+  (unchanged).
 - GDrive: the trainer needs nothing; the Pi's existing `drive.file` grant is
   used for the bucket-mirror (§7) — **no new grants, no widened scopes** (the
   Oct-27 lesson: re-route artifacts instead of widening grants).
-- Git-tracked vocabulary PRs: human-visible on GitHub, auto-opened via PAT.
+- Git-tracked vocabulary: human-visible on GitHub as `vocab/<run_id>`
+  branches (was: PAT-opened PRs — superseded).
 - The expiring-SSH access model (used incidentally during the diagnosis arc)
   is not required by this design.
 
-## 9. Decision log (operator, 2026-10-27/28)
+## 9. Decision log (operator, 2026-10-27/28 + 2026-10-29)
 
 | # | Question | Decision |
 |---|---|---|
@@ -167,6 +199,14 @@ rclone copy llama_model/merged_text_q8_0.gguf gdrive:email-classifier-model/
 | + | Bucket | **The classifier mirrors received model updates into the GDrive store** — trainer needs no rclone. |
 | + | Pre-flight | **`/health` check before every run; unreachable ⇒ skip + event, no retry storm.** |
 | + | v1 container design | **Discarded.** Native app replaces the split-brain container; ends the GPU-constraint workaround. |
+| + | 2026-10-29 | **Model-id default classifier address — none** (setup-specific); URL starts empty and Settings *is* the onboarding: it auto-opens every launch until the first successful Save. Port 8008 remains placeholder/docs guidance. |
+| + | 2026-10-29 | **Bundle id domain `se.lohnn.*`** (was `com.lohnn.*`). Container dir follows the id; migration = fresh container, old dir deletable. |
+| + | 2026-10-29 | **§11-Q2 P2 mode = A: full LoRA-on-MPS pipeline** with the GGUF merge as a human-in-the-loop checkpoint until P3 (SetFit quick-mode dropped from P2; SetFit remains the rollback-backend story). Confirmed reasoning: the merge is llama.cpp CPU tooling proven once (Oct 13) — P3 is automation engineering, not a feasibility bet. |
+| + | 2026-10-29 | **First-run bootstrap download consented** (~2–3 GB: uv-managed python + PyTorch-MPS wheels + Metal llama.cpp server, all inside the container dir; Erase-all-data removes it all — the "installs itself" contract stands). |
+| + | 2026-10-29 | **First P2 cut ships behind Run now only**; the unattended timer is a follow-up commit after the operator validates one full manual run — §9-Q3 full-automatic then governs unchanged. |
+| + | 2026-10-29 | **Git ownership (bucket-mirror §7 rule generalized): the Mac holds no PAT, no git client, opens no PR.** The classifier owns git: code+data reach the trainer as `GET /admin/training-snapshot`; vocabulary returns as `POST /admin/receive-centroids` (Pi validates, commits `label_centroids.json` on `vocab/<run_id>`, pushes). Trust root = Tailscale membership; both endpoints peer-only. |
+| + | 2026-10-29 | **Menu-bar status dot** (operator report: not visible) — reimplemented in P2 as a composited rendered image; menubar text colors are not honored. |
+| + | 2026-10-29 | **P1 runtime acceptance validated; status-bar dot rework + full pipeline deferred to P2** (operator). |
 
 ## 10. Implementation plan
 
@@ -189,5 +229,7 @@ Keep the Swift surface deliberately small (menu + subprocess orchestration).
    event-per-line, keep the ~50 newest, GET shape {latest, history}; one
    human-readable `update_history.json` line per recorded event. Not
    SQLite; not update_history.json-only.
-2. Whether the SetFit-path quality retrain (no GGUF merge) ships at P2 as a
-   standalone "vocabulary refresh + eval progression" mode while P3 is open.
+2. **DECIDED 2026-10-29 (operator, via §9):** P2 mode = **A** — the full
+   LoRA-on-MPS path with the GGUF merge as a human-in-the-loop checkpoint
+   until P3. The SetFit quick-mode (B) is dropped from P2; SetFit remains
+   the rollback-backend story.

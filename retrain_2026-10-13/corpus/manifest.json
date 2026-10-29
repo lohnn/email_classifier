@@ -1,0 +1,68 @@
+{
+  "data_repo_head": "17a86de15e0b608fc93cf501f0f2f6aaa5cb6f03",
+  "gross_records": 72,
+  "per_file_gross": {
+    "Jarvis/FOCUS.jsonl.jsonl": 8,
+    "Jarvis/NOISE.jsonl.jsonl": 27,
+    "Jarvis/REFERENCE.jsonl.jsonl": 18,
+    "Jarvis/URGENT.jsonl.jsonl": 19
+  },
+  "dual_labeled_groups_dropped": [
+    {
+      "subject": "Ny faktura från Transportstyrelsen — betala den i Kivra!",
+      "labels": [
+        "Jarvis/NOISE",
+        "Jarvis/REFERENCE"
+      ]
+    },
+    {
+      "subject": "Nytt brev från Försäkringskassan",
+      "labels": [
+        "Jarvis/REFERENCE",
+        "Jarvis/URGENT"
+      ]
+    },
+    {
+      "subject": "The uploaded build for Quality Food Control Staging has one or more\r\n issues.",
+      "labels": [
+        "Jarvis/NOISE",
+        "Jarvis/URGENT"
+      ]
+    },
+    {
+      "subject": "Update: Week 6 Production Update! 🎬",
+      "labels": [
+        "Jarvis/NOISE",
+        "Jarvis/REFERENCE"
+      ]
+    }
+  ],
+  "net_records": 64,
+  "splits": {
+    "train": 45,
+    "dev": 10,
+    "test": 9
+  },
+  "splits_per_class": {
+    "train": {
+      "Jarvis/FOCUS": 6,
+      "Jarvis/NOISE": 17,
+      "Jarvis/REFERENCE": 10,
+      "Jarvis/URGENT": 12
+    },
+    "dev": {
+      "Jarvis/FOCUS": 1,
+      "Jarvis/NOISE": 4,
+      "Jarvis/REFERENCE": 2,
+      "Jarvis/URGENT": 3
+    },
+    "test": {
+      "Jarvis/FOCUS": 1,
+      "Jarvis/NOISE": 3,
+      "Jarvis/REFERENCE": 3,
+      "Jarvis/URGENT": 2
+    }
+  },
+  "seed": 7,
+  "protocol": "lab 70/15/15 stratified, per-class, seed 7; both copies of dual-labeled groups dropped (conservative, lab precedent)"
+}
