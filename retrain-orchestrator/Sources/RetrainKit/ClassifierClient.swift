@@ -211,12 +211,15 @@ public final class ClassifierClient: ClassifierServing {
         var request = request(url, method: "POST", body: nil)
         request.httpBody = data
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        let (urlResponse, body) = try await session.data(for: request)
+        // URLSession.data(for:) returns (Data, URLResponse) — Data FIRST
+        // (build round 5: the swapped destructure here was the module's one
+        // compile error; the invoke() site was already in the right order).
+        let (responseData, urlResponse) = try await session.data(for: request)
         guard let http = urlResponse as? HTTPURLResponse else {
             throw ClassifierError.invalidResponse("not an HTTP response for upload")
         }
         guard http.statusCode == 200 else {
-            throw ClassifierError.http(status: http.statusCode, body: Self.stringBody(body))
+            throw ClassifierError.http(status: http.statusCode, body: Self.stringBody(responseData))
         }
         struct Lazy: Decodable {
             let status: String
@@ -224,7 +227,7 @@ public final class ClassifierClient: ClassifierServing {
             let size: Int?
             let sha256: String?
         }
-        let decoded = try JSONDecoder().decode(Lazy.self, from: body)
+        let decoded = try JSONDecoder().decode(Lazy.self, from: responseData)
         return UploadReceipt(status: decoded.status, stagedAs: decoded.staged_as,
                              size: decoded.size, sha256: decoded.sha256)
     }
