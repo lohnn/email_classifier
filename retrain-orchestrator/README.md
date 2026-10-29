@@ -76,7 +76,7 @@ the background, you may need to approve it there once.
 Everything the app writes sits in the sandbox container dir:
 
 ```
-~/Library/Containers/com.lohnn.retrain-orchestrator/Data/Library/
+~/Library/Containers/se.lohnn.retrain-orchestrator/Data/Library/
 └── Application Support/RetrainOrchestrator/
     ├── state.json          # ledger + settings (atomic writes)
     └── orchestrator.log    # the log that "Open log" opens
@@ -85,6 +85,14 @@ Everything the app writes sits in the sandbox container dir:
 - **Erase all data…** empties exactly that directory (ask-then-wipe; the
   confirm dialog shows the resolved path and "N file(s) / X byte(s) would
   be removed", and fresh defaults are rewritten after the wipe).
+- **Bundle-id rename (2026-10-29, `com.lohnn.` → `se.lohnn.`):** the
+  container dir follows the id, so the FIRST launch of a rebuilt app uses
+  the NEW path above with fresh defaults (Settings onboarding re-opens
+  once — set the URL again and Save). The old
+  `~/Library/Containers/com.lohnn.retrain-orchestrator/` is orphaned data;
+  delete it manually when the new setup works. Likewise, if the old
+  build's login item lingers in System Settings → Login Items, remove the
+  stale entry once; the new build re-registers cleanly.
 - **Uninstall** = drag the app to Trash; delete the container dir above if
   you want zero residue. The login-item registration dissolves when the
   app is removed (macOS cleans orphaned entries; nothing else is global —
@@ -103,9 +111,9 @@ sandbox entitlements, so the app runs unsandboxed and lands in
 and send them back:
 
 ```bash
-ls -la "$HOME/Library/Containers/com.lohnn.retrain-orchestrator/Data/Library/Application Support/RetrainOrchestrator/" 2>&1
+ls -la "$HOME/Library/Containers/se.lohnn.retrain-orchestrator/Data/Library/Application Support/RetrainOrchestrator/" 2>&1
 ls -la "$HOME/Library/Application Support/RetrainOrchestrator/" 2>&1
-find "$HOME/Library/Containers/com.lohnn.retrain-orchestrator" -type f 2>/dev/null | head -20
+find "$HOME/Library/Containers/se.lohnn.retrain-orchestrator" -type f 2>/dev/null | head -20
 codesign -d --entitlements - /Applications/RetrainOrchestrator.app 2>&1
 ```
 

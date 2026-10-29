@@ -19,7 +19,7 @@ cd "$(dirname "$0")"
 
 EXE="RetrainOrchestrator"
 APP="$EXE.app"
-BUNDLE_ID="com.lohnn.retrain-orchestrator"
+BUNDLE_ID="se.lohnn.retrain-orchestrator"  # operator decision 2026-10-29: se.lohnn.* domain
 ENTITLEMENTS="retrain-orchestrator.entitlements"
 IDENTITY="${CODESIGN_IDENTITY:--}"
 
