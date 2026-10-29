@@ -130,10 +130,24 @@ final class AppStateTests: XCTestCase {
     /// deltas this hunts). Empty string when field-wise equal.
     private func describeDeltas(_ original: AppState, _ restored: AppState) -> String {
         var lines: [String] = []
+        /// Bit-pattern comparison (round-14 upgrade, from the round-13
+        /// analysis): %.17g STRINGS collide at epoch magnitude — one Double
+        /// ULP ≈ 2.4e-7 s, the 17th significant decimal of a 10-integer-
+        /// digit number — so a 1-ULP drift renders to the SAME text and the
+        /// instrument could miss exactly the deltas it hunts. Bit patterns
+        /// collide NOWHERE for distinct doubles; deltas print hex bits AND
+        /// %.20g magnitude together.
         func noteDate(_ field: String, _ a: Date?, _ b: Date?) {
-            let da = a.map { String(format: "%.17g", $0.timeIntervalSince1970) } ?? "nil"
-            let db = b.map { String(format: "%.17g", $0.timeIntervalSince1970) } ?? "nil"
-            if da != db { lines.append("\(field): \(da) vs \(db)") }
+            let render: (Date?) -> String = { date in
+                guard let date = date else { return "nil" }
+                return String(format: "0x%016llx (%.20g)",
+                              date.timeIntervalSince1970.bitPattern,
+                              date.timeIntervalSince1970)
+            }
+            let bitEqual = a?.timeIntervalSince1970.bitPattern == b?.timeIntervalSince1970.bitPattern
+            if !bitEqual {
+                lines.append("\(field): \(render(a)) vs \(render(b))")
+            }
         }
         func noteValue<T: Equatable>(_ field: String, _ a: T, _ b: T) {
             if a != b {
@@ -172,12 +186,22 @@ final class AppStateTests: XCTestCase {
         // differs and its two raw double renders (bit-equal or not), plus
         // exactly what the encoder wrote on disk (integral vs fractional,
         // digit count). No further codec theory is acted on before that.
+        //
+        // PRE-REGISTERED FALLBACK (round-14, so the next paste can END the
+        // arc): if this delta returns EMPTY (all date bit-patterns and all
+        // fields equal) while whole-struct equality still fails, the
+        // inequality lives inside Foundation's `Date ==` on this runtime —
+        // and the test CONTRACT moves to machine-truth: per-date
+        // timeIntervalSince1970 bit-pattern assertions + plain equality on
+        // every other field, with the note that `Date ==` is not
+        // bit-faithful on this SDK and the ledger's persistence contract is
+        // double-fidelity, not Date-identity.
         let delta = describeDeltas(original, restored)
         let disk = (try? Data(contentsOf: ledger.stateFileURL))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "(unreadable)"
         let preview = String(disk.prefix(1200))
         XCTAssertTrue(delta.isEmpty,
-                      "ROUND-13 DELTA (field: raw-double-doubles)\n\(delta.isEmpty ? "(field-wise EQUAL yet struct unequal — Date construction semantics suspected)" : delta)\n\nON-DISK STATE.JSON (first 1200 chars):\n\(preview)")
+                      "ROUND-14 DELTA (hex bit patterns + %.20g)\n\(delta.isEmpty ? "(field-wise equal, all date bit-patterns equal, yet struct unequal — Foundation Date == semantics on this runtime; PRE-REGISTERED FALLBACK FIRES)" : delta)\n\nON-DISK STATE.JSON (first 1200 chars):\n\(preview)")
     }
 
     func testMissingKeysFallBackToDefaults() throws {
