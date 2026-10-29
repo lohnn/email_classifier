@@ -26,8 +26,10 @@ final class SettingsWindowController: NSObject {
         checkboxWithTitle: "Start with the system (login item)",
         target: nil, action: nil
     )
-    // connection controls (operator request T2)
-    private let urlField = NSTextField(string: "http://jarvis:8008")
+    // connection controls (operator request T2; NO default address —
+    // operator decision 2026-10-29: the value starts empty, the example
+    // travels in the placeholder)
+    private let urlField = NSTextField(string: "")
     private let testButton = NSButton(title: "Test connection", target: nil, action: nil)
     private let probeResult = NSTextField(wrappingLabelWithString: "Not probed yet.")
 
@@ -122,6 +124,7 @@ final class SettingsWindowController: NSObject {
         testButton.target = self
         testButton.action = #selector(testConnectionClicked(_:))
         probeResult.isSelectable = true  // operator copies the truthful render
+        urlField.placeholderString = "http://your-host:8008"
 
         let urlRow = row([
             label("Classifier URL"),
@@ -155,7 +158,7 @@ final class SettingsWindowController: NSObject {
             urlRow,
             testRow,
             probeResult,
-            note("Probes GET <url>/health only when you press Test connection — no background polling in P1. Give host AND port, e.g. http://jarvis:8008 (MagicDNS) or http://100.79.150.106:8008 (raw Tailscale IP)."),
+            note("This field starts EMPTY on purpose — every setup differs; give host AND port (port 8008 is the service default), e.g. http://jarvis:8008 (MagicDNS) or http://100.79.150.106:8008 (raw Tailscale IP). Probes GET <url>/health only when you press Test connection — no background polling in P1. This window also opens by itself on first launch until you Save once."),
             sectionLabel("Notifications"),
             notifGrid,
             note("Failures are pinned: always delivered, even when every other category is muted."),
@@ -289,6 +292,7 @@ final class SettingsWindowController: NSObject {
             s.weeklyCadenceDays = days
             s.autonomy = autonomy
             s.classifierURL = classifierURLValue
+            s.firstRunCompleted = true
             s.notifications.runStarted = categoryChecks[.runStarted]?.state == .on
             s.notifications.runFinished = categoryChecks[.runFinished]?.state == .on
             s.notifications.runFailed = true  // pinned by contract

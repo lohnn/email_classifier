@@ -120,6 +120,10 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(restored.autonomy, .fullAutomatic)
         XCTAssertNil(restored.lastTrainFinishedAt)
         XCTAssertFalse(restored.loginItemEnabled)
+        // Operator decision 2026-10-29: NO default classifier address —
+        // empty string, never a setup-specific host baked in.
+        XCTAssertEqual(restored.classifierURL, "")
+        XCTAssertFalse(restored.firstRunCompleted)
     }
 
     func testUnknownKeysAreIgnored() throws {

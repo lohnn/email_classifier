@@ -58,19 +58,25 @@ public struct AppState: Codable, Equatable {
 
     /// Classifier base URL (host AND port) — the probe + P2 pre-flight
     /// target. Never hardcoded elsewhere: Settings carries and edits it.
-    /// Default (proposed to the operator 2026-10-28): the MagicDNS short
-    /// name of the jarvis peer — on the operator's Mac with Tailscale
-    /// running this resolves un-edited (the short-name caching/poisoning
-    /// caveat of record is a Docker-INSIDE-CONTAINER issue, not Mac-side).
-    /// Fully editable, e.g. to the raw CGNAT IP http://100.79.150.106:8008
-    /// if MagicDNS is off there.
-    public var classifierURL: String = "http://jarvis:8008"
+    /// Operator decision 2026-10-29: NO default ADDRESS — every setup is
+    /// different, so this starts EMPTY and the app opens Settings on first
+    /// launch until it is set. The port suggestion (8008, the service's
+    /// default) travels in the field placeholder and docs, not as a value.
+    public var classifierURL: String = ""
+
+    /// Onboarding gate: Settings auto-opens at launch until the FIRST
+    /// successful Save (which flips this). Cancel/close does not — the
+    /// preferences are not set up yet. A fresh install and Erase-all-data
+    /// both land here; an older state.json without the key also decodes
+    /// to false, re-running the check once (harmless, deliberate).
+    public var firstRunCompleted: Bool = false
 
     private enum Keys: String, CodingKey {
         case createdAt, updatedAt, lastTrainStartedAt, lastTrainFinishedAt
         case lastTrainStatus, lastRunID, correctionsBaseline, runCounter
         case correctionsThreshold, weeklyCadenceEnabled, weeklyCadenceDays
         case autonomy, notifications, loginItemEnabled, classifierURL
+        case firstRunCompleted
     }
 
     public init() {}
@@ -92,7 +98,8 @@ public struct AppState: Codable, Equatable {
         notifications = try c.decodeIfPresent(NotificationSettings.self, forKey: .notifications)
             ?? NotificationSettings()
         loginItemEnabled = try c.decodeIfPresent(Bool.self, forKey: .loginItemEnabled) ?? false
-        classifierURL = try c.decodeIfPresent(String.self, forKey: .classifierURL) ?? "http://jarvis:8008"
+        classifierURL = try c.decodeIfPresent(String.self, forKey: .classifierURL) ?? ""
+        firstRunCompleted = try c.decodeIfPresent(Bool.self, forKey: .firstRunCompleted) ?? false
     }
 }
 

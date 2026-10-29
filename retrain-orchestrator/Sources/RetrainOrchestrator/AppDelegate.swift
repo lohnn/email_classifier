@@ -36,6 +36,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 self?.runLog.warning("Notification authorization not granted — signal falls back to the log only")
             }
         }
+        if !state.firstRunCompleted {
+            // Operator decision 2026-10-29: no default classifier address —
+            // Settings IS the onboarding. It reopens at every launch until
+            // the first successful Save flips firstRunCompleted.
+            runLog.info("First run — opening Settings for initial setup (classifier URL unset by design)")
+            openSettings(nil)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

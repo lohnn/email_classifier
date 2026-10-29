@@ -16,12 +16,15 @@ execution lands in P2, GGUF merge automation in P3/P4, bucket-mirror in P4.
   (default fully automatic; kept for reversibility), notification category
   switches (failures pinned), Start-with-the-system login-item toggle
 - **Classifier connection** (Settings › "Classifier connection"): the base
-  URL is an editable setting (host AND port, defaults to
-  `http://jarvis:8008`; `classifierURL` in `state.json`), plus a
-  **Test connection** button that probes `GET <url>/health` and renders
-  exactly what `/health` returned (HTTP code, `status`, per-check truth —
-  a 503 or `model <not loaded>` renders as what it is, never smoothed to
-  green). Probe happens ONLY on button press — no background poller in P1.
+  URL is an editable setting with **NO default address** (operator decision
+  2026-10-29 — every setup differs; `classifierURL` in `state.json` starts
+  EMPTY, the 8008 service-default port travels in the field placeholder).
+  First launch opens Settings automatically and keeps doing so until the
+  first successful Save — that is the setup step. A **Test connection**
+  button probes `GET <url>/health` and renders exactly what `/health`
+  returned (HTTP code, `status`, per-check truth — a 503 or
+  `model <not loaded>` renders as what it is, never smoothed to green).
+  Probe happens ONLY on button press — no background poller in P1.
 - **Menu-bar indicator dot** next to the state text: gray = not probed,
   green = last probe reachable + healthy, red = last probe failed or
   unhealthy; hover tooltip carries the last probe result + timestamp.
@@ -108,20 +111,25 @@ codesign -d --entitlements - /Applications/RetrainOrchestrator.app 2>&1
 
 ## Checklist to verify P1 (paste results back)
 
-1. App launches, menu bar only.
+1. App launches, menu bar only — and **Settings opens by itself on first
+   run** (empty classifier URL; after one Save it stops re-opening).
 2. Menu contains Run now / Settings… / Open log / Erase all data… / Quit.
-3. Settings: change threshold to 42 → Save → Quit → relaunch → still 42.
+3. Settings: enter your classifier URL (host AND port, e.g.
+   `http://jarvis:8008`) — Save → quit → relaunch → Settings no longer
+   auto-opens, threshold and URL persist.
 4. Open log opens a readable `orchestrator.log` inside the container dir.
 5. Erase all data → confirm → wipe count in the dialog/log matches; fresh
    default `state.json` rewritten. (Precondition: two expected files exist
-   beforehand — see "If the data dir looks empty" above if not.)
+   beforehand — see "If the data dir looks empty" above if not.) Note: an
+   erase resets first-run behavior, so Settings auto-opens once more.
 6. "Run now" writes a trigger-policy evaluation line to the log (and, if
    notifications are allowed, posts the skip/fire verdict).
-7. Settings › Classifier connection: press **Test connection** with the
-   default `http://jarvis:8008` (Tailscale up) → menu-bar dot turns green
-   and `/health`'s truth (status + checks) renders in the window; change
-   the port to something dead → dot turns red and the reachable/probe
-   verdict flips.
+7. Settings › Classifier connection: with `http://jarvis:8008` (or your
+   real address; Tailscale up) press **Test connection** → menu-bar dot
+   turns green and `/health`'s truth (status + checks) renders in the
+   window; change the port to something dead → dot turns red and the
+   reachable/probe verdict flips. With the field left EMPTY, Test shows
+   the validation reason instead of probing.
 8. Exit code and paste of any build errors from `./build_app.sh`.
 
 ## Repo layout
