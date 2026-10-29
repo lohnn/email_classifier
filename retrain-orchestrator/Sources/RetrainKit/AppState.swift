@@ -105,15 +105,19 @@ public struct AppState: Codable, Equatable {
 
 /// Atomic `state.json` persistence inside the sandbox container dir.
 public final class Ledger {
-    /// ISO8601 WITH fractional seconds, UTC: state.json is machine-only, so
-    /// round-trips must be lossless (build-round-7 lesson: seconds-only
-    /// ISO8601 truncated sub-seconds and broke AppState equality — the
-    /// trigger policy's interval math future-proofs with the same change).
-    /// Parsing is BACKWARD-COMPATIBLE: files written by older builds used
-    /// seconds-only ISO8601, so the codec tries fractional first and falls
-    /// back to plain. This codec is for ON-DISK machine formats only — the
-    /// mirror's `at` wire format (RetrainMirrorEvent) is a separate explicit
-    /// contract with the brain and stays seconds-only ISO8601.
+    /// Dates on disk are EPOCH DOUBLES — full Double precision, lossless
+    /// through JSON's shortest-round-trip serialization (build-round-9
+    /// lesson: ISO8601 — even WITH fractional seconds — is millisecond-
+    /// granular while Date() carries sub-microsecond precision, so a
+    /// formatted round-trip silently loses the delta; state.json is
+    /// machine-only and the epoch doubles still sort/diff fine).
+    /// ISO8601 strings exist ONLY as legacy-DECODE fallbacks: the ladder is
+    /// Double → ISO8601-with-fractional (a9bf3ad builds) → seconds-only
+    /// ISO8601 (the oldest live installs). Human-legibility tradeoff of
+    /// epoch doubles is a conscious call. This codec is for the ON-DISK
+    /// machine format only — the mirror's `at` wire format
+    /// (RetrainMirrorEvent) is a separate explicit contract with the brain
+    /// and stays seconds-only ISO8601 strings, unchanged.
     enum JSONDateCodec {
         static let fractional: ISO8601DateFormatter = {
             let formatter = ISO8601DateFormatter()
@@ -122,13 +126,23 @@ public final class Ledger {
         }()
         static let plain = ISO8601DateFormatter()
 
-        static func encodeString(_ date: Date) -> String {
-            fractional.string(from: date)
+        /// Lossless: everything date-ish on disk is an epoch Double.
+        static func epochDouble(_ date: Date) -> Double {
+            date.timeIntervalSince1970
         }
 
-        static func parse(_ text: String) -> Date? {
+        /// Decode ladder (oldest → newest formats all readable):
+        /// Double(epoch) → ISO8601-fractional → ISO8601-seconds-only.
+        static func parseWire(_ container: SingleValueDecodingContainer) throws -> Date {
+            if let epoch = try? container.decode(Double.self), epoch.isFinite {
+                return Date(timeIntervalSince1970: epoch)
+            }
+            let text = try container.decode(String.self)
             if let date = fractional.date(from: text) { return date }
-            return plain.date(from: text)
+            if let date = plain.date(from: text) { return date }
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(codingPath: container.codingPath,
+                                      debugDescription: "unparseable ledger date: \(text)"))
         }
     }
 
@@ -161,13 +175,7 @@ public final class Ledger {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
-            let text = try container.decode(String.self)
-            guard let date = JSONDateCodec.parse(text) else {
-                throw DecodingError.dataCorrupted(
-                    DecodingError.Context(codingPath: decoder.codingPath,
-                                          debugDescription: "unparseable ledger date: \(text)"))
-            }
-            return date
+            return try JSONDateCodec.parseWire(container)
         }
         do {
             return try decoder.decode(AppState.self, from: data)
@@ -189,7 +197,7 @@ public final class Ledger {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .custom { date, encoder in
             var container = encoder.singleValueContainer()
-            try container.encode(JSONDateCodec.encodeString(date))
+            try container.encode(JSONDateCodec.epochDouble(date))
         }
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(state)
