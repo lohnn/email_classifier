@@ -153,14 +153,14 @@ final class AppStateTests: XCTestCase {
         let (l1, d1) = freshLedger()
         defer { remove(d1) }
         try Data(#"{"lastTrainFinishedAt": 1770000000.123456}"#.utf8).write(to: l1.stateFileURL)
-        XCTAssertEqual(l1.load()?.lastTrainFinishedAt,
+        XCTAssertEqual(l1.load().lastTrainFinishedAt,
                        Date(timeIntervalSince1970: 1_770_000_000.123456))
 
         // (2) middle: a9bf3ad-era fractional ISO — millisecond-exact.
         let (l2, d2) = freshLedger()
         defer { remove(d2) }
         try Data(#"{"lastTrainFinishedAt": "2026-02-02T02:40:00.123Z"}"#.utf8).write(to: l2.stateFileURL)
-        XCTAssertEqual(l2.load()?.lastTrainFinishedAt,
+        XCTAssertEqual(l2.load().lastTrainFinishedAt,
                        Date(timeIntervalSince1970: 1_770_000_000.123))
 
         // (3) oldest: seconds-only ISO (the oldest live installs) —
@@ -168,7 +168,7 @@ final class AppStateTests: XCTestCase {
         let (l3, d3) = freshLedger()
         defer { remove(d3) }
         try Data(#"{"lastTrainFinishedAt": "2026-02-02T02:40:00Z"}"#.utf8).write(to: l3.stateFileURL)
-        XCTAssertEqual(l3.load()?.lastTrainFinishedAt,
+        XCTAssertEqual(l3.load().lastTrainFinishedAt,
                        Date(timeIntervalSince1970: 1_770_000_000))
     }
 }
