@@ -123,6 +123,42 @@ final class AppStateTests: XCTestCase {
         }
     }
 
+    /// Round-13 INSTRUMENTATION (test-file-only; scheduled KEEP — cheap
+    /// and load-bearing when renders-identical-but-unequal strikes). Walks
+    /// EVERY field; dates render as %.17g epoch doubles — deliberately NOT
+    /// Date's description (seconds-only truncation hides exactly the
+    /// deltas this hunts). Empty string when field-wise equal.
+    private func describeDeltas(_ original: AppState, _ restored: AppState) -> String {
+        var lines: [String] = []
+        func noteDate(_ field: String, _ a: Date?, _ b: Date?) {
+            let da = a.map { String(format: "%.17g", $0.timeIntervalSince1970) } ?? "nil"
+            let db = b.map { String(format: "%.17g", $0.timeIntervalSince1970) } ?? "nil"
+            if da != db { lines.append("\(field): \(da) vs \(db)") }
+        }
+        func noteValue<T: Equatable>(_ field: String, _ a: T, _ b: T) {
+            if a != b {
+                lines.append("\(field): \(String(describing: a)) vs \(String(describing: b))")
+            }
+        }
+        noteDate("createdAt", original.createdAt, restored.createdAt)
+        noteDate("updatedAt", original.updatedAt, restored.updatedAt)
+        noteDate("lastTrainStartedAt", original.lastTrainStartedAt, restored.lastTrainStartedAt)
+        noteDate("lastTrainFinishedAt", original.lastTrainFinishedAt, restored.lastTrainFinishedAt)
+        noteValue("lastTrainStatus", original.lastTrainStatus, restored.lastTrainStatus)
+        noteValue("lastRunID", original.lastRunID, restored.lastRunID)
+        noteValue("correctionsBaseline", original.correctionsBaseline, restored.correctionsBaseline)
+        noteValue("runCounter", original.runCounter, restored.runCounter)
+        noteValue("correctionsThreshold", original.correctionsThreshold, restored.correctionsThreshold)
+        noteValue("weeklyCadenceEnabled", original.weeklyCadenceEnabled, restored.weeklyCadenceEnabled)
+        noteValue("weeklyCadenceDays", original.weeklyCadenceDays, restored.weeklyCadenceDays)
+        noteValue("autonomy", original.autonomy, restored.autonomy)
+        noteValue("notifications", original.notifications, restored.notifications)
+        noteValue("loginItemEnabled", original.loginItemEnabled, restored.loginItemEnabled)
+        noteValue("classifierURL", original.classifierURL, restored.classifierURL)
+        noteValue("firstRunCompleted", original.firstRunCompleted, restored.firstRunCompleted)
+        return lines.joined(separator: "\n")
+    }
+
     func testRoundTripPreservesValues() throws {
         // Exercises the PRODUCTION path: save → state.json (epoch doubles)
         // → load (tolerant decode chain) — exact equality is the contract.
@@ -130,7 +166,18 @@ final class AppStateTests: XCTestCase {
         defer { remove(dir) }
         let original = makeState()
         try ledger.save(original)
-        XCTAssertEqual(ledger.load(), original)
+        let restored = ledger.load()
+        XCTAssertEqual(restored, original)
+        // Round-13 truth instrumentation: the paste must name WHICH field
+        // differs and its two raw double renders (bit-equal or not), plus
+        // exactly what the encoder wrote on disk (integral vs fractional,
+        // digit count). No further codec theory is acted on before that.
+        let delta = describeDeltas(original, restored)
+        let disk = (try? Data(contentsOf: ledger.stateFileURL))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "(unreadable)"
+        let preview = String(disk.prefix(1200))
+        XCTAssertTrue(delta.isEmpty,
+                      "ROUND-13 DELTA (field: raw-double-doubles)\n\(delta.isEmpty ? "(field-wise EQUAL yet struct unequal — Date construction semantics suspected)" : delta)\n\nON-DISK STATE.JSON (first 1200 chars):\n\(preview)")
     }
 
     func testMissingKeysFallBackToDefaults() throws {
