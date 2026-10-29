@@ -99,12 +99,28 @@ final class AppStateTests: XCTestCase {
     private func freshLedger() -> (Ledger, URL) {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("appstate-tests-\(UUID().uuidString)", isDirectory: true)
+        // Test setup states its own filesystem precondition EXPLICITLY
+        // (build-round-12 harness lesson): the fixture-byte tests write
+        // straight into stateFileURL, whose PARENT must exist — lazy
+        // creation belongs to production paths (Ledger.save mkdirs), not
+        // to coincidence.
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let ledger = Ledger(directory: dir)
         return (ledger, dir)
     }
 
+    /// INSTRUMENTED for one round (build round 12): the defers reported
+    /// removeItem ENOENT on dirs the tree says `try?` should have
+    /// swallowed — this round makes the pre-removal truth visible in the
+    /// paste. Revert to a plain `try? removeItem` in round 13 with the
+    /// outcome noted; cleanup noise must never fail a green suite.
     private func remove(_ dir: URL) {
-        try? FileManager.default.removeItem(at: dir)
+        let exists = FileManager.default.fileExists(atPath: dir.path)
+        do {
+            try FileManager.default.removeItem(at: dir)
+        } catch {
+            print("[test-cleanup] exists=\(exists) err=\(String(describing: error))")
+        }
     }
 
     func testRoundTripPreservesValues() throws {
