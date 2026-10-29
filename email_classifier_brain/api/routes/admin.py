@@ -10,6 +10,9 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
+import tarfile
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -20,6 +23,8 @@ import imap_client
 import retrain_store
 from api.security import is_trusted_ip
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from api.models import CandidateCategoryRequest, CorrectionRequest, RetrainEventRequest
 from api.security import get_api_key
@@ -464,6 +469,173 @@ def install_model_artifact(request: Request, staged_name: str = Query(...,
         "sha256": digest,
         "note": "Staged artifact installed — restart the target service to load it.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Training snapshot — the trainer-side git replacement (design §5, 2026-10-
+# 29: the Mac orchestrator holds no PAT / no git client; the classifier owns
+# git, so code + data reach the trainer over this peer-only HTTP endpoint).
+# TAILSCALE/LOCALHOST PEER ONLY: the training corpus is private, and a valid
+# admin key from an untrusted network is still refused — same wall as the
+# model-artifact routes. Every GET lands in update_history.json — the
+# private corpus leaving the box must announce itself (restore-path logging
+# principle, Oct-27 lesson).
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT_CODE_PATHS = [
+    "email_classifier_brain",                 # deployed code: config.py, trainers, ...
+    "retrain_2026-10-13/corpus",              # the FINDINGS §16-validated splits
+    "retrain_2026-10-13/prep_corpus.py",      # provenance scripts
+    "retrain_2026-10-13/build_centroids.py",
+    "retrain_2026-10-13/eval_heldout.py",
+    "retrain_2026-10-13/patch_model_info.py",
+]
+
+
+def _monorepo_root() -> Path:
+    """The email_classifier checkout: brain/api/routes/admin.py → repo root."""
+    return Path(__file__).resolve().parents[3]
+
+
+def _git_archive_to(path: str, cwd: str, args: list) -> None:
+    """git archive --format=tar <args> → file at `path` (stdout redirect)."""
+    with open(path, "wb") as out:
+        result = subprocess.run(
+            ["git", "-C", cwd, "archive", "--format=tar"] + args,
+            stdout=out,
+            stderr=subprocess.PIPE,
+            text=False,
+        )
+    if result.returncode != 0:
+        raise RuntimeError(f"git archive failed: {result.stderr.decode(errors='replace').strip()}")
+
+
+def _add_tar_prefix(src_tar: str, merged: tarfile.TarFile, prefix: str) -> None:
+    """Re-emit every member of src_tar into `merged` under `prefix/`."""
+    with tarfile.open(src_tar, "r") as t:
+        for member in t.getmembers():
+            if member.name in ("pax_global_header",):
+                continue
+            if prefix:
+                member.name = f"{prefix}/{member.name}"
+            if member.isfile() or member.type == tarfile.REGTYPE:
+                merged.addfile(member, t.extractfile(member))
+            else:
+                merged.addfile(member)
+
+
+def _snapshot_data_part(data_tar: str, data_dir: Path) -> dict:
+    """Archive the training-data dir: git archive when it is the data repo
+    (payload-tracking excludes runtime data BY CONSTRUCTION), else a plain
+    directory fallback (crash-looped installs, stripped clones)."""
+    if (data_dir / ".git").is_dir():
+        _git_archive_to(data_tar, str(data_dir), ["HEAD"])
+        sha = subprocess.run(
+            ["git", "-C", str(data_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        return {"mode": "git", "sha": sha}
+
+    # Directory fallback: explicit tar walk, .git and temp clutter excluded.
+    with tarfile.open(data_tar, "w") as out:
+        for base, dirnames, filenames in os.walk(data_dir):
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            for name in sorted(filenames):
+                if name.endswith(".tmp"):
+                    continue
+                full = os.path.join(base, name)
+                out.add(full, arcname=os.path.relpath(full, data_dir))
+    return {"mode": "dir-fallback", "sha": None}
+
+
+@router.get("/admin/training-snapshot", dependencies=[Depends(get_api_key)])
+def get_training_snapshot(request: Request):
+    """
+    One tar.gz with everything the retrain orchestrator needs to train
+    against EXACTLY what this deployment runs (pipeline step 1, design §5):
+
+        email_classifier_brain/**     deployed code (config.py formatting
+                                      is the single source of truth, so
+                                      training WITH this code keeps the
+                                      input format consistent by
+                                      construction)
+        retrain_2026-10-13/corpus/**  the FINDINGS §16-validated splits
+        retrain_2026-10-13/*.py       provenance scripts
+        training_data/**              the training-data repo contents
+                                      (directory fallback when the dir is
+                                      not the git clone)
+
+    Tailscale/localhost peer ONLY. Response headers carry the code and
+    data commit shas — the runner mirrors data_sha from the data commit.
+    """
+    peer = _require_trusted_peer(request)
+    root = _monorepo_root()
+    if not (root / "email_classifier_brain").is_dir():
+        raise HTTPException(status_code=500, detail=f"Monorepo root not found at {root}")
+
+    code_tar = tempfile.NamedTemporaryFile(delete=False, suffix=".tar").name
+    data_tar = tempfile.NamedTemporaryFile(delete=False, suffix=".tar").name
+    merged = tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz").name
+    try:
+        _git_archive_to(code_tar, str(root), ["HEAD"] + _SNAPSHOT_CODE_PATHS)
+        code_sha = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        data_dir = Path(config.TRAINING_DATA_DIR)
+        if not data_dir.is_dir():
+            raise HTTPException(
+                status_code=500,
+                detail=f"Training data dir missing: {config.TRAINING_DATA_DIR}",
+            )
+        data_meta = _snapshot_data_part(data_tar, data_dir)
+
+        with tarfile.open(merged, "w:gz") as out:
+            _add_tar_prefix(code_tar, out, "")
+            _add_tar_prefix(data_tar, out, "training_data")
+    except HTTPException:
+        for p in (code_tar, data_tar, merged):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        raise
+    except Exception as e:
+        for p in (code_tar, data_tar, merged):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        logger.error(f"Training snapshot build failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Training snapshot build failed: {e}")
+    finally:
+        for p in (code_tar, data_tar):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    size = os.path.getsize(merged)
+    data_sha = data_meta["sha"] or ""
+    append_update_history(
+        "info",
+        f"Training snapshot served to peer {peer}: code {code_sha[:12]}, "
+        f"data {data_sha[:12] if data_sha else data_meta['mode']}, {size} bytes. "
+        "(peer-only endpoint; the private corpus left the box)",
+    )
+    return FileResponse(
+        merged,
+        media_type="application/gzip",
+        filename=f"training-snapshot-{code_sha[:12]}.tar.gz",
+        headers={
+            "X-Snapshot-Code-Commit": code_sha,
+            "X-Snapshot-Data-Commit": data_sha,
+            "X-Snapshot-Data-Repo": data_meta["mode"],
+            "X-Snapshot-Bytes": str(size),
+        },
+        background=BackgroundTask(os.unlink, merged),
+    )
 
 
 @router.post("/admin/push-training-data", dependencies=[Depends(get_api_key)])
