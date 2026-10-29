@@ -218,7 +218,8 @@ final class ClassifierClientTests: XCTestCase {
         let client = try stubbedClient()
         StubURLProtocol.handler = { request in
             XCTAssertEqual(request.url?.path, "/health")
-            (httpResponse(403, request.url!), Data("nope".utf8))
+            // Multi-statement closure: explicit return required (round-8).
+            return (httpResponse(403, request.url!), Data("nope".utf8))
         }
         let report = try awaitSync { try await client.health() }
         XCTAssertEqual(report.httpStatus, 403)
