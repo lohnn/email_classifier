@@ -1,0 +1,38 @@
+{
+  "manifestVersion": 1,
+  "generatedAt": "2026-10-29T16:45:00Z",
+  "generatorNote": "Pins fetched from the finder-of-record channels at authoring time (2026-10-29): uv + llama.cpp GitHub release APIs, torch PyPI JSON API. Never re-resolved at runtime — drift against this manifest is a mirrored event, not a silent upgrade. Python is provisioned BY the pinned uv (the uv release pins the cpython build channel it resolves from), so a fixed uv release fixes the python build.",
+  "python": { "version": "3.14" },
+  "minFreeGB": 8,
+  "layers": {
+    "uv": {
+      "name": "uv",
+      "version": "0.13.6",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.13.6/uv-aarch64-apple-darwin.tar.gz",
+      "sha256": "60fbd5c8a1ed681845eea28d9d622fcde03c51e91a43465b64a1e17db1ed3472",
+      "bytes": 14235670,
+      "kind": "tar.gz",
+      "innerPath": "uv-aarch64-apple-darwin/uv"
+    },
+    "llamaServer": {
+      "name": "llama-server",
+      "version": "b11982",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11982/llama-b11982-bin-macos-arm64.tar.gz",
+      "sha256": "a826c186f464594de3ff3dccec3676dfb35c78643f66e99df6b372feadf84ae6",
+      "bytes": 16463509,
+      "kind": "tar.gz",
+      "binaryName": "llama-server",
+      "note": "macOS arm64 assets moved zip → tar.gz; the archive carries the llama.cpp tree with its ggml dylibs, so the whole tree is unpacked and the launcher points into it."
+    },
+    "torch": {
+      "name": "torch",
+      "version": "2.15.0",
+      "cpTag": "cp314",
+      "url": "https://files.pythonhosted.org/packages/8a/04/ff26bb464e61f83e0176deca01e72fffa779190bbb476011e89c45791589/torch-2.15.0-cp314-cp314-macosx_14_0_arm64.whl",
+      "sha256": "0d2b2d9674fa0b9b3f50e83231aa6545a0b19e437a52f0af939a224faaa45515",
+      "bytes": 138575002,
+      "kind": "wheel",
+      "note": "macOS arm64 wheels are MPS-capable by construction. Downloaded by OUR downloader (sha-verified against this pin) and installed from the local file — uv never floating-resolves torch."
+    }
+  }
+}

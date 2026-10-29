@@ -13,7 +13,12 @@ let package = Package(
         // Pure logic: ledger, trigger policy, log store, erase — unit-testable.
         .target(
             name: "RetrainKit",
-            path: "Sources/RetrainKit"
+            path: "Sources/RetrainKit",
+            resources: [
+                // Pinned runtime manifest (uv/python/llama-server/torch) —
+                // ships with the Kit; Bundle.module resolves it.
+                .copy("Resources/RuntimeManifest.json")
+            ]
         ),
         // AppKit surface: menu bar, settings window, notifications, login item.
         .executableTarget(

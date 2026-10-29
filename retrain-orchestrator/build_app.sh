@@ -38,6 +38,12 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp ".build/release/$EXE" "$APP/Contents/MacOS/$EXE"
 
+# SwiftPM resource bundle (pinned RuntimeManifest.json) rides with the app —
+# Bundle.module resolves it next to the executable or in Resources.
+if [ -d ".build/release/RetrainKit_RetrainKit.bundle" ]; then
+    cp -R ".build/release/RetrainKit_RetrainKit.bundle" "$APP/Contents/Resources/"
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
