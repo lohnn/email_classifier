@@ -222,6 +222,38 @@ Build-loop reality: the coordinator cannot compile Swift (Linux container).
 The operator runs one build script on the Mac; errors paste back; iterate.
 Keep the Swift surface deliberately small (menu + subprocess orchestration).
 
+### 10.1 M5 runtime bootstrap (implemented 2026-10-29, operator-consented)
+
+First launch downloads INTO the sandbox container dir (`rt/` under the
+app data dir — Erase all data removes it all, per the consent):
+
+- **Pinned manifest discipline** — `RuntimeManifest.json` ships in the Kit;
+  all pins are fetched from the finder-of-record channels at AUTHORING
+  time and hardcoded: uv 0.13.6 (GitHub release + digest), llama.cpp
+  b11982 bin-macos-arm64 tar.gz + digest (macOS assets moved zip →
+  tar.gz; the release `latest` entry is now a nightly POINTER — pins
+  target the newest tagged release carrying the archive), torch 2.15.0
+  cp314 macOS-14 arm64 wheel (URL + PyPI sha256). Never network-discovered
+  at runtime; drift against the manifest is a mirrored event, never a
+  silent upgrade. Python 3.14 is provisioned BY the pinned uv (the uv
+  release pins the cpython build channel it resolves from).
+- **Flow**: disk pre-flight FIRST (8 GB minimum, clear failure before any
+  download) → per layer: download with chunked sha256 verify (Mac-side
+  retries with backoff — apple/container #1511 means retries live here)
+  → install (uv binary; `uv python install` + venv; llama.cpp tree with
+  Metal dylibs beside the server binary + launcher symlink; torch
+  installed from the LOCAL sha-verified wheel — uv never floating-
+  resolves torch).
+- **Drift hook**: `rt/receipt.json` (versions + paths + installed-at);
+  later runs compare receipt vs pinned manifest and vs the snapshot's
+  requirements SHA — mismatch = mirrored event + run halt ("refresh
+  runtime"), never silent behavior change.
+- Size reality: ~170 MB of downloads (uv 14 MB + llama.cpp 16 MB +
+  torch 132 MB); the earlier 2-3 GB estimate included CUDA-era baggage
+  that MPS wheels don't carry. Disk ask stays conservative (8 GB).
+- Apple/container #1511 stays the reason ANY of this is Mac-native —
+  the retries and the health-checks live inside the app, not upstream.
+
 ## 11. Open questions (small, for P1)
 
 1. **DECIDED 2026-10-28 (with the operator):** classifier-side event
