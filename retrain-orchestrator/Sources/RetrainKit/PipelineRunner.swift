@@ -221,7 +221,7 @@ public final class PipelineRunner {
 
         // --- train: MPS LoRA pass (trainer contract: M7's train_lora.py) ---
         do {
-            var stageStart = Date()
+            let stageStart = Date()
             defer { durations["training"] = Date().timeIntervalSince(stageStart) }
             _ = try config.commands.run(
                 stage: "training",
@@ -277,7 +277,7 @@ public final class PipelineRunner {
 
         // --- embed: local Metal llama-server on the MERGED GGUF ---
         do {
-            var stageStart = Date()
+            let stageStart = Date()
             try await config.llama.start(model: merged, port: config.llamaPort,
                                          log: config.log,
                                          waitTimeout: config.llamaStartTimeout)
@@ -423,24 +423,85 @@ public final class PipelineRunner {
 /// The binary comes from the embedded runtime bootstrap (container dir) and
 /// is injected — never derived from the app bundle (sandbox writes only in
 /// the container dir).
+/// Async-safe state guard for the llama-server handle: the compiler
+/// flags NSLock inside async functions because the hazard is holding a
+/// lock ACROSS a suspension. The Class below keeps every critical section
+/// synchronous and tiny (state swap / terminate — never an await), which
+/// is genuinely-safe scoped locking, not a noop. Reserve/publish/cancel
+/// preserves the idempotent-start contract ("already running for this
+/// stage") and fences a cancelled start from terminating a process it
+/// never launched.
+final class LlamaProcessGuard {
+    private enum State {
+        case idle
+        case starting          // reserved; launch in progress
+        case running(Process)
+    }
+
+    private let lock = NSLock()
+    private var state: State = .idle
+
+    /// Reserve the start slot. false = already starting/running (caller
+    /// returns early — the idempotent-start semantics).
+    func tryBegin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if case .idle = state {
+            state = .starting
+            return true
+        }
+        return false
+    }
+
+    /// Publish the launched process (start() succeeded).
+    func publish(_ process: Process) {
+        lock.lock()
+        defer { lock.unlock() }
+        state = .running(process)
+    }
+
+    /// Launch failed after reservation — back to idle.
+    func cancelStart() {
+        lock.lock()
+        defer { lock.unlock() }
+        if case .starting = state {
+            state = .idle
+        }
+    }
+
+    /// Stop-and-clear. Synchronous terminate inside the tiny critical
+    /// section; the process is never left running and the slot reopens.
+    func terminateIfRunning() {
+        lock.lock()
+        defer { lock.unlock() }
+        if case .running(let process) = state, process.isRunning {
+            process.terminate()
+        }
+        state = .idle
+    }
+}
+
+/// Real llama-server handle for the embed stage — a long-lived Process with
+/// a readiness poll on /health (llama.cpp answers 503 until the model
+/// loads). The binary comes from the embedded runtime bootstrap (container
+/// dir) and is injected — never derived from the app bundle (sandbox writes
+/// only in the container dir). State is guarded by LlamaProcessGuard (see
+/// its doc comment for the async-safety reasoning; round-6 warnings).
 public final class ProcessLlamaServer: LlamaServing {
     private let binaryURL: URL
-    private var process: Process?
-    private let lock = NSLock()
+    private let guardState = LlamaProcessGuard()
 
     public init(binaryURL: URL) {
         self.binaryURL = binaryURL
     }
 
     public func start(model: URL, port: UInt16, log: RunLog, waitTimeout: TimeInterval) async throws {
-        lock.lock()
-        if process != nil {
-            lock.unlock()
-            return  // already running for this stage (idempotent within pass)
+        guard guardState.tryBegin() else {
+            return  // already starting/running for this stage (idempotent)
         }
-        lock.unlock()
 
         guard FileManager.default.fileExists(atPath: binaryURL.path) else {
+            guardState.cancelStart()
             throw StageError.failed(
                 stage: "embedding",
                 message: "llama-server binary missing at \(binaryURL.path) — runtime bootstrap incomplete (Settings › Refresh runtime)"
@@ -470,30 +531,20 @@ public final class ProcessLlamaServer: LlamaServing {
         do {
             try started.run()
         } catch {
+            guardState.cancelStart()
             throw StageError.failed(stage: "embedding",
                                     message: "could not launch llama-server: \(error)")
         }
-        lock.lock()
-        process = started
-        lock.unlock()
+        guardState.publish(started)
 
         // Readiness poll: any HTTP answer means serving; 200 = model loaded.
+        // (No inout params in async functions — pollHealth returns its note.)
         let deadline = Date().addingTimeInterval(waitTimeout)
         var lastNote = "not polled yet"
         while Date() < deadline {
-            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/health")!)
-            request.timeoutInterval = 5
-            do {
-                let (_, response) = try await URLSession.shared.data(for: request)
-                if let http = response as? HTTPURLResponse {
-                    if http.statusCode == 200 { return }
-                    lastNote = "HTTP \(http.statusCode) (model still loading?)"
-                } else {
-                    lastNote = "non-HTTP response"
-                }
-            } catch {
-                lastNote = "server not up yet: \(error.localizedDescription)"
-            }
+            let (ready, note) = await Self.pollHealth(port: port)
+            if ready { return }
+            lastNote = note
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
         stop()
@@ -501,11 +552,24 @@ public final class ProcessLlamaServer: LlamaServing {
     }
 
     public func stop() {
-        lock.lock()
-        defer { lock.unlock() }
-        if let process = process, process.isRunning {
-            process.terminate()
+        guardState.terminateIfRunning()
+    }
+
+    private static func pollHealth(port: UInt16) async -> (ready: Bool, note: String) {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/health") else {
+            return (false, "bad health URL")
         }
-        process = nil
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 200 { return (true, "loaded") }
+                return (false, "HTTP \(http.statusCode) (model still loading?)")
+            }
+            return (false, "non-HTTP response")
+        } catch {
+            return (false, "server not up yet: \(error.localizedDescription)")
+        }
     }
 }

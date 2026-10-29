@@ -247,7 +247,7 @@ final class FakeClassifier: ClassifierServing {
                      commit: "abc", pushed: true, pushError: nil)
     }
     func uploadArtifact(_ data: Data, filename: String, sha256: String) async throws -> UploadReceipt {
-        UploadReceipt(status: "staged", stagedAs: filename, size: data.count, sha256: sha)
+        UploadReceipt(status: "staged", stagedAs: filename, size: data.count, sha256: sha256)
     }
 }
 
@@ -341,7 +341,7 @@ final class PipelineRunnerTests: XCTestCase {
         XCTAssertEqual(state.phase, "awaiting_manual_merge")
         XCTAssertEqual(state.dataCommit, String(repeating: "d", count: 40))
         XCTAssertNotNil(PipelineRunStore.load(runsDir: config.runsDir, runID: config.runID))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: config.mergedGGUFURL.path.deletingLastPathComponent))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: config.mergedGGUFURL.deletingLastPathComponent().path))
         // EXACT event sequence: run_started + run_finished(merge required).
         // The dedupe key means run_finished can only fire once per run.
         let events = sink.snapshot()
