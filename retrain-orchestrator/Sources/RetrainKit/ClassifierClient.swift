@@ -141,6 +141,10 @@ public final class ClassifierClient: ClassifierServing {
 
     // MARK: endpoints
 
+    /// DELIBERATE CONTRACT: health() never throws on HTTP-level errors —
+    /// unhealthiness is DATA (the pre-flight skip logic mirrors it); transport
+    /// errors throw. Every other classifier call throws on non-2xx (W-121:
+    /// ship/mirror decisions need loud failures).
     public func health() async throws -> HealthReport {
         let (http, data) = try await invoke(try url("/health"), method: "GET", body: nil)
         var status: String?

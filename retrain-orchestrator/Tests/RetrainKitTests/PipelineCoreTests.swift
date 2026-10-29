@@ -128,7 +128,15 @@ final class ClassifierClientTests: XCTestCase {
                        ["event", "at", "run_id", "status", "data_sha", "durations", "error"])
         XCTAssertEqual(json["run_id"] as? String, "run-1")
         XCTAssertEqual(json["event"] as? String, "run_finished")
-        XCTAssertEqual(json["at"] as? String, "2026-02-02T21:20:00Z")  // ISO8601Z
+        // Wire 'at' = UTC ISO8601. Equality is checked THROUGH the same
+        // formatter the encoder uses — a hand-typed wall-clock string
+        // silently pinned a local timezone (build-round-7 lesson).
+        let wire = json["at"] as? String
+        let formatter = ISO8601DateFormatter()  // UTC by definition
+        let expected = formatter.string(from: event.at)
+        XCTAssertEqual(wire, expected)
+        XCTAssertTrue(wire?.hasSuffix("Z") == true, "wire 'at' must be UTC-suffixed")
+        XCTAssertNotNil(formatter.date(from: wire ?? ""), "wire 'at' must parse back")
     }
 
     func testSendMirrorEventParsesReceipt() throws {
@@ -189,13 +197,33 @@ final class ClassifierClientTests: XCTestCase {
     }
 
     func testHTTPErrorSurfacesAsClassifierError() throws {
+        // W-121 discipline: non-2xx must be LOUD on every guarded path
+        // (snapshot/mirror/centroids/upload all carry the 200-guard).
+        // health() is the documented exception — see the next test.
         let client = try stubbedClient()
         StubURLProtocol.handler = { request in
             (httpResponse(403, request.url!), Data("nope".utf8))
         }
-        XCTAssertThrowsError(try awaitSync { try await client.health() }) { error in
+        XCTAssertThrowsError(try awaitSync { try await client.fetchSnapshot() }) { error in
             XCTAssertEqual(error as? ClassifierError, .http(status: 403, body: "nope"))
         }
+    }
+
+    func testHealthHTTPErrorIsDataNotException() throws {
+        /// health() deliberately NEVER throws on HTTP-level errors: the
+        /// pre-flight skip logic needs unhealthiness as DATA (a 503
+        /// model-not-loaded skip is a normal outcome, mirrored — not an
+        /// exception). Transport errors still throw. (Round-7 lesson: the
+        /// 403-throw expectation was mis-wired onto this endpoint.)
+        let client = try stubbedClient()
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/health")
+            (httpResponse(403, request.url!), Data("nope".utf8))
+        }
+        let report = try awaitSync { try await client.health() }
+        XCTAssertEqual(report.httpStatus, 403)
+        XCTAssertFalse(report.healthy)   // unhealthiness as data, by contract
+        XCTAssertNil(report.status)      // body was not JSON
     }
 }
 

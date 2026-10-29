@@ -105,6 +105,33 @@ public struct AppState: Codable, Equatable {
 
 /// Atomic `state.json` persistence inside the sandbox container dir.
 public final class Ledger {
+    /// ISO8601 WITH fractional seconds, UTC: state.json is machine-only, so
+    /// round-trips must be lossless (build-round-7 lesson: seconds-only
+    /// ISO8601 truncated sub-seconds and broke AppState equality — the
+    /// trigger policy's interval math future-proofs with the same change).
+    /// Parsing is BACKWARD-COMPATIBLE: files written by older builds used
+    /// seconds-only ISO8601, so the codec tries fractional first and falls
+    /// back to plain. This codec is for ON-DISK machine formats only — the
+    /// mirror's `at` wire format (RetrainMirrorEvent) is a separate explicit
+    /// contract with the brain and stays seconds-only ISO8601.
+    enum JSONDateCodec {
+        static let fractional: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }()
+        static let plain = ISO8601DateFormatter()
+
+        static func encodeString(_ date: Date) -> String {
+            fractional.string(from: date)
+        }
+
+        static func parse(_ text: String) -> Date? {
+            if let date = fractional.date(from: text) { return date }
+            return plain.date(from: text)
+        }
+    }
+
     /// The app's data dir: Application Support inside the sandbox container.
     /// Everything the app writes lives here (design §3: container-dir-only
     /// footprint); "Erase all data" wipes exactly this directory.
@@ -132,7 +159,16 @@ public final class Ledger {
             return AppState()
         }
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let text = try container.decode(String.self)
+            guard let date = JSONDateCodec.parse(text) else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(codingPath: decoder.codingPath,
+                                          debugDescription: "unparseable ledger date: \(text)"))
+            }
+            return date
+        }
         do {
             return try decoder.decode(AppState.self, from: data)
         } catch {
@@ -151,7 +187,10 @@ public final class Ledger {
 
     private func saveLocked(_ state: AppState) throws {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(JSONDateCodec.encodeString(date))
+        }
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(state)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
