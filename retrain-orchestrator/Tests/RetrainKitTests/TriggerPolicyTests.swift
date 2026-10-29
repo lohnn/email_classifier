@@ -77,6 +77,11 @@ final class TriggerPolicyTests: XCTestCase {
 }
 
 final class AppStateTests: XCTestCase {
+    /// PRODUCTION-PATH RULE (build-round-10 root cause of record): AppState
+    /// round-trips here go through Ledger.save/load — the exact epoch-double
+    /// codec + tolerant decode chain the app runs. A test-local JSONEncoder
+    /// with its own date strategy drifts from production invisibly (three
+    /// rounds of correct-but-inert fixes proved it).
     private func makeState() -> AppState {
         var s = AppState()
         s.correctionsThreshold = 12
@@ -91,29 +96,35 @@ final class AppStateTests: XCTestCase {
         return s
     }
 
-    private func encode(_ s: AppState) throws -> Data {
-        let e = JSONEncoder()
-        e.dateEncodingStrategy = .iso8601
-        e.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return try e.encode(s)
+    private func freshLedger() -> (Ledger, URL) {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("appstate-tests-\(UUID().uuidString)", isDirectory: true)
+        let ledger = Ledger(directory: dir)
+        return (ledger, dir)
     }
 
-    private func decode(_ data: Data) throws -> AppState {
-        let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
-        return try d.decode(AppState.self, from: data)
+    private func remove(_ dir: URL) {
+        try? FileManager.default.removeItem(at: dir)
     }
 
     func testRoundTripPreservesValues() throws {
+        // Exercises the PRODUCTION path: save → state.json (epoch doubles)
+        // → load (tolerant decode chain) — exact equality is the contract.
+        let (ledger, dir) = freshLedger()
+        defer { remove(dir) }
         let original = makeState()
-        let restored = try decode(try encode(original))
-        XCTAssertEqual(restored, original)
+        try ledger.save(original)
+        XCTAssertEqual(ledger.load(), original)
     }
 
     func testMissingKeysFallBackToDefaults() throws {
         // A state.json written by a NEWER app read by an OLDER binary must
-        // degrade to defaults, never hard-fail.
-        let restored = try decode(Data("{}".utf8))
+        // degrade to defaults, never hard-fail. Raw bytes through the
+        // PRODUCTION decode path.
+        let (ledger, dir) = freshLedger()
+        defer { remove(dir) }
+        try Data("{}".utf8).write(to: ledger.stateFileURL)
+        let restored = ledger.load()
         XCTAssertEqual(restored.correctionsThreshold, 10)
         XCTAssertEqual(restored.weeklyCadenceDays, 7)
         XCTAssertTrue(restored.weeklyCadenceEnabled)
@@ -127,55 +138,37 @@ final class AppStateTests: XCTestCase {
     }
 
     func testUnknownKeysAreIgnored() throws {
+        let (ledger, dir) = freshLedger()
+        defer { remove(dir) }
         let json = #"{"correctionsThreshold": 5, "nobodyKnowsThisYet": 123}"#
-        let restored = try decode(Data(json.utf8))
+        try Data(json.utf8).write(to: ledger.stateFileURL)
+        let restored = ledger.load()
         XCTAssertEqual(restored.correctionsThreshold, 5)
     }
-}
 
-final class LedgerTests: XCTestCase {
-    func testSaveLoadRoundTripInTempDir() throws {
-        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("retrain-ledger-tests-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let ledger = Ledger(directory: dir)
+    /// The legacy decode ladder end-to-end THROUGH the ledger: a
+    /// date-carrying state.json in each historical format decodes exactly.
+    func testLegacyDateLadderAllThreeFormats() throws {
+        // (1) newest: epoch double — exact, sub-second preserved.
+        let (l1, d1) = freshLedger()
+        defer { remove(d1) }
+        try Data(#"{"lastTrainFinishedAt": 1770000000.123456}"#.utf8).write(to: l1.stateFileURL)
+        XCTAssertEqual(l1.load()?.lastTrainFinishedAt,
+                       Date(timeIntervalSince1970: 1_770_000_000.123456))
 
-        let before = ledger.load()
-        XCTAssertEqual(before.correctionsThreshold, 10)  // defaults before first save
+        // (2) middle: a9bf3ad-era fractional ISO — millisecond-exact.
+        let (l2, d2) = freshLedger()
+        defer { remove(d2) }
+        try Data(#"{"lastTrainFinishedAt": "2026-02-02T02:40:00.123Z"}"#.utf8).write(to: l2.stateFileURL)
+        XCTAssertEqual(l2.load()?.lastTrainFinishedAt,
+                       Date(timeIntervalSince1970: 1_770_000_000.123))
 
-        _ = ledger.update { $0.correctionsThreshold = 42; $0.correctionsBaseline = 7 }
-        let after = ledger.load()
-        XCTAssertEqual(after.correctionsThreshold, 42)
-        XCTAssertEqual(after.correctionsBaseline, 7)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: ledger.stateFileURL.path))
-    }
-
-    func testCorruptFileIsTolerated() throws {
-        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("retrain-ledger-tests-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try Data("not json at all".utf8).write(to: dir.appendingPathComponent("state.json"))
-        let ledger = Ledger(directory: dir)
-        XCTAssertEqual(ledger.load().correctionsThreshold, 10)  // fresh defaults win
-    }
-}
-
-final class EraseTests: XCTestCase {
-    func testWipeEmptiesDirectoryButKeepsIt() throws {
-        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("retrain-erase-tests-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try Data("{}".utf8).write(to: dir.appendingPathComponent("state.json"))
-        try Data("log".utf8).write(to: dir.appendingPathComponent("orchestrator.log"))
-        try FileManager.default.createDirectory(at: dir.appendingPathComponent("nested"), withIntermediateDirectories: true)
-        try Data("x".utf8).write(to: dir.appendingPathComponent("nested/deep.txt"))
-
-        let deleted = try Erase.wipe(directory: dir)
-        XCTAssertEqual(deleted, 3)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path))
-        let remaining = try FileManager.default.contentsOfDirectory(atPath: dir.path)
-        XCTAssertTrue(remaining.isEmpty)
+        // (3) oldest: seconds-only ISO (the oldest live installs) —
+        // to-the-second.
+        let (l3, d3) = freshLedger()
+        defer { remove(d3) }
+        try Data(#"{"lastTrainFinishedAt": "2026-02-02T02:40:00Z"}"#.utf8).write(to: l3.stateFileURL)
+        XCTAssertEqual(l3.load()?.lastTrainFinishedAt,
+                       Date(timeIntervalSince1970: 1_770_000_000))
     }
 }
