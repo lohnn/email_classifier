@@ -99,7 +99,11 @@ public struct RuntimeManifest: Codable, Equatable {
                 if let files = fm.enumerator(
                     at: bundleDir,
                     includingPropertiesForKeys: [.isRegularFileKey],
-                    errorHandler: { _, _ in .skipDescendants }
+                    // errorHandler returns Bool — TRUE = continue past the
+                    // error (skip the unreadable subtree, KEEP walking) and
+                    // FALSE = stop. Round-33 paste: .skipDescendants is a
+                    // DirectoryEnumerationOptions member, not a Bool.
+                    errorHandler: { _, _ in true }
                 ) {
                     while let item = files.nextObject() as? URL {
                         let values = try? item.resourceValues(forKeys: [.isRegularFileKey])
