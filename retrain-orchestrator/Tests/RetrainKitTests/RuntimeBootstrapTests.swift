@@ -246,7 +246,12 @@ final class RuntimeBootstrapTests: XCTestCase {
                                                     withIntermediateDirectories: true)
             try data.write(to: file)
         }
-        let archive = tmp.appendingPathComponent("fixture-\(tag).tar.gz")
+        // Round-44: UNIQUE archive names — two callers sharing a tag clobbered
+        // each other's file (the wrong-layout test's flat tar was overwritten
+        // by buildFixtures' nested tar at the same fixture-uv.tar.gz path and
+        // sha'd consistently — the test then "passed" a bootstrap it meant to
+        // break). The returned URL is the only handle; the name is not API.
+        let archive = tmp.appendingPathComponent("fixture-\(tag)-\(UUID().uuidString).tar.gz")
         _ = try ProcessCommandRunner().run(
             stage: "fixture-build",
             launchPath: "/usr/bin/tar",
@@ -486,6 +491,19 @@ final class RuntimeBootstrapTests: XCTestCase {
                             llamaSHA: fixtures.llamaSHA,
                             torchSHA: fixtures.torchSHA)
         let manifest = try makeManifest(fixtures)
+        // Round-37 rule, applied: the fixture SELF-ASSERTS what it intends —
+        // the wrong-layout tar really is flat before the bootstrap runs (the
+        // round-44 clobber made this test "pass" a bootstrap it meant to
+        // break — the listing would have shown it immediately).
+        let tarCheck = try ProcessCommandRunner().run(
+            stage: "fixture-selfcheck",
+            launchPath: "/usr/bin/tar",
+            arguments: ["-tzf", wrongLayout.path],
+            workingDirectory: tmp, environment: [:], log: log, timeout: 60)
+        XCTAssertTrue(tarCheck.allOutput.contains("uv\n") || tarCheck.allOutput.hasSuffix("uv\n"),
+                      "fixture must carry a FLAT uv member, got: \(tarCheck.allOutput)")
+        XCTAssertFalse(tarCheck.allOutput.contains("uv-aarch64-apple-darwin"),
+                       "fixture must NOT carry the nested member, got: \(tarCheck.allOutput)")
         let fetcher = FakeArtifactFetcher(files: fixtures.files)
         let bootstrapper = RuntimeBootstrapper(commands: HybridCommands(), fetcher: fetcher)
         // Round-43: XCTAssertThrowsError's autoclosure cannot await — do/catch
