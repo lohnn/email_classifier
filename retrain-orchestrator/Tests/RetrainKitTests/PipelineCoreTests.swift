@@ -317,6 +317,12 @@ final class PipelineRunnerTests: XCTestCase {
         var sha = receiptSHA
         if receiptSHA == nil { sha = try PipelineRunner.fileSHA256(reqFile) }
         let paths = RuntimeBootstrapper.Paths.under(containerDir: tmp)
+        // writeReceipt writes ATOMICALLY but does NOT create rt/ — unlike
+        // ensureRuntime, which builds the tree first (round-37 fixture
+        // lesson: the swallowed try? at call sites turned the missing dir
+        // into the runner's honest "no runtime receipt" failure).
+        try FileManager.default.createDirectory(at: paths.rtDir,
+                                                withIntermediateDirectories: true)
         let receipt = RuntimeReceipt(
             manifestVersion: 1, uvVersion: "0.13.6T",
             pythonVersion: "3.14", llamaVersion: "b11982T", torchVersion: "2.15.0T",
@@ -325,6 +331,11 @@ final class PipelineRunnerTests: XCTestCase {
             venvPath: paths.rtDir.appendingPathComponent("venv").path,
             installedAt: Date(), snapshotRequirementsSHA: sha)
         try RuntimeBootstrapper.writeReceipt(receipt, rtDir: paths.rtDir)
+        // fixture self-check: a fixture that silently fails LIES (never
+        // again — this assert fires in-harness if the write didn't land)
+        XCTAssert(FileManager.default.fileExists(
+            paths.rtDir.appendingPathComponent("receipt.json").path),
+            "materializeSnapshotSkeleton: receipt write did not land")
         return reqFile
     }
 
