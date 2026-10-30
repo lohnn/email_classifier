@@ -165,7 +165,10 @@ final class RuntimeManifestLocatorTests: XCTestCase {
                 return XCTFail("expected invalidManifest, got \(error)")
             }
             XCTAssertTrue(message.contains("RuntimeManifest.json not found"))
-            XCTAssertTrue(message.contains("RetrainKit_Fake.bundle"), "search paths must be named in the error")
+            // Round-41 diagnosability rule: the error names the SEARCH ROOTS
+            // (the old message interpolated the — empty — match list instead)
+            XCTAssertTrue(message.contains(root.path), "root paths must be named in the error")
+            XCTAssertTrue(message.contains("bundle name of record: RetrainOrchestrator_RetrainKit.bundle"), message)
         }
     }
 
@@ -177,6 +180,39 @@ final class RuntimeManifestLocatorTests: XCTestCase {
         try FileManager.default.createDirectory(at: bundle.appendingPathComponent("nested/deeper"),
                                                 withIntermediateDirectories: true)
         try Data(minimalManifest.utf8).write(to: bundle.appendingPathComponent("nested/deeper/RuntimeManifest.json"))
+        let manifest = try RuntimeManifest.bundled(searchRoots: [root])
+        XCTAssertEqual(manifest.pythonVersion, "3.14")
+    }
+
+    func testLocatorAcceptsTheProductionBundleName() throws {
+        // Round-41: the REAL SwiftPM bundle name is <execTarget>_<resourceTarget>
+        // — RetrainOrchestrator_RetrainKit.bundle. The locator must resolve it
+        // through the same code path (content-accepting, name-preferential).
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("retrain-manifest-locator-\(UUID().uuidString)", isDirectory: true)
+        let bundle = root.appendingPathComponent("RetrainOrchestrator_RetrainKit.bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents/Resources"),
+                                                withIntermediateDirectories: true)
+        try Data(minimalManifest.utf8).write(
+            to: bundle.appendingPathComponent("Contents/Resources/RuntimeManifest.json"))
+        let manifest = try RuntimeManifest.bundled(searchRoots: [root])
+        XCTAssertEqual(manifest.manifestVersion, 1)
+        XCTAssertEqual(manifest.pythonVersion, "3.14")
+    }
+
+    func testLocatorTriesAllCandidatesWhenNameOfRecordCarriesNoManifest() throws {
+        // Preferential ordering is NOT exclusive: a .bundle of the name of
+        // record WITHOUT a manifest must not mask a foreign bundle that does
+        // carry one (content is the accepting rule).
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("retrain-manifest-locator-\(UUID().uuidString)", isDirectory: true)
+        let ofRecord = root.appendingPathComponent("RetrainOrchestrator_RetrainKit.bundle", isDirectory: true)
+        let foreign = root.appendingPathComponent("SomeOther_Target.bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: ofRecord, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: foreign.appendingPathComponent("Contents/Resources"),
+                                                withIntermediateDirectories: true)
+        try Data(minimalManifest.utf8).write(
+            to: foreign.appendingPathComponent("Contents/Resources/RuntimeManifest.json"))
         let manifest = try RuntimeManifest.bundled(searchRoots: [root])
         XCTAssertEqual(manifest.pythonVersion, "3.14")
     }

@@ -76,55 +76,69 @@ public struct RuntimeManifest: Codable, Equatable {
 
     static func decode(fromSearchRoots roots: [URL]) throws -> RuntimeManifest {
         let fm = FileManager.default
-        var tried: [String] = []
+        var searchedRoots: [String] = []
+        var candidates: [URL] = []
         for root in roots {
-            // Bundle naming drifted across SPM releases — match ANY
-            // RetrainKit_*.bundle directory under each root.
+            searchedRoots.append(root.path)
+            // Round-41 unification with the build script's finder:
+            // this SwiftPM names the bundle by the EXECUTABLE target —
+            // RetrainOrchestrator_RetrainKit.bundle (the old
+            // `hasPrefix("RetrainKit_")` filter refused the production shape).
+            // Candidate rule: ANY .bundle directory; the ACCEPTING rule is
+            // content (the recursive walk must find RuntimeManifest.json);
+            // name shapes of record only set the PREFERENTIAL ordering so
+            // future renames die at build/gate time, not at launch.
             guard let entries = try? fm.contentsOfDirectory(at: root,
                                                             includingPropertiesForKeys: nil) else {
-                tried.append(root.path)
                 continue
             }
-            let bundles = entries.filter {
-                let n = $0.lastPathComponent
-                return n.hasPrefix("RetrainKit_") && n.hasSuffix(".bundle")
+            func nameRank(_ name: String) -> Int {
+                if name.hasPrefix("RetrainOrchestrator_RetrainKit") { return 0 }
+                if name.hasPrefix("RetrainKit_") { return 1 }
+                return 2
             }
-            for bundleDir in bundles {
-                tried.append(bundleDir.path)
-                // Error-tolerant walk (round-31 lesson): the locator runs on
-                // END-USER filesystems (DerivedData internals included) —
-                // unreadable/failed subtrees are the NORMAL case. Skip them,
-                // never surface a mid-walk IO error; only a COMPLETED-empty
-                // search throws the catchable invalidManifest naming roots.
-                if let files = fm.enumerator(
-                    at: bundleDir,
-                    includingPropertiesForKeys: [.isRegularFileKey],
-                    // errorHandler returns Bool — TRUE = continue past the
-                    // error (skip the unreadable subtree, KEEP walking) and
-                    // FALSE = stop. Round-33 paste: .skipDescendants is a
-                    // DirectoryEnumerationOptions member, not a Bool.
-                    errorHandler: { _, _ in true }
-                ) {
-                    while let item = files.nextObject() as? URL {
-                        let values = try? item.resourceValues(forKeys: [.isRegularFileKey])
-                        if values?.isRegularFile == false { continue }
-                        if item.lastPathComponent == "RuntimeManifest.json" {
-                            do {
-                                let data = try Data(contentsOf: item)
-                                return try JSONDecoder().decode(RuntimeManifest.self, from: data)
-                            } catch {
-                                throw BootstrapError.invalidManifest(
-                                    "RuntimeManifest at \(item.path) failed to decode: \(error)")
-                            }
+            let bundles = entries.filter { $0.hasDirectoryPath && $0.lastPathComponent.hasSuffix(".bundle") }
+            candidates.append(contentsOf: bundles.sorted {
+                nameRank($0.lastPathComponent) < nameRank($1.lastPathComponent)
+            })
+        }
+        for bundleDir in candidates {
+            // Error-tolerant walk (round-31 lesson): the locator runs on
+            // END-USER filesystems (DerivedData internals included) —
+            // unreadable/failed subtrees are the NORMAL case. Skip them,
+            // never surface a mid-walk IO error; only a COMPLETED-empty
+            // search throws the catchable invalidManifest naming roots.
+            if let files = fm.enumerator(
+                at: bundleDir,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                // errorHandler returns Bool — TRUE = continue past the
+                // error (skip the unreadable subtree, KEEP walking) and
+                // FALSE = stop. Round-33 paste: .skipDescendants is a
+                // DirectoryEnumerationOptions member, not a Bool.
+                errorHandler: { _, _ in true }
+            ) {
+                while let item = files.nextObject() as? URL {
+                    let values = try? item.resourceValues(forKeys: [.isRegularFileKey])
+                    if values?.isRegularFile == false { continue }
+                    if item.lastPathComponent == "RuntimeManifest.json" {
+                        do {
+                            let data = try Data(contentsOf: item)
+                            return try JSONDecoder().decode(RuntimeManifest.self, from: data)
+                        } catch {
+                            throw BootstrapError.invalidManifest(
+                                "RuntimeManifest at \(item.path) failed to decode: \(error)")
                         }
                     }
                 }
             }
         }
+        // Diagnosability rule (round 41): interpolate the SEARCH ROOTS —
+        // never the (empty) match list the old message carried.
         throw BootstrapError.invalidManifest(
-            "RuntimeManifest.json not found — searched RetrainKit_*.bundle under "
-            + tried.joined(separator: ", ")
-            + ". The build script must ship the SwiftPM resource bundle into the .app")
+            "RuntimeManifest.json not found — searched these roots: "
+            + searchedRoots.joined(separator: ", ")
+            + " (bundle name of record: RetrainOrchestrator_RetrainKit.bundle). "
+            + "The build script must ship the SwiftPM resource bundle into the .app")
     }
 
     /// Legacy entry kept for API continuity (defensive locator beneath).
