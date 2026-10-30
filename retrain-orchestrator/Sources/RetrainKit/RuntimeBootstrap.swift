@@ -213,6 +213,16 @@ public final class RuntimeBootstrapper {
         }
         log.info("Layer \(layer.name): sha256 VERIFIED (\(digest.prefix(16)))")
 
+        // Guard (round-21): a scheme-host-only URL ("fixture://name.whl")
+        // has an EMPTY path — lastPathComponent returns "/" and
+        // appendingPathComponent("/") collapses the destination onto the
+        // PARENT directory (here: rt/wheels itself → moveItem FileExists).
+        // Refuse malformed destinations loudly instead.
+        let destinationName = destination.lastPathComponent
+        guard !destinationName.isEmpty, destinationName != "/" else {
+            throw BootstrapError.invalidManifest(
+                "layer \(layer.name) url has no usable path component for a destination filename")
+        }
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try FileManager.default.moveItem(at: archive, to: destination)
@@ -374,7 +384,12 @@ public final class RuntimeBootstrapper {
         // --- layer 4: torch (MPS) — OUR download, sha-verified, then local
         // wheel install through uv (no floating PyPI resolution) ---
         let torchWheelURL = URL(string: torch.url) ?? URL(fileURLWithPath: "/dev/null")
-        let wheelDest = paths.wheelsDir.appendingPathComponent(torchWheelURL.lastPathComponent)
+        var wheelName = torchWheelURL.lastPathComponent
+        if wheelName.isEmpty || wheelName == "/" {
+            // scheme-host-only URL fallback: derive the on-disk name.
+            wheelName = "torch-\(torch.version).whl"
+        }
+        let wheelDest = paths.wheelsDir.appendingPathComponent(wheelName)
         retry = 0
         while true {
             do { try await fetchAndVerify(torch, at: wheelDest, log: log); break }

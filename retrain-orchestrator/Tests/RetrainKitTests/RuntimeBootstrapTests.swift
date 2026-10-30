@@ -186,7 +186,7 @@ final class RuntimeBootstrapTests: XCTestCase {
         try Data("wheel-bytes".utf8).write(to: wheel)
         return Fixtures(files: ["fixture://uv.tar.gz": uv,
                                 "fixture://llama.tar.gz": llama,
-                                "fixture://torch.whl": wheel],
+                                "fixture://wheelhost/torch-2.15.0T-cp314-fake.whl": wheel],
                         uvSHA: try sha256Hex(at: uv),
                         llamaSHA: try sha256Hex(at: llama),
                         torchSHA: try sha256Hex(at: wheel))
@@ -218,7 +218,7 @@ final class RuntimeBootstrapTests: XCTestCase {
                    "innerPath": "uv-aarch64-apple-darwin/uv"},
             "llamaServer": {"name": "llama-server", "version": "\(llamaVersion)", "url": "fixture://llama.tar.gz",
                    "sha256": "\(llamaSHA)", "bytes": 0, "kind": "tar.gz", "binaryName": "llama-server"},
-            "torch": {"name": "torch", "version": "\(torchVersion)", "url": "fixture://torch.whl",
+            "torch": {"name": "torch", "version": "\(torchVersion)", "url": "fixture://wheelhost/torch-2.15.0T-cp314-fake.whl",
                    "sha256": "\(torchSHA)", "bytes": 0, "kind": "wheel"}
           }
         }
