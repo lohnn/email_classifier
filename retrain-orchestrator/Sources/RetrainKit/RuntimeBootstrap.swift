@@ -64,7 +64,8 @@ public struct RuntimeManifest: Codable, Equatable {
             roots.append(bundle.bundleURL)
         }
         if let resourceURL = Bundle.main.resourceURL {
-            roots.append(URL(fileURLWithPath: resourceURL))
+            // resourceURL is already a URL — no path re-wrapping.
+            roots.append(resourceURL)
         }
         roots.append(Bundle.main.bundleURL)
         if let executableURL = Bundle.main.executableURL?.deletingLastPathComponent() {
