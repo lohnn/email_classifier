@@ -316,8 +316,6 @@ final class PipelineRunnerTests: XCTestCase {
         try Data(requirements.utf8).write(to: reqFile)
         var sha = receiptSHA
         if receiptSHA == nil { sha = try PipelineRunner.fileSHA256(reqFile) }
-        let bootstrapper = RuntimeBootstrapper(commands: FakeCommands(),
-                                               fetcher: URLArtifactFetcher())
         let paths = RuntimeBootstrapper.Paths.under(containerDir: tmp)
         let receipt = RuntimeReceipt(
             manifestVersion: 1, uvVersion: "0.13.6T",
@@ -395,7 +393,7 @@ final class PipelineRunnerTests: XCTestCase {
         let classifier = FakeClassifier(events: sink, snapshotArchive: tmp)
         let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
                                 commands: FakeCommands(), llama: FakeLlama())
-        try? materializeSnapshotSkeleton(tmp: tmp)
+        _ = try? materializeSnapshotSkeleton(tmp: tmp)
         let outcome = awaitSyncValue { await PipelineRunner().runTraining(config) }
         guard case .waitingForManualMerge(let state) = outcome else {
             return XCTFail("expected waitingForManualMerge, got \(outcome)")
@@ -420,7 +418,7 @@ final class PipelineRunnerTests: XCTestCase {
         let classifier = FakeClassifier(events: sink, snapshotArchive: tmp)
         let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
                                 commands: FakeCommands(), llama: FakeLlama())
-        try? materializeSnapshotSkeleton(tmp: tmp)
+        _ = try? materializeSnapshotSkeleton(tmp: tmp)
         _ = awaitSyncValue { await PipelineRunner().runTraining(config) }
         let outcome = awaitSyncValue { await PipelineRunner().resumeAfterMerge(config) }
         guard case .failed(let stage, let message) = outcome else {
@@ -439,7 +437,7 @@ final class PipelineRunnerTests: XCTestCase {
         let commands = FakeCommands()
         let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
                                 commands: commands, llama: llama)
-        try? materializeSnapshotSkeleton(tmp: tmp)
+        _ = try? materializeSnapshotSkeleton(tmp: tmp)
         _ = awaitSyncValue { await PipelineRunner().runTraining(config) }
 
         // The operator's merge lands the GGUF at the checkpoint path; the
@@ -479,7 +477,7 @@ final class PipelineRunnerTests: XCTestCase {
         let commands = FakeCommands()
         let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
                                 commands: commands, llama: FakeLlama())
-        try? materializeSnapshotSkeleton(tmp: tmp)  // receipt sha == file sha
+        _ = try? materializeSnapshotSkeleton(tmp: tmp)  // receipt sha == file sha
         var sawInstall = false
         commands.onRun = { stage, _, _ in
             if stage == "trainer-requirements" { sawInstall = true }
@@ -509,7 +507,7 @@ final class PipelineRunnerTests: XCTestCase {
                                 commands: commands, llama: FakeLlama())
         let reqFile = try? materializeSnapshotSkeleton(tmp: tmp)
         // the snapshot lands CHANGED pins: rewrite the file after the receipt
-        try? Data(DEFAULT_REQS.appending("peft==0.22.0\n").utf8)
+        try? Data(Self.DEFAULT_REQS.appending("peft==0.22.0\n").utf8)
             .write(to: reqFile ?? config.brainDir
                 .appendingPathComponent("train_lora_requirements.txt"))
         let uvBinURL = tmp.appendingPathComponent("rt/bin/uv")
@@ -563,7 +561,7 @@ final class PipelineRunnerTests: XCTestCase {
         let classifier = FakeClassifier(events: sink, snapshotArchive: tmp)
         let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
                                 commands: FakeCommands(), llama: FakeLlama())
-        try? materializeSnapshotSkeleton(tmp: tmp, receiptSHA: "stale-sha")
+        _ = try? materializeSnapshotSkeleton(tmp: tmp, receiptSHA: "stale-sha")
         // stale receipt sha ≠ file sha ⇒ install path ⇒ uv must exist; it does not
         let outcome = awaitSyncValue { await PipelineRunner().runTraining(config) }
         guard case .failed(let stage, let message) = outcome else {
