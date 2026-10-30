@@ -47,7 +47,7 @@ LoRA param line, the diagnostics line, plus `ls -R /tmp/m7_lora` and the
 `meta.json` contents. Failures verbatim — `TRAINING ABORT:` lines are written
 for exactly that.
 
-## Tier 2 — provisioned-runtime validation (after venv wiring lands)
+## Tier 2 — provisioned-runtime validation (wired + paste-certified 2026-10-30)
 
 Same command but with the app's own runtime python:
 
@@ -56,11 +56,18 @@ Same command but with the app's own runtime python:
     --data-dir <TrainingData root same as the classifier's>
 ```
 
-This tier only means something once the bootstrap installs
-`train_lora_requirements.txt` into the app venv (the M5-runtime-side wiring is
-an open integration item — see the M7 report; torch stays manifest-pinned).
-Missing packages abort with the exact missing-module list — that text is the
-diagnostic.
+The trainer stack is SNAPSHOT-DRIVEN now (committed + paste-certified
+2026-10-30): the snapshot's `train_lora_requirements.txt` (which RODE the
+snapshot — trainer + pins move as one unit) is installed into the app venv by
+the runner's `trainer-requirements` stage right before training — idempotent
+`uv pip install -r`, sha-gated against the runtime receipt; changed pins
+auto-heal by reinstalling, never halting; torch stays manifest-pinned. Tier 2
+needs NO manual venv work: the first Run now after this build installs the
+stack (hundreds-of-MB download class — same consented bucket as the bootstrap;
+the log line states it plainly). A deliberate Tier-2 pre-check without a run:
+run the venv python's `-c "import train_lora"` — a clean import means the
+stack is in; the trainer's exact missing-module list means the stage hasn't
+run yet.
 
 ## What NOT to conclude from Tier 1/2
 
