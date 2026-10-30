@@ -92,6 +92,33 @@ final class RecordingCommands: CommandRunning {
     }
 }
 
+/// Hybrid runner: executes REAL system binaries (/usr/bin/tar — the
+/// unpack IS behavior under test), records everything else (uv/venv/torch
+/// invocations). Round-20 lesson: a recording-only fake leaves the
+/// archive contents un-materialized, and "expected binary inside the
+/// archive" is then the CORRECT verdict — the fake lied, not the code.
+final class HybridCommands: CommandRunning {
+    private(set) var calls: [String] = []   // "launchPath|arg1|arg2…"
+
+    func run(stage: String, launchPath: String, arguments: [String],
+             workingDirectory: URL, environment: [String: String],
+             log: RunLog, timeout: TimeInterval) throws -> CommandResult {
+        calls.append(([launchPath] + arguments).joined(separator: "|"))
+        if launchPath == "/usr/bin/tar" {
+            return try ProcessCommandRunner().run(
+                stage: stage, launchPath: launchPath, arguments: arguments,
+                workingDirectory: workingDirectory, environment: environment,
+                log: log, timeout: timeout
+            )
+        }
+        return CommandResult(exitCode: 0, durationSeconds: 0.001, allOutput: "fake ok")
+    }
+
+    func hasCall(prefix: String, containing arg: String) -> Bool {
+        calls.contains { $0.hasPrefix(prefix) && $0.contains(arg) }
+    }
+}
+
 final class RuntimeBootstrapTests: XCTestCase {
     private var tmp: URL!
     private var log: RunLog!
@@ -204,7 +231,8 @@ final class RuntimeBootstrapTests: XCTestCase {
     func testInsufficientDiskFailsBeforeAnyDownload() async throws {
         let manifest = try makeManifest(minFreeGB: 1_000_000)  // impossible ask
         let fetcher = FakeArtifactFetcher(files: [:])
-        let bootstrapper = RuntimeBootstrapper(commands: RecordingCommands(), fetcher: fetcher)
+        let commands = HybridCommands()
+        let bootstrapper = RuntimeBootstrapper(commands: commands, fetcher: fetcher)
         do {
             _ = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
             XCTFail("expected insufficientDisk")
@@ -239,7 +267,10 @@ final class RuntimeBootstrapTests: XCTestCase {
         let manifest = try makeManifest(fixtures)  // matches the fixture bytes
         let fetcher = FakeArtifactFetcher(files: fixtures.files,
                                           failuresRemaining: ["fixture://uv.tar.gz": 1])
-        let bootstrapper = RuntimeBootstrapper(commands: RecordingCommands(), fetcher: fetcher, attempts: 2)
+        // Real tar required: this test runs all the way to a receipt, which
+        // means the uv AND llama-server layers actually unpack.
+        let commands = HybridCommands()
+        let bootstrapper = RuntimeBootstrapper(commands: commands, fetcher: fetcher, attempts: 2)
         let receipt = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
         XCTAssertNotNil(receipt, "second attempt should succeed (Mac-side retries live here)")
         XCTAssertEqual(fetcher.ledger.fetchCount("fixture://uv.tar.gz"), 2)
@@ -249,7 +280,8 @@ final class RuntimeBootstrapTests: XCTestCase {
         let fixtures = try buildFixtures()
         let manifest = try makeManifest(fixtures)
         let fetcher = FakeArtifactFetcher(files: fixtures.files)
-        let bootstrapper = RuntimeBootstrapper(commands: RecordingCommands(), fetcher: fetcher)
+        let commands = HybridCommands()
+        let bootstrapper = RuntimeBootstrapper(commands: commands, fetcher: fetcher)
         let receipt = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
 
         XCTAssertEqual(receipt.uvVersion, "0.13.6T")
@@ -288,7 +320,8 @@ final class RuntimeBootstrapTests: XCTestCase {
         let fixtures = try buildFixtures()
         let manifest = try makeManifest(fixtures)
         let fetcher = FakeArtifactFetcher(files: fixtures.files)
-        let bootstrapper = RuntimeBootstrapper(commands: RecordingCommands(), fetcher: fetcher)
+        let commands = HybridCommands()
+        let bootstrapper = RuntimeBootstrapper(commands: commands, fetcher: fetcher)
         _ = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
         let callsBefore = fetcher.ledger.totalFetches()
         _ = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
@@ -299,11 +332,12 @@ final class RuntimeBootstrapTests: XCTestCase {
     func testUvAndTorchAreInvokedThroughTheRecordedCommands() async throws {
         let fixtures = try buildFixtures()
         let manifest = try makeManifest(fixtures)
-        let commands = RecordingCommands()
+        let commands = HybridCommands()
         let bootstrapper = RuntimeBootstrapper(commands: commands, fetcher: FakeArtifactFetcher(files: fixtures.files))
         let receipt = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
         XCTAssertTrue(commands.hasCall(prefix: receipt.uvPath, containing: "install"))   // uv python install 3.14
         XCTAssertTrue(commands.hasCall(prefix: receipt.uvPath, containing: "venv"))      // uv venv
-        XCTAssertTrue(commands.calls.contains { $0.arguments.contains("torch-2.15.0T-cp314-fake.whl") })  // local verified wheel
+        let torchCall = "torch-2.15.0T-cp314-fake.whl"
+        XCTAssertTrue(commands.calls.contains { $0.contains(torchCall) && $0.contains("pip") })  // local verified wheel via uv pip
     }
 }
