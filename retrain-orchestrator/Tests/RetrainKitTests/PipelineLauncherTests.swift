@@ -145,8 +145,9 @@ final class PipelineLauncherTests: XCTestCase {
         XCTAssertEqual(config.llamaServerBin.path, receipt.llamaServerPath)
         XCTAssertEqual(config.workspaceDir, tmp.appendingPathComponent("workspace"))
         XCTAssertEqual(config.runsDir, tmp.appendingPathComponent("runs"))
+        // production shape carries the isDirectory trailing component
         XCTAssertEqual(config.trainingDataDir,
-                       tmp.appendingPathComponent("workspace/training_data"))
+                       tmp.appendingPathComponent("workspace/training_data", isDirectory: true))
     }
 
     func testResumeExecutesShipPass() async {
