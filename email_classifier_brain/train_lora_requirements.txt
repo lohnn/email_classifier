@@ -1,0 +1,28 @@
+# =============================================================================
+# train_lora.py — trainer dependency pins (WI-105 P2 M7)
+# =============================================================================
+# The retrain-orchestrator's app runtime venv (M5 bootstrap) honors this set.
+# torch is NOT listed here: it is installed from the sha-verified wheel pinned
+# in RetrainKit/RuntimeManifest.json (currently torch 2.15.0 cp314 macOS arm64)
+# — uv never floating-resolves torch.
+#
+# Version discipline: these exact versions ran the concatenated validated chain
+# (LoRA contrastive training -> peft merge_and_unload -> convert_hf_to_gguf ->
+# serve, FINDINGS §16) on CPython 3.14 in the embeddinggemma-lab training venv
+# — they are MEASURED-compatible pins, not latest-guesses. Bump only with a
+# lab rerun of the chain (W-133: model-stack version pairs silently change
+# behavior — warm success is not verification).
+#
+# The app-side install step (manifest layers or a snapshot-requirements hook)
+# is the bootstrap's job; any drift between this file and the installed venv is
+# a mirrored "refresh runtime" event, never a silent pip run.
+# =============================================================================
+
+peft==0.21.2
+sentence-transformers==6.1.0
+transformers==5.19.0
+huggingface-hub==1.33.0
+safetensors==0.8.0
+tokenizers==0.23.3
+accelerate==1.15.0
+sentencepiece==0.2.2
