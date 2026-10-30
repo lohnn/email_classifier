@@ -43,9 +43,9 @@ cp ".build/release/$EXE" "$APP/Contents/MacOS/$EXE"
 # Products/…) — discover the bundle by NAME under .build, never assume one
 # path; a missing bundle would make Bundle.module fatalError AT LAUNCH
 # (process death, status icon gone) — so fail the BUILD loudly instead.
-RT_BUNDLE="$(/usr/bin/find .build -type d -name 'RetrainKit_RetrainKit.bundle' 2>/dev/null | /usr/bin/head -1)"
+RT_BUNDLE="$(/usr/bin/find .build -type d \( -name 'RetrainKit_RetrainKit.bundle' -o -name 'RetrainKit_*.bundle' \) 2>/dev/null | /usr/bin/head -1)"
 if [ -z "$RT_BUNDLE" ]; then
-    echo "FATAL: RetrainKit_RetrainKit.bundle not found under .build — the app would crash at launch (Bundle.module fatalError) without it." >&2
+    echo "FATAL: no RetrainKit_*.bundle found under .build — the app would crash at launch (Bundle.module fatalError) without its resources." >&2
     exit 1
 fi
 echo "==> shipping resource bundle: $RT_BUNDLE"
@@ -92,6 +92,14 @@ spctl --assess --type execute "$APP" 2>/dev/null || \
 # state lands in ~/Library/Application Support instead of the container
 # dir — which surfaced as "the Erase target folder is empty" at runtime.
 # Assert presence here so that failure mode dies at build time.
+echo "==> assert resource bundle shipped (manifest = bootstrap's anchor)"
+if ! /bin/ls "$APP/Contents/Resources/" 2>/dev/null | /usr/bin/grep -q "RetrainKit_.*\.bundle"; then
+    echo "FATAL: RetrainKit_*.bundle missing from $APP/Contents/Resources —" >&2
+    echo "       the runtime bootstrap could never locate its manifest." >&2
+    exit 1
+fi
+echo "resource bundle shipped into Contents/Resources"
+
 echo "==> assert sandbox entitlements are embedded (assert, not imply)"
 ENT_DUMP="$(/usr/bin/codesign -d --entitlements - "$APP" 2>&1 || true)"
 if ! printf '%s' "$ENT_DUMP" | /usr/bin/grep -aq "app-sandbox"; then

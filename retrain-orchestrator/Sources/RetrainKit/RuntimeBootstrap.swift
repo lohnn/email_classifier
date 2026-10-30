@@ -47,52 +47,73 @@ public struct RuntimeManifest: Codable, Equatable {
 
     /// Load the manifest shipped with the Kit (authoring-time pins — the
     /// load-bearing constant of the deterministic bootstrap).
-    public static func bundled() throws -> RuntimeManifest {
-        // DEFENSIVE location (M6 runtime-acceptance failure, 2026-10-30):
-        // the generated Bundle.module accessor FATALERRORS (uncatchable
-        // SIGTRAP) when the SwiftPM resource bundle is missing from a
-        // hand-assembled .app — the process died at launch and the status
-        // bar icon vanished with it. Locating the bundle by NAME search
-        // keeps every failure catchable → pinned notification, per contract.
-        // Shape note: SPM .copy resources may land at bundle root or under
-        // a relative subdir — the search resolves the file recursively.
-        let bundleName = "RetrainKit_RetrainKit.bundle"
-        var searchRoots: [URL] = []
+    /// Locator with injectable roots: production uses defaultSearchRoots();
+    /// Kit tests inject a fixture bundle so the defensive path is
+    /// deterministic everywhere (and Bundle.module is never trusted).
+    public static func bundled(searchRoots: [URL]? = nil) throws -> RuntimeManifest {
+        let roots = searchRoots ?? Self.defaultSearchRoots()
+        return try decode(fromSearchRoots: roots)
+    }
+
+    /// Never touches Bundle.module: the generated accessor cannot be
+    /// caught (static let + fatalError). All roots here resolvable WITHOUT
+    /// triggering it.
+    static func defaultSearchRoots() -> [URL] {
+        var roots: [URL] = []
         for bundle in Bundle.allBundles {
-            searchRoots.append(bundle.bundleURL)
+            roots.append(bundle.bundleURL)
         }
         if let resourceURL = Bundle.main.resourceURL {
-            searchRoots.append(URL(fileURLWithPath: resourceURL))
+            roots.append(URL(fileURLWithPath: resourceURL))
         }
-        searchRoots.append(Bundle.main.bundleURL)
+        roots.append(Bundle.main.bundleURL)
         if let executableURL = Bundle.main.executableURL?.deletingLastPathComponent() {
-            searchRoots.append(executableURL)
+            roots.append(executableURL)
         }
+        return roots
+    }
 
+    static func decode(fromSearchRoots roots: [URL]) throws -> RuntimeManifest {
+        let fm = FileManager.default
         var tried: [String] = []
-        for root in searchRoots {
-            let bundleDir = root.appendingPathComponent(bundleName)
-            let fm = FileManager.default
-            guard fm.fileExists(atPath: bundleDir.path) else { continue }
-            if let files = fm.enumerator(at: bundleDir, includingPropertiesForKeys: nil) {
-                while let item = files.nextObject() as? URL {
-                    if item.lastPathComponent == "RuntimeManifest.json" {
-                        do {
-                            let data = try Data(contentsOf: item)
-                            return try JSONDecoder().decode(RuntimeManifest.self, from: data)
-                        } catch {
-                            throw BootstrapError.invalidManifest(
-                                "RuntimeManifest at \(item.path) failed to decode: \(error)")
+        for root in roots {
+            // Bundle naming drifted across SPM releases — match ANY
+            // RetrainKit_*.bundle directory under each root.
+            guard let entries = try? fm.contentsOfDirectory(at: root,
+                                                            includingPropertiesForKeys: nil) else {
+                tried.append(root.path)
+                continue
+            }
+            let bundles = entries.filter {
+                let n = $0.lastPathComponent
+                return n.hasPrefix("RetrainKit_") && n.hasSuffix(".bundle")
+            }
+            for bundleDir in bundles {
+                tried.append(bundleDir.path)
+                if let files = fm.enumerator(at: bundleDir, includingPropertiesForKeys: nil) {
+                    while let item = files.nextObject() as? URL {
+                        if item.lastPathComponent == "RuntimeManifest.json" {
+                            do {
+                                let data = try Data(contentsOf: item)
+                                return try JSONDecoder().decode(RuntimeManifest.self, from: data)
+                            } catch {
+                                throw BootstrapError.invalidManifest(
+                                    "RuntimeManifest at \(item.path) failed to decode: \(error)")
+                            }
                         }
                     }
                 }
             }
-            tried.append(bundleDir.path)
         }
         throw BootstrapError.invalidManifest(
-            "RuntimeManifest.json not found — searched \(bundleName) under "
+            "RuntimeManifest.json not found — searched RetrainKit_*.bundle under "
             + tried.joined(separator: ", ")
-            + ". The build script must ship the SwiftPM resource bundle into the .app (build_app.sh asserts this); without it the bootstrap cannot start.")
+            + ". The build script must ship the SwiftPM resource bundle into the .app")
+    }
+
+    /// Legacy entry kept for API continuity (defensive locator beneath).
+    public static func bundledLegacy(_ unused: Void = ()) throws -> RuntimeManifest {
+        try decode(fromSearchRoots: defaultSearchRoots())
     }
 }
 

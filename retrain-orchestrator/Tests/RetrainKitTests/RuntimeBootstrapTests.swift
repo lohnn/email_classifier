@@ -119,6 +119,69 @@ final class HybridCommands: CommandRunning {
     }
 }
 
+final class RuntimeManifestLocatorTests: XCTestCase {
+    /// The DEFENSIVE locator path (production never touches Bundle.module):
+    /// a fixture RetrainKit_*.bundle in a temp root must decode; an empty
+    /// root must throw the described catchable error.
+    private func fixtureRoot(manifestJSON: String?) throws -> URL {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("retrain-manifest-locator-\(UUID().uuidString)", isDirectory: true)
+        let bundle = root.appendingPathComponent("RetrainKit_Fake.bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Resources"),
+                                                withIntermediateDirectories: true)
+        if let manifestJSON = manifestJSON {
+            try Data(manifestJSON.utf8).write(
+                to: bundle.appendingPathComponent("Resources/RuntimeManifest.json"))
+        }
+        return root
+    }
+
+    private let minimalManifest = """
+        {
+          "manifestVersion": 1,
+          "generatedAt": "2026-10-29T00:00:00Z",
+          "python": {"version": "3.14"},
+          "minFreeGB": 8,
+          "layers": {
+            "uv": {"name": "uv", "version": "0.13.6", "url": "u", "sha256": "\(String(repeating: "1", count: 64))", "bytes": 1, "kind": "tar.gz", "innerPath": "uv"},
+            "llamaServer": {"name": "llama-server", "version": "bT", "url": "l", "sha256": "\(String(repeating: "2", count: 64))", "bytes": 1, "kind": "tar.gz", "binaryName": "llama-server"},
+            "torch": {"name": "torch", "version": "2.15.0", "url": "t", "sha256": "\(String(repeating: "3", count: 64))", "bytes": 1, "kind": "wheel"}
+          }
+        }
+        """
+
+    func testLocatorFindsAndParsesFixtureBundle() throws {
+        let root = try fixtureRoot(manifestJSON: minimalManifest)
+        let manifest = try RuntimeManifest.bundled(searchRoots: [root])
+        XCTAssertEqual(manifest.manifestVersion, 1)
+        XCTAssertEqual(manifest.uvLayer?.version, "0.13.6")
+        XCTAssertEqual(manifest.pythonVersion, "3.14")
+    }
+
+    func testLocatorThrowsCatchableDescribedErrorWhenAbsent() throws {
+        let root = try fixtureRoot(manifestJSON: nil)  // bundle exists, manifest missing
+        XCTAssertThrowsError(try RuntimeManifest.bundled(searchRoots: [root])) { error in
+            guard case BootstrapError.invalidManifest(let message) = error else {
+                return XCTFail("expected invalidManifest, got \(error)")
+            }
+            XCTAssertTrue(message.contains("RuntimeManifest.json not found"))
+            XCTAssertTrue(message.contains("RetrainKit_Fake.bundle"), "search paths must be named in the error")
+        }
+    }
+
+    func testLocatorRecursesSubdirectories() throws {
+        // SPM .copy may preserve subpaths (Resources/RuntimeManifest.json vs root)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("retrain-manifest-locator-\(UUID().uuidString)", isDirectory: true)
+        let bundle = root.appendingPathComponent("RetrainKit_Fake2.bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundle.appendingPathComponent("nested/deeper"),
+                                                withIntermediateDirectories: true)
+        try Data(minimalManifest.utf8).write(to: bundle.appendingPathComponent("nested/deeper/RuntimeManifest.json"))
+        let manifest = try RuntimeManifest.bundled(searchRoots: [root])
+        XCTAssertEqual(manifest.pythonVersion, "3.14")
+    }
+}
+
 final class RuntimeBootstrapTests: XCTestCase {
     private var tmp: URL!
     private var log: RunLog!
