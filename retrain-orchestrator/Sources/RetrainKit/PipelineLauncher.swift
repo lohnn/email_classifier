@@ -162,6 +162,37 @@ public final class PipelineLauncher {
                             runStatePath: PipelineRunStore.stateURL(runsDir: config.runsDir, runID: runID))
     }
 
+    /// Which pass should Run now execute? A run sitting in
+    /// awaiting_manual_merge resumes (ship pass); otherwise we start a new
+    /// training pass.
+    public func phase(runsDir: URL) -> LaunchPhase {
+        pendingRunID(runsDir: runsDir) != nil ? .resume : .train
+    }
+
+    /// The run awaiting its manual merge, if any (newest state wins).
+    public func pendingRunID(runsDir: URL) -> String? {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: runsDir,
+                                                        includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        var newest: (String, Date)?
+        for entry in entries {
+            guard let state = PipelineRunStore.load(runsDir: runsDir, runID: entry.lastPathComponent),
+                  state.phase == "awaiting_manual_merge" else { continue }
+            if let current = newest, current.1 >= state.updatedAt { continue }
+            newest = (state.runID, state.updatedAt)
+        }
+        return newest?.0
+    }
+
+    public static func newRunID(now: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return "run-" + f.string(from: now)
+    }
+
     /// Map the runner's result into the user-facing outcome. Machine-true
     /// detail source: PipelineRunState in the run dir on failure/skip.
     static func outcome(for result: PipelineRunResult,

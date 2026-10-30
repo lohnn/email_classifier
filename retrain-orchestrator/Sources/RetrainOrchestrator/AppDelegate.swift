@@ -14,9 +14,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var notifier: Notifier!
     private var settingsController: SettingsWindowController?
     /// Menu-bar indicator (T3): nil = not probed yet (gray), true/false =
-    /// last explicit probe verdict. Probes happen ONLY on the Settings
-    /// button press at P1 — no background poller (P2 wires the cadence).
+    /// last explicit probe verdict. Probes happen ONLY on explicit presses
+    /// (Settings Test button, launcher outcomes) — no background poller;
+    /// P2 wires the automatic cadence.
     private var connection: (reachable: Bool?, detail: String) = (nil, "not probed yet")
+    /// M6: launcher + bootstrap orchestration.
+    private let launcher = PipelineLauncher()
+    private let runtimeEnsuring: RuntimeEnsuring = RuntimeBootstrapper(
+        commands: ProcessCommandRunner(), fetcher: URLArtifactFetcher())
+    private var passInFlight = false
+    private var runtimeProvisioning = false
+    private var appearanceObservation: NSKeyValueObservation?
 
     // MARK: lifecycle
 
@@ -42,6 +50,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             // the first successful Save flips firstRunCompleted.
             runLog.info("First run — opening Settings for initial setup (classifier URL unset by design)")
             openSettings(nil)
+        }
+        // Composite dot must regenerate when the menubar appearance flips.
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: []) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.refreshStatusImage() }
+        }
+        refreshStatusImage()
+        // Consented first-launch runtime bootstrap (receipt short-circuits
+        // when already provisioned). Provisioned state gates Run now.
+        runtimeProvisioning = true
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let manifest = try RuntimeManifest.bundled()
+                let receipt = try await self.runtimeEnsuring.ensureRuntime(
+                    manifest: manifest, containerDir: Ledger.defaultDirectory(), log: self.runLog)
+                self.runtimeProvisioning = false
+                self.runLog.info("Runtime provisioning complete (uv \(receipt.uvVersion), llama \(receipt.llamaVersion), torch \(receipt.torchVersion))")
+                self.notifier.postAlways(title: "Runtime ready",
+                                         body: "uv \(receipt.uvVersion), python \(receipt.pythonVersion), llama-server \(receipt.llamaVersion), torch \(receipt.torchVersion) — Run now can go.")
+            } catch {
+                self.runtimeProvisioning = false
+                self.runLog.error("Runtime provisioning FAILED: \(error) — Run now will retry it")
+                self.notifier.postFailure(title: "Runtime bootstrap failed",
+                                          body: "Run now will retry. Check the log (Open log) for the full error.")
+            }
+        }
+    }
+
+    /// The launcher assembles-and-runs; failures NEVER throw — they come
+    /// back as pinned outcomes. Dot + notifications render here (app-side).
+    private func executeLaunch(phase: LaunchPhase) async -> LaunchOutcome {
+        await launcher.execute(phase: phase, ledger: ledger,
+                               containerDir: Ledger.defaultDirectory(),
+                               runID: runIDForPhase(phase),
+                               log: runLog)
+    }
+
+    private func runIDForPhase(_ phase: LaunchPhase) -> String {
+        if phase == .resume, let pending = launcher.pendingRunID(runsDir: Ledger.defaultDirectory().appendingPathComponent("runs")) {
+            return pending
+        }
+        return PipelineLauncher.newRunID()
+    }
+
+    private func launchPhaseForNow() -> LaunchPhase {
+        launcher.phase(runsDir: Ledger.defaultDirectory().appendingPathComponent("runs"))
+    }
+
+    private func applyOutcome(_ outcome: LaunchOutcome) {
+        if let reachable = outcome.dotReachable {
+            connection = (reachable, outcome.headline)
+        }
+        refreshStatusImage()
+        if outcome.pinnedFailure {
+            notifier.postFailure(title: outcome.headline, body: outcome.detail)
+        } else {
+            notifier.postAlways(title: outcome.headline, body: outcome.detail)
         }
     }
 
@@ -69,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         menu.addItem(quit)
         item.menu = menu
         statusItem = item
-        refreshStatusText()
+        refreshStatusImage()
     }
 
     private func statusLabel() -> String {
@@ -81,75 +146,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return "idle · last \(f.string(from: finished))"
     }
 
-    /// One writer for the status-bar visuals: adaptive template glyph +
-    /// label whose leading run keeps the DEFAULT (menu-bar-adaptive) color
-    /// while the trailing state dot carries the explicit probe color —
-    /// gray (unknown) / green (reachable) / red (unreachable) — plus a
-    /// tooltip naming the last probe result.
-    private func refreshStatusText() {
+    /// One writer for the status-bar visuals: the composite image (round-14
+    /// lesson — menubar ignores attributed-text colors, so the dot is drawn
+    /// as pixels) + adaptive title + tooltip. Regenerated on appearance
+    /// change via the effectiveAppearance observer.
+    private func refreshStatusImage() {
         guard let button = statusItem?.button else { return }
-        if button.image == nil,
-           let image = NSImage(systemSymbolName: "arrow.trianglehead.2.clockwise.rotate.90",
-                               accessibilityDescription: "Retrain orchestrator") {
-            image.isTemplate = true
-            button.image = image
-        }
-        button.font = NSFont.menuBarFont(ofSize: 0)
-
-        let dot: (color: NSColor, word: String)
+        let dotState: ConnectionState
         switch connection.reachable {
-        case .some(true): dot = (.systemGreen, "reachable")
-        case .some(false): dot = (.systemRed, "unreachable")
-        case .none: dot = (.systemGray, "not probed")
+        case .some(true): dotState = .reachable
+        case .some(false): dotState = .failed
+        case .none: dotState = .unknown
         }
-
-        let prefix = button.image == nil ? "↻" : ""
-        let text = NSMutableAttributedString(string: "\(prefix) \(statusLabel())")
-        text.append(NSAttributedString(
-            string: "  ●",
-            attributes: [
-                .foregroundColor: dot.color,
-                .font: NSFont.menuBarFont(ofSize: 0),
-            ]
-        ))
-        button.attributedTitle = text
-        button.toolTip = "Retrain orchestrator — classifier: \(dot.word) (\(connection.detail))"
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        button.image = StatusIconImage.composite(
+            glyphName: "arrow.trianglehead.2.clockwise.rotate.90",
+            dotState: dotState,
+            isDark: isDark
+        )
+        button.title = " \(statusLabel())"
+        button.toolTip = "Retrain orchestrator — classifier: \(connection.detail)"
     }
 
     // MARK: actions
 
     @objc private func runNow(_ sender: Any?) {
-        // P1: evaluate the locked trigger policy and report. No pipeline, no
-        // network — the corrections delta becomes real when P2 wires the
-        // classifier's counts (ledger baseline field already exists).
-        let current = ledger.load()
-        let decision = TriggerPolicy.evaluate(state: current, newCorrections: 0, now: Date())
-        runLog.info("Run now: \(describe(decision)) [pipeline execution lands in P2]")
-        switch decision {
-        case .fire(let reason):
-            notifier.postIfEnabled(
-                .runStarted, state: current,
-                title: "Retrain trigger: would fire",
-                body: "\(reason). The pipeline itself lands in P2."
-            )
-        case .skip(let reason, let detail):
-            let title = reason == .noNewTrainingData
-                ? "Retrain skip: no new training data"
-                : "Retrain not due"
-            notifier.postIfEnabled(
-                .skipped, state: current,
-                title: title, body: "\(detail). (Pipeline lands in P2.)"
-            )
+        // M6: Run now = provision runtime (receipt short-circuits) →
+        // launcher pass. Run-now-only until the operator validates one
+        // full manual run; the unattended timer is a follow-up commit.
+        guard !passInFlight else {
+            runLog.warning("Run now ignored — a pass is already in flight")
+            notifier.postAlways(title: "Already running",
+                                body: "A retrain pass is in flight — check the menu bar for the live state.")
+            return
         }
-        refreshStatusText()
-    }
-
-    private func describe(_ decision: TriggerDecision) -> String {
-        switch decision {
-        case .fire(let reason):
-            return "fire (\(reason))"
-        case .skip(let reason, let detail):
-            return "skip: \(reason.rawValue) (\(detail))"
+        if runtimeProvisioning {
+            runLog.warning("Run now deferred — runtime still provisioning (first run downloads ~170 MB)")
+            notifier.postAlways(title: "Runtime still installing",
+                                body: "The embedded runtime (~170 MB) is downloading into the sandbox. Try Run now again in a few minutes.")
+            return
+        }
+        passInFlight = true
+        let phase = launchPhaseForNow()
+        Task { [weak self] in
+            guard let self = self else { return }
+            self.runLog.info("Run now: executing \(phase == .resume ? "ship pass (resume)" : "training pass")")
+            let outcome = await self.executeLaunch(phase: phase)
+            self.passInFlight = false
+            self.applyOutcome(outcome)
         }
     }
 
@@ -164,7 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 onProbe: { [weak self] reachable, detail in
                     guard let self = self else { return }
                     self.connection = (reachable, detail)
-                    self.refreshStatusText()
+                    self.refreshStatusImage()
                 }
             )
         }
@@ -222,7 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func applySavedSettings() {
         state = ledger.load()
         runLog.info("Settings saved (threshold \(state.correctionsThreshold), cadence \(state.weeklyCadenceEnabled ? "\(state.weeklyCadenceDays)d" : "off"), autonomy \(state.autonomy.rawValue))")
-        refreshStatusText()
+        refreshStatusImage()
     }
 
     // MARK: notification presentation while running
