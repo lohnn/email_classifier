@@ -38,11 +38,18 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp ".build/release/$EXE" "$APP/Contents/MacOS/$EXE"
 
-# SwiftPM resource bundle (pinned RuntimeManifest.json) rides with the app —
-# Bundle.module resolves it next to the executable or in Resources.
-if [ -d ".build/release/RetrainKit_RetrainKit.bundle" ]; then
-    cp -R ".build/release/RetrainKit_RetrainKit.bundle" "$APP/Contents/Resources/"
+# SwiftPM resource bundle (pinned RuntimeManifest.json) rides with the app.
+# Round-22 hardening: this machine's SwiftPM relocates products (.build/out/
+# Products/…) — discover the bundle by NAME under .build, never assume one
+# path; a missing bundle would make Bundle.module fatalError AT LAUNCH
+# (process death, status icon gone) — so fail the BUILD loudly instead.
+RT_BUNDLE="$(/usr/bin/find .build -type d -name 'RetrainKit_RetrainKit.bundle' 2>/dev/null | /usr/bin/head -1)"
+if [ -z "$RT_BUNDLE" ]; then
+    echo "FATAL: RetrainKit_RetrainKit.bundle not found under .build — the app would crash at launch (Bundle.module fatalError) without it." >&2
+    exit 1
 fi
+echo "==> shipping resource bundle: $RT_BUNDLE"
+cp -R "$RT_BUNDLE" "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
