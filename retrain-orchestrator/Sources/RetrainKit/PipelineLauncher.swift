@@ -51,6 +51,8 @@ public final class PipelineLauncher {
     private let ensure: RuntimeEnsuring
     private let pipeline: PipelineEvolving
     private let provideClassifier: ClassifierProvider
+    /// Seam for tests: production defaults to the defensive locator.
+    private let provideManifest: () throws -> RuntimeManifest
     private let commands: CommandRunning
     /// Optional: nil → the launcher builds a ProcessLlamaServer from the
     /// receipt's llama-server path at execution time.
@@ -63,12 +65,14 @@ public final class PipelineLauncher {
                 provideClassifier: @escaping ClassifierProvider = { url in
                     try ClassifierClient(baseURL: url)
                 },
+                manifestProvider: @escaping () throws -> RuntimeManifest = RuntimeManifest.bundled,
                 attempts: Int = 2) {
         self.ensure = ensure ?? RuntimeBootstrapper(commands: commands,
                                                     fetcher: URLArtifactFetcher(),
                                                     attempts: attempts)
         self.pipeline = pipeline ?? PipelineRunner()
         self.provideClassifier = provideClassifier
+        self.provideManifest = provideManifest
         self.commands = commands
         self.llama = llama
         self.attempts = attempts
@@ -99,7 +103,7 @@ public final class PipelineLauncher {
         let manifest: RuntimeManifest
         let receipt: RuntimeReceipt
         do {
-            manifest = try RuntimeManifest.bundled()
+            manifest = try provideManifest()
             receipt = try await ensure.ensureRuntime(manifest: manifest,
                                                      containerDir: containerDir,
                                                      log: log)

@@ -60,6 +60,26 @@ final class PipelineLauncherTests: XCTestCase {
         try? FileManager.default.removeItem(at: tmp)
     }
 
+    private func stubManifest(manifestVersion: Int = 1) -> RuntimeManifest {
+        // STUB manifest matching makeReceipt versions — launcher tests must
+        // never depend on the ambient filesystem search (round-31 lesson:
+        // 'bundled manifest is v1' was an environment assumption).
+        let json = """
+        {
+          "manifestVersion": \(manifestVersion),
+          "generatedAt": "2026-10-30T00:00:00Z",
+          "python": {"version": "3.14"},
+          "minFreeGB": 0.0001,
+          "layers": {
+            "uv": {"name": "uv", "version": "0.13.6", "url": "u", "sha256": "1", "bytes": 1, "kind": "tar.gz", "innerPath": "u"},
+            "llamaServer": {"name": "llama-server", "version": "b11982", "url": "l", "sha256": "2", "bytes": 1, "kind": "tar.gz", "binaryName": "llama-server"},
+            "torch": {"name": "torch", "version": "2.15.0", "url": "t", "sha256": "3", "bytes": 1, "kind": "wheel"}
+          }
+        }
+        """
+        return try! JSONDecoder().decode(RuntimeManifest.self, from: Data(json.utf8))
+    }
+
     private func makeReceipt(manifestVersion: Int = 1) -> RuntimeReceipt {
         // Versions match the COMMITTED manifest — RuntimeDrift.check tests
         // with these must pass; drift tests manufacture mismatches via
@@ -100,7 +120,9 @@ final class PipelineLauncherTests: XCTestCase {
         let pipeline = FakePipeline(result: .completed(PipelineSummary(
             runID: "r", vocabBranch: "vocab/r", vocabPushed: true,
             stagedGGUFBytes: 1, dataSHA: "d", durations: [:])))
-        let launcher = PipelineLauncher(ensure: ensure, pipeline: pipeline)
+        // v1 stub vs v99 receipt: drift BY DESIGN in the stub, not ambient.
+        let launcher = PipelineLauncher(ensure: ensure, pipeline: pipeline,
+                                        manifestProvider: { try! stubManifest(manifestVersion: 1) })
         let outcome = await launcher.execute(phase: .train, ledger: ledger,
                                              containerDir: tmp, runID: "run-1", log: log)
         XCTAssertEqual(outcome.headline, "Runtime drift — run halted")
@@ -110,9 +132,11 @@ final class PipelineLauncherTests: XCTestCase {
 
     func testInsufficientDiskBecomesPinnedOutcome() async {
         configure(url: "http://jarvis:8008")
+        let stub = stubManifest()
         let ensure = FakeRuntimeEnsuring(receipt: makeReceipt(),
                                          error: BootstrapError.insufficientDisk(neededGB: 8, availableGB: 1.2))
-        let launcher = PipelineLauncher(ensure: ensure, pipeline: FakePipeline(result: .skipped(reason: "x")))
+        let launcher = PipelineLauncher(ensure: ensure, pipeline: FakePipeline(result: .skipped(reason: "x")),
+                                        manifestProvider: { stub })
         let outcome = await launcher.execute(phase: .train, ledger: ledger,
                                              containerDir: tmp, runID: "run-1", log: log)
         XCTAssertTrue(outcome.headline.contains("Not enough disk space"))
@@ -131,7 +155,8 @@ final class PipelineLauncherTests: XCTestCase {
         let launcher = PipelineLauncher(ensure: ensure, pipeline: pipeline)
 
         let outcome = await launcher.execute(phase: .train, ledger: ledger,
-                                             containerDir: tmp, runID: "run-1", log: log)
+                                             containerDir: tmp, runID: "run-1", log: log,
+                                             manifestProvider: { stubManifest() })
         XCTAssertEqual(outcome.headline, "Retrain run completed")
         XCTAssertFalse(outcome.pinnedFailure)
         XCTAssertEqual(outcome.dotReachable, true)
@@ -159,7 +184,8 @@ final class PipelineLauncherTests: XCTestCase {
         let pipeline = FakePipeline(result: .completed(completed))
         let launcher = PipelineLauncher(ensure: ensure, pipeline: pipeline)
         let outcome = await launcher.execute(phase: .resume, ledger: ledger,
-                                             containerDir: tmp, runID: "run-1", log: log)
+                                             containerDir: tmp, runID: "run-1", log: log,
+                                             manifestProvider: { stubManifest() })
         XCTAssertEqual(outcome.headline, "Retrain run completed")
         XCTAssertEqual(pipeline.configs.first?.runID, "run-1")
     }

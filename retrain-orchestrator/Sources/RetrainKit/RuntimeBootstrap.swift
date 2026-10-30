@@ -91,8 +91,19 @@ public struct RuntimeManifest: Codable, Equatable {
             }
             for bundleDir in bundles {
                 tried.append(bundleDir.path)
-                if let files = fm.enumerator(at: bundleDir, includingPropertiesForKeys: nil) {
+                // Error-tolerant walk (round-31 lesson): the locator runs on
+                // END-USER filesystems (DerivedData internals included) —
+                // unreadable/failed subtrees are the NORMAL case. Skip them,
+                // never surface a mid-walk IO error; only a COMPLETED-empty
+                // search throws the catchable invalidManifest naming roots.
+                if let files = fm.enumerator(
+                    at: bundleDir,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    errorHandler: { _, _ in .skipDescendants }
+                ) {
                     while let item = files.nextObject() as? URL {
+                        let values = try? item.resourceValues(forKeys: [.isRegularFileKey])
+                        if values?.isRegularFile == false { continue }
                         if item.lastPathComponent == "RuntimeManifest.json" {
                             do {
                                 let data = try Data(contentsOf: item)
