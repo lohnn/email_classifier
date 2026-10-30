@@ -352,6 +352,48 @@ public final class RuntimeBootstrapper {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
     }
 
+    // MARK: round-42 install-claim discipline (no silent install, ever)
+
+    /// One line listing the extracted tree (relative paths, capped) — goes
+    /// into EVERY layout failure so the operator sees what the archive
+    /// really contained (round-39/42 lesson: third-party inner layouts are
+    /// DATA to verify per pin, never assumptions carried between versions).
+    static func extractedListing(of dir: URL, limit: Int = 12) -> String {
+        let fm = FileManager.default
+        guard let e = fm.enumerator(at: dir,
+                                    includingPropertiesForKeys: [.isRegularFileKey],
+                                    errorHandler: { _, _ in true }) else {
+            return "(unlistable)"
+        }
+        var names: [String] = []
+        while let item = e.nextObject() as? URL, names.count < limit {
+            let rel = item.path.replacingOccurrences(of: dir.path + "/", with: "")
+            names.append(rel)
+        }
+        return names.isEmpty ? "(empty)" : names.joined(separator: ", ")
+    }
+
+    /// Asserts the claim the install is about to log: the DESTINATION file
+    /// exists AND carries the extracted source's byte size (copyItem
+    /// preserves size; absence or mismatch is a pinned layout error with the
+    /// tree listing — never a silent half-install).
+    static func verifyInstallClaim(source: URL, destination: URL,
+                                   layer: String, listing: String) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: destination.path) else {
+            throw BootstrapError.unpackFailed(
+                layer: layer,
+                message: "install claim failed: extracted '\(source.path)' verified pre-copy, but the destination '\(destination.path)' does not exist — archive tree: \(listing)")
+        }
+        let srcSize = (try? fm.attributesOfItem(atPath: source.path))?[.size] as? Int
+        let dstSize = (try? fm.attributesOfItem(atPath: destination.path))?[.size] as? Int
+        if let src = srcSize, let dst = dstSize, src != dst {
+            throw BootstrapError.unpackFailed(
+                layer: layer,
+                message: "install claim failed: destination '\(destination.path)' is \(dst) bytes, extracted source was \(src) bytes — archive tree: \(listing)")
+        }
+    }
+
     /// Bootstrap everything the pinned manifest asks for. Idempotent: an
     /// existing receipt whose versions match the manifest short-circuits.
     @discardableResult
@@ -390,9 +432,13 @@ public final class RuntimeBootstrapper {
             }
         }
         let uvUnpack = try unpack(uvArchiveURL, kind: uv.kind, layer: "uv", commands: commands, log: log)
+        let uvListing = Self.extractedListing(of: uvUnpack.tempDir)
+        log.info("Layer uv: extracted archive tree: \(uvListing)")
         let uvInner = uvUnpack.tempDir.appendingPathComponent(uv.innerPath ?? "")
         guard FileManager.default.fileExists(atPath: uvInner.path) else {
-            throw BootstrapError.unpackFailed(layer: "uv", message: "expected binary at \(uv.innerPath ?? "?") inside the archive")
+            uvUnpack.cleanup()
+            throw BootstrapError.unpackFailed(layer: "uv",
+                message: "expected binary at \(uv.innerPath ?? "?") inside the archive — archive tree: \(uvListing)")
         }
         let uvBin = paths.binDir.appendingPathComponent("uv")
         if FileManager.default.fileExists(atPath: uvBin.path) {
@@ -400,10 +446,19 @@ public final class RuntimeBootstrapper {
         }
         try FileManager.default.copyItem(at: uvInner, to: uvBin)
         try makeExecutable(uvBin)
+        // Round-42: the install claim is VERIFIED against the destination
+        // (exists + byte size equal to the extracted binary) BEFORE it is
+        // logged — the Code=4 launch miss can never be a silent claim again.
+        try Self.verifyInstallClaim(source: uvInner, destination: uvBin,
+                                    layer: "uv", listing: uvListing)
         uvUnpack.cleanup()
         log.info("Runtime layer uv \(uv.version): installed at \(uvBin.path)")
 
         // --- layer 2: python via pinned uv, then the venv ---
+        guard FileManager.default.fileExists(atPath: uvBin.path) else {
+            throw BootstrapError.unpackFailed(layer: "uv",
+                message: "'\(uvBin.path)' vanished between install and launch (verified at install time—so a mid-bootstrap state destroyed it; disk state? sandboxed-path transposition?) — rt tree: \(Self.extractedListing(of: paths.rtDir))")
+        }
         _ = try commands.run(stage: "bootstrap-python",
                              launchPath: uvBin.path,
                              arguments: ["python", "install", manifest.pythonVersion],
@@ -440,29 +495,39 @@ public final class RuntimeBootstrapper {
         }
         try FileManager.default.createDirectory(at: paths.llamaTreeDir, withIntermediateDirectories: true)
         let llamaUnpack = try unpack(llamaArchiveURL, kind: llama.kind, layer: "llama-server", commands: commands, log: log)
-        // Locate the server binary inside the unpacked tree (archive root
-        // name changes with the tag — search, then assert exactly one).
-        let enumerator = FileManager.default.enumerator(at: llamaUnpack.tempDir, includingPropertiesForKeys: nil)
-        var found: [URL] = []
-        while let item = enumerator?.nextObject() as? URL {
-            if item.lastPathComponent == llama.binaryName { found.append(item) }
-        }
-        guard found.count == 1 else {
+        let llamaListing = Self.extractedListing(of: llamaUnpack.tempDir)
+        log.info("Layer llama-server: extracted archive tree: \(llamaListing)")
+        // Round-42: resolve via the MANIFEST inner path (the archive layout of
+        // record — replayed: llama-b11982/llama-server with the Metal dylibs
+        // beside it), never a guessed name search. The server's PARENT dir
+        // moves whole (the launcher needs its dylib siblings).
+        guard let llamaInner = llama.innerPath, !llamaInner.isEmpty else {
             llamaUnpack.cleanup()
             throw BootstrapError.unpackFailed(layer: "llama-server",
-                        message: "expected exactly one \(llama.binaryName ?? "binary") in the archive, found \(found.count)")
+                message: "manifest layer has no innerPath — the archive layout of record is missing from RuntimeManifest.json (layout facts come from a tar -tf replay per pin)")
         }
+        let llamaServerInner = llamaUnpack.tempDir.appendingPathComponent(llamaInner)
+        guard FileManager.default.fileExists(atPath: llamaServerInner.path) else {
+            llamaUnpack.cleanup()
+            throw BootstrapError.unpackFailed(layer: "llama-server",
+                message: "expected binary at \(llamaInner) inside the archive — archive tree: \(llamaListing)")
+        }
+        let serverDir = llamaServerInner.deletingLastPathComponent()
         let llamaBinTarget = paths.llamaTreeDir
             .appendingPathComponent(llama.version, isDirectory: true)
         if FileManager.default.fileExists(atPath: llamaBinTarget.path) {
             try FileManager.default.removeItem(at: llamaBinTarget)
         }
-        let serverDir = found[0].deletingLastPathComponent()
         try FileManager.default.createDirectory(at: llamaBinTarget.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try FileManager.default.moveItem(at: serverDir, to: llamaBinTarget)
+        // NOTE (round-42): `source` here was MOVED, not copied — the claim
+        // verify compares the destination against the INNER path we validated
+        // pre-move; copyItem-equivalence means equal sizes (byte-for-byte).
         let llamaServerBin = llamaBinTarget.appendingPathComponent(llama.binaryName ?? "llama-server")
         try makeExecutable(llamaServerBin)
+        try Self.verifyInstallClaim(source: llamaServerInner, destination: llamaServerBin,
+                                    layer: "llama-server", listing: llamaListing)
         let llamaLink = paths.binDir.appendingPathComponent(llama.binaryName ?? "llama-server")
         if FileManager.default.fileExists(atPath: llamaLink.path) {
             try FileManager.default.removeItem(at: llamaLink)

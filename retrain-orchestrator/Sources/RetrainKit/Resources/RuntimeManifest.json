@@ -1,8 +1,10 @@
 {
-  "manifestVersion": 1,
-  "generatedAt": "2026-10-29T16:45:00Z",
-  "generatorNote": "Pins fetched from the finder-of-record channels at authoring time (2026-10-29): uv + llama.cpp GitHub release APIs, torch PyPI JSON API. Never re-resolved at runtime — drift against this manifest is a mirrored event, not a silent upgrade. Python is provisioned BY the pinned uv (the uv release pins the cpython build channel it resolves from), so a fixed uv release fixes the python build.",
-  "python": { "version": "3.14" },
+  "manifestVersion": 2,
+  "generatedAt": "2026-10-30T13:00:00Z",
+  "generatorNote": "Pins fetched from the finder-of-record channels at authoring time (2026-10-29): uv + llama.cpp GitHub release APIs, torch PyPI JSON API. Never re-resolved at runtime — drift against this manifest is a mirrored event, not a silent upgrade. Python is provisioned BY the pinned uv (the uv release pins the cpython build channel it resolves from), so a fixed uv release fixes the python build. Round-42: layers carry innerPath (extract-relative executable path), verified by in-container tar -tf replay of the pinned bytes (uv 0.13.6: uv-aarch64-apple-darwin/uv; llama b11982: llama-b11982/llama-server with Metal dylibs beside it); the bootstrapper resolves via these fields and re-verifies the destination before any install claim.",
+  "python": {
+    "version": "3.14"
+  },
   "minFreeGB": 8,
   "layers": {
     "uv": {
@@ -22,7 +24,8 @@
       "bytes": 16463509,
       "kind": "tar.gz",
       "binaryName": "llama-server",
-      "note": "macOS arm64 assets moved zip → tar.gz; the archive carries the llama.cpp tree with its ggml dylibs, so the whole tree is unpacked and the launcher points into it."
+      "note": "macOS arm64 assets moved zip → tar.gz; the archive carries the llama.cpp tree with its ggml dylibs, so the whole tree is unpacked and the launcher points into it. innerPath added round-42 (replayed layout: the whole llama-b11982 dir moves — Metal dylibs beside the server binary).",
+      "innerPath": "llama-b11982/llama-server"
     },
     "torch": {
       "name": "torch",

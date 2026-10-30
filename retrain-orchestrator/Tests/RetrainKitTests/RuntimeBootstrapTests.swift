@@ -316,7 +316,8 @@ final class RuntimeBootstrapTests: XCTestCase {
                    "sha256": "\(uvSHA)", "bytes": 0, "kind": "tar.gz",
                    "innerPath": "uv-aarch64-apple-darwin/uv"},
             "llamaServer": {"name": "llama-server", "version": "\(llamaVersion)", "url": "fixture://llama.tar.gz",
-                   "sha256": "\(llamaSHA)", "bytes": 0, "kind": "tar.gz", "binaryName": "llama-server"},
+                   "sha256": "\(llamaSHA)", "bytes": 0, "kind": "tar.gz", "binaryName": "llama-server",
+                   "innerPath": "llama-b11982T/bin-macos-arm64/llama-server"},
             "torch": {"name": "torch", "version": "\(torchVersion)", "url": "fixture://wheelhost/torch-2.15.0T-cp314-fake.whl",
                    "sha256": "\(torchSHA)", "bytes": 0, "kind": "wheel"}
           }
@@ -437,6 +438,64 @@ final class RuntimeBootstrapTests: XCTestCase {
             XCTAssertEqual(error as? BootstrapError,
                            .commandFailed(layer: "trainer-requirements",
                                           message: "runtime receipt missing at \(paths.rtDir.appendingPathComponent("receipt.json").path) — refresh the runtime"))
+        }
+    }
+
+    func testInstallChainReachesLaunchRecordThroughTheRealDestination() async throws {
+        // Round-42 chain: sha-verified (fake) download → REAL tar unpack →
+        // manifest-innerPath resolve → chmod 0755 → destination verified →
+        // the NEXT stage launches the REAL on-disk destination (the launch
+        // record carries the installed path — the Code=4 miss class dies here).
+        let fixtures = try buildFixtures()
+        let manifest = try makeManifest(fixtures)
+        let fetcher = FakeArtifactFetcher(files: fixtures.files)
+        let commands = HybridCommands()
+        let bootstrapper = RuntimeBootstrapper(commands: commands, fetcher: fetcher)
+        let receipt = try await bootstrapper.ensureRuntime(manifest: manifest,
+                                                           containerDir: tmp, log: log)
+        // the INSTALLED uv is the exact byte carrier of the fixture's nested
+        // member, chmodded 0755
+        let installedUv = URL(fileURLWithPath: receipt.uvPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: installedUv.path))
+        let perms = (try? FileManager.default.attributesOfItem(atPath: installedUv.path))?[.posixPermissions] as? Int
+        XCTAssertEqual(perms, 0o755, "installed executables must be chmod 0755")
+        XCTAssertEqual(try String(contentsOf: installedUv, encoding: .utf8), "#!/bin/fake-uv")
+        // the launch RECORD proves the next stage used the destination path
+        XCTAssertTrue(commands.hasCall(prefix: receipt.uvPath, containing: "python"),
+                      "bootstrap-python must launch the INSTALLED uv at \(receipt.uvPath); calls: \(commands.calls)")
+        // llama server landed through its manifest innerPath with the dylib beside it
+        let paths = RuntimeBootstrapper.Paths.under(containerDir: tmp)
+        let llamaBin = URL(fileURLWithPath: receipt.llamaServerPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: llamaBin.path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: llamaBin.deletingLastPathComponent().appendingPathComponent("libggml.dylib").path))
+        XCTAssertTrue(commands.hasCall(prefix: receipt.uvPath, containing: "pip"))
+        _ = paths
+    }
+
+    func testWrongArchiveLayoutFailsWithTheExtractedTreeListing() async throws {
+        // the never-trust-inner-layout rule: a uv tarball with a DIFFERENT
+        // shape (flat binary instead of the recorded nested path) must fail
+        // with the extracted listing in the error — never a silent install.
+        let wrongLayout = try makeTarGz(members: ["uv": Data("#!/bin/fake-uv".utf8)], tag: "uv")
+        var fixtures = try buildFixtures()
+        fixtures = Fixtures(files: ["fixture://uv.tar.gz": wrongLayout,
+                                    "fixture://llama.tar.gz": fixtures.files["fixture://llama.tar.gz"]!,
+                                    "fixture://wheelhost/torch-2.15.0T-cp314-fake.whl": fixtures.files["fixture://wheelhost/torch-2.15.0T-cp314-fake.whl"]!],
+                            uvSHA: try sha256Hex(at: wrongLayout),
+                            llamaSHA: fixtures.llamaSHA,
+                            torchSHA: fixtures.torchSHA)
+        let manifest = try makeManifest(fixtures)
+        let fetcher = FakeArtifactFetcher(files: fixtures.files)
+        let bootstrapper = RuntimeBootstrapper(commands: HybridCommands(), fetcher: fetcher)
+        XCTAssertThrowsError(try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)) { error in
+            guard case BootstrapError.unpackFailed(let layer, let message) = error else {
+                return XCTFail("expected unpackFailed, got \(error)")
+            }
+            XCTAssertEqual(layer, "uv")
+            XCTAssertTrue(message.contains("uv-aarch64-apple-darwin/uv"), "the expected inner path is named: \(message)")
+            XCTAssertTrue(message.contains("archive tree:"), "the extracted tree is listed: \(message)")
+            XCTAssertTrue(message.contains("uv"), "the listing shows what WAS there: \(message)")
         }
     }
 
