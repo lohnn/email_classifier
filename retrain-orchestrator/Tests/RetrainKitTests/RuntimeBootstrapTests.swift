@@ -50,7 +50,9 @@ final class FetchLedger {
 
 final class FakeArtifactFetcher: ArtifactFetching {
     private let files: [String: URL]
-    private let ledger: FetchLedger
+    /// Introspection surface for the tests (intentionally not private —
+    /// FetchLedger's methods are the sync-safe read side; round-19).
+    let ledger: FetchLedger
 
     init(files: [String: URL], failuresRemaining: [String: Int] = [:]) {
         self.files = files
@@ -200,7 +202,7 @@ final class RuntimeBootstrapTests: XCTestCase {
     // MARK: tests
 
     func testInsufficientDiskFailsBeforeAnyDownload() async throws {
-        let manifest = makeManifest(minFreeGB: 1_000_000)  // impossible ask
+        let manifest = try makeManifest(minFreeGB: 1_000_000)  // impossible ask
         let fetcher = FakeArtifactFetcher(files: [:])
         let bootstrapper = RuntimeBootstrapper(commands: RecordingCommands(), fetcher: fetcher)
         do {
