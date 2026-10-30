@@ -43,9 +43,27 @@ cp ".build/release/$EXE" "$APP/Contents/MacOS/$EXE"
 # Products/…) — discover the bundle by NAME under .build, never assume one
 # path; a missing bundle would make Bundle.module fatalError AT LAUNCH
 # (process death, status icon gone) — so fail the BUILD loudly instead.
-RT_BUNDLE="$(/usr/bin/find .build -type d \( -name 'RetrainKit_RetrainKit.bundle' -o -name 'RetrainKit_*.bundle' \) 2>/dev/null | /usr/bin/head -1)"
+# Round-39 correction (name of record from the synced Intermediates tree):
+# the bundle is named <execTarget>_<resourceTarget>.bundle — on THIS SwiftPM
+# that is RetrainOrchestrator_RetrainKit.bundle (the old RetrainKit_* prefix
+# pattern never matched it). Match BOTH shapes, and accept only a candidate
+# that actually CONTAINS the manifest (a wrong-target bundle would ship
+# empty-handed exactly the way this gate exists to prevent).
+RT_BUNDLE=""
+# Release copies first (deterministic ordering — the Debug tree also carries
+# a copy inside the test runner's Resources; traversal order is not
+# guaranteed across filesystem invocations).
+for candidate in $(/usr/bin/find .build -type d \( -name 'RetrainOrchestrator_RetrainKit.bundle' -o -name '*_RetrainKit.bundle' -o -name 'RetrainKit_*.bundle' \) 2>/dev/null \
+        | /usr/bin/awk '/\/Release\// { print "1:" $0; next } { print "2:" $0 }' \
+        | /usr/bin/sort | /usr/bin/sed 's/^[12]://'); do
+    if /usr/bin/find "$candidate" -name 'RuntimeManifest.json' 2>/dev/null | /usr/bin/grep -q .; then
+        RT_BUNDLE="$candidate"
+        break
+    fi
+done
 if [ -z "$RT_BUNDLE" ]; then
-    echo "FATAL: no RetrainKit_*.bundle found under .build — the app would crash at launch (Bundle.module fatalError) without its resources." >&2
+    echo "FATAL: no RetrainKit resource bundle (carrying RuntimeManifest.json) found under .build —" >&2
+    echo "       the app would crash at launch (Bundle.module fatalError) without its resources." >&2
     exit 1
 fi
 echo "==> shipping resource bundle: $RT_BUNDLE"
@@ -93,12 +111,19 @@ spctl --assess --type execute "$APP" 2>/dev/null || \
 # dir — which surfaced as "the Erase target folder is empty" at runtime.
 # Assert presence here so that failure mode dies at build time.
 echo "==> assert resource bundle shipped (manifest = bootstrap's anchor)"
-if ! /bin/ls "$APP/Contents/Resources/" 2>/dev/null | /usr/bin/grep -q "RetrainKit_.*\.bundle"; then
-    echo "FATAL: RetrainKit_*.bundle missing from $APP/Contents/Resources —" >&2
+if ! /bin/ls "$APP/Contents/Resources/" 2>/dev/null | grep -Eq "(_RetrainKit|RetrainKit_).*\.bundle"; then
+    echo "FATAL: the RetrainKit resource bundle is missing from $APP/Contents/Resources —" >&2
     echo "       the runtime bootstrap could never locate its manifest." >&2
     exit 1
 fi
-echo "resource bundle shipped into Contents/Resources"
+# Content check (round-39): a bundle without the manifest passes name greps
+# and still crashes the app at launch — assert the file itself, at any depth.
+if [ -z "$(/usr/bin/find "$APP/Contents/Resources" -name 'RuntimeManifest.json' 2>/dev/null)" ]; then
+    echo "FATAL: RuntimeManifest.json missing inside the shipped resource bundle —" >&2
+    echo "       the runtime bootstrap's drift anchor would not exist." >&2
+    exit 1
+fi
+echo "resource bundle shipped into Contents/Resources (manifest verified)"
 
 echo "==> assert sandbox entitlements are embedded (assert, not imply)"
 ENT_DUMP="$(/usr/bin/codesign -d --entitlements - "$APP" 2>&1 || true)"
