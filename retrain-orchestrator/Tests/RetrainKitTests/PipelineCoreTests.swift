@@ -308,7 +308,7 @@ final class PipelineRunnerTests: XCTestCase {
     /// manufacture the pin-change / stale cases.
     @discardableResult
     private func materializeSnapshotSkeleton(tmp: URL,
-                                             requirements: String = Self.DEFAULT_REQS,
+                                             requirements: String = PipelineRunnerTests.DEFAULT_REQS,
                                              receiptSHA: String? = nil) throws -> URL {
         let brain = tmp.appendingPathComponent("workspace/email_classifier_brain", isDirectory: true)
         try FileManager.default.createDirectory(at: brain, withIntermediateDirectories: true)
