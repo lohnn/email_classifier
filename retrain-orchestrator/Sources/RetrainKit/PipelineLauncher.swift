@@ -87,11 +87,15 @@ public final class PipelineLauncher {
 
     /// Execute a launch pass. NEVER throws: every failure maps into a
     /// LaunchOutcome with pinned semantics — the app renders + mirrors.
+    /// `manifestProvider` overrides the launcher's injected manifest seam for
+    /// ONE execution (tests inject stub manifests here; production callers
+    /// use the default — the stored seam applies).
     public func execute(phase: LaunchPhase,
                         ledger: Ledger,
                         containerDir: URL,
                         runID: String,
-                        log: RunLog) async -> LaunchOutcome {
+                        log: RunLog,
+                        manifestProvider override: (() throws -> RuntimeManifest)? = nil) async -> LaunchOutcome {
         let state = ledger.load()
 
         // Setup gate (operator decision 2026-10-29: no default address —
@@ -107,7 +111,7 @@ public final class PipelineLauncher {
         let manifest: RuntimeManifest
         let receipt: RuntimeReceipt
         do {
-            manifest = try manifestProvider()
+            manifest = try (override ?? manifestProvider)()
             receipt = try await ensure.ensureRuntime(manifest: manifest,
                                                      containerDir: containerDir,
                                                      log: log)
