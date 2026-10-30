@@ -488,7 +488,12 @@ final class RuntimeBootstrapTests: XCTestCase {
         let manifest = try makeManifest(fixtures)
         let fetcher = FakeArtifactFetcher(files: fixtures.files)
         let bootstrapper = RuntimeBootstrapper(commands: HybridCommands(), fetcher: fetcher)
-        XCTAssertThrowsError(try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)) { error in
+        // Round-43: XCTAssertThrowsError's autoclosure cannot await — do/catch
+        // with a caught-error variable is the async-throws pattern here.
+        do {
+            _ = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
+            XCTFail("expected the wrong-layout uv archive to fail the bootstrap")
+        } catch {
             guard case BootstrapError.unpackFailed(let layer, let message) = error else {
                 return XCTFail("expected unpackFailed, got \(error)")
             }
