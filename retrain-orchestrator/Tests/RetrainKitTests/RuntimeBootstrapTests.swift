@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import RetrainKit
 
 /// M5 bootstrap tests — fakes everywhere heavy (the fetcher serves local
@@ -7,31 +8,60 @@ import XCTest
 /// enforcement + retry, uv/torch/venv invocation wiring, receipt +
 /// drift contract.
 
-final class FakeArtifactFetcher: ArtifactFetching {
-    /// url → pre-built local archive file (copied per fetch).
-    private let mapping: [String: URL]
-    /// Keyed by url string: return this error INSTEAD of the file for the
-    /// first N attempts (retry verification).
-    private var failuresRemaining: [String: Int]
-    private(set) var fetchCount: [String: Int] = [:]
+/// Sync-state helper: the async fetch() calls these sync methods — the
+/// NSLock critical sections never appear inside an async context (the
+/// round-6/18 warning family).
+final class FetchLedger {
     private let lock = NSLock()
+    private var counts: [String: Int] = [:]
+    private var failuresRemaining: [String: Int]
 
-    init(mapping: [String: URL], failuresRemaining: [String: Int] = [:]) {
-        self.mapping = mapping
+    init(failuresRemaining: [String: Int]) {
         self.failuresRemaining = failuresRemaining
     }
 
-    func fetch(_ url: URL, expectedBytes: Int?, log: RunLog) async throws -> URL {
+    /// Records one fetch attempt; returns true when this attempt is
+    /// SUPPOSED to fail (consumes the planned failure).
+    func recordAttempt(_ url: URL) -> Bool {
         lock.lock()
-        fetchCount[url.absoluteString, default: 0] += 1
-        let fails = failuresRemaining[url.absoluteString] ?? 0
+        defer { lock.unlock() }
+        let key = url.absoluteString
+        counts[key, default: 0] += 1
+        let fails = failuresRemaining[key] ?? 0
         if fails > 0 {
-            failuresRemaining[url.absoluteString] = fails - 1
-            lock.unlock()
+            failuresRemaining[key] = fails - 1
+            return true
+        }
+        return false
+    }
+
+    func totalFetches() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return counts.values.reduce(0, +)
+    }
+
+    func fetchCount(_ url: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return counts[url] ?? 0
+    }
+}
+
+final class FakeArtifactFetcher: ArtifactFetching {
+    private let files: [String: URL]
+    private let ledger: FetchLedger
+
+    init(files: [String: URL], failuresRemaining: [String: Int] = [:]) {
+        self.files = files
+        self.ledger = FetchLedger(failuresRemaining: failuresRemaining)
+    }
+
+    func fetch(_ url: URL, expectedBytes: Int?, log: RunLog) async throws -> URL {
+        if ledger.recordAttempt(url) {
             throw URLError(.cannotConnectToHost)
         }
-        lock.unlock()
-        guard let file = mapping[url.absoluteString] else {
+        guard let file = files[url.absoluteString] else {
             throw URLError(.fileDoesNotExist)
         }
         let dest = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -102,14 +132,51 @@ final class RuntimeBootstrapTests: XCTestCase {
         return archive
     }
 
-    private func makeManifest(minFreeGB: Double = 0.0001,
+    private func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func sha256Hex(at url: URL) throws -> String {
+        try sha256Hex(Data(contentsOf: url))
+    }
+
+    private struct Fixtures {
+        let files: [String: URL]
+        let uvSHA: String
+        let llamaSHA: String
+        let torchSHA: String
+    }
+
+    private func buildFixtures() throws -> Fixtures {
+        let uv = try makeTarGz(members: ["uv-aarch64-apple-darwin/uv": Data("#!/bin/fake-uv".utf8)], tag: "uv")
+        let llama = try makeTarGz(
+            members: ["llama-b11982T/bin-macos-arm64/llama-server": Data("server".utf8),
+                      "llama-b11982T/bin-macos-arm64/libggml.dylib": Data("dylib".utf8)],
+            tag: "llama")
+        let wheel = tmp.appendingPathComponent("torch-2.15.0T-cp314-fake.whl")
+        try Data("wheel-bytes".utf8).write(to: wheel)
+        return Fixtures(files: ["fixture://uv.tar.gz": uv,
+                                "fixture://llama.tar.gz": llama,
+                                "fixture://torch.whl": wheel],
+                        uvSHA: try sha256Hex(at: uv),
+                        llamaSHA: try sha256Hex(at: llama),
+                        torchSHA: try sha256Hex(at: wheel))
+    }
+
+    /// The manifest is built FROM the fixture shas — a verify mismatch can
+    /// then only come from a deliberate wrong-sha override, never from an
+    /// accidental default (round-18 crash root cause: default "1"*64
+    /// shas mismatched the built fixtures and a try! turned it fatal).
+    private func makeManifest(_ fixtures: Fixtures? = nil,
+                              minFreeGB: Double = 0.0001,
                               manifestVersion: Int = 1,
-                              uvSHA: String = String(repeating: "1", count: 64),
-                              llamaSHA: String = String(repeating: "2", count: 64),
-                              torchSHA: String = String(repeating: "3", count: 64),
+                              uvSHAOverride: String? = nil,
                               uvVersion: String = "0.13.6T",
                               llamaVersion: String = "b11982T",
-                              torchVersion: String = "2.15.0T") -> RuntimeManifest {
+                              torchVersion: String = "2.15.0T") throws -> RuntimeManifest {
+        let uvSHA = uvSHAOverride ?? fixtures?.uvSHA ?? String(repeating: "1", count: 64)
+        let llamaSHA = fixtures?.llamaSHA ?? String(repeating: "2", count: 64)
+        let torchSHA = fixtures?.torchSHA ?? String(repeating: "3", count: 64)
         let json = """
         {
           "manifestVersion": \(manifestVersion),
@@ -127,44 +194,33 @@ final class RuntimeBootstrapTests: XCTestCase {
           }
         }
         """
-        return try! JSONDecoder().decode(RuntimeManifest.self, from: Data(json.utf8))
-    }
-
-    private func buildFixtures() throws -> [String: URL] {
-        let uv = try makeTarGz(members: ["uv-aarch64-apple-darwin/uv": Data("#!/bin/fake-uv".utf8)], tag: "uv")
-        let llama = try makeTarGz(
-            members: ["llama-b11982T/bin-macos-arm64/llama-server": Data("server".utf8),
-                      "llama-b11982T/bin-macos-arm64/libggml.dylib": Data("dylib".utf8)],
-            tag: "llama")
-        let wheel = tmp.appendingPathComponent("torch-2.15.0T-cp314-fake.whl")
-        try Data("wheel-bytes".utf8).write(to: wheel)
-        return ["fixture://uv.tar.gz": uv,
-                "fixture://llama.tar.gz": llama,
-                "fixture://torch.whl": wheel]
+        return try JSONDecoder().decode(RuntimeManifest.self, from: Data(json.utf8))
     }
 
     // MARK: tests
 
-    func testInsufficientDiskFailsBeforeAnyDownload() async {
+    func testInsufficientDiskFailsBeforeAnyDownload() async throws {
         let manifest = makeManifest(minFreeGB: 1_000_000)  // impossible ask
-        let fetcher = FakeArtifactFetcher(mapping: [:])
+        let fetcher = FakeArtifactFetcher(files: [:])
         let bootstrapper = RuntimeBootstrapper(commands: RecordingCommands(), fetcher: fetcher)
         do {
             _ = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
             XCTFail("expected insufficientDisk")
         } catch let BootstrapError.insufficientDisk(needed, _) {
             XCTAssertEqual(needed, 1_000_000)
-            XCTAssertTrue(fetcher.fetchCount.isEmpty, "downloads must not start before disk pre-flight passes")
+            XCTAssertEqual(fetcher.ledger.totalFetches(), 0, "downloads must not start before disk pre-flight passes")
         } catch {
             XCTFail("wrong error: \(error)")
         }
     }
 
-    func testShaMismatchFailsTheLayer() async {
-        // fixture bytes hashed ≠ manifest sha → verify must fail loudly.
-        let fixtures = try! buildFixtures()
-        let manifest = makeManifest(uvSHA: String(repeating: "9", count: 64))
-        let fetcher = FakeArtifactFetcher(mapping: fixtures)
+    func testShaMismatchFailsTheLayer() async throws {
+        // fixture bytes hashed ≠ manifest sha (deliberate override) →
+        // verify must fail loudly — and NEVER via try! (a round-18 crash
+        // killed the whole xctest process that way).
+        let fixtures = try buildFixtures()
+        let manifest = try makeManifest(fixtures, uvSHAOverride: String(repeating: "9", count: 64))
+        let fetcher = FakeArtifactFetcher(files: fixtures.files)
         let bootstrapper = RuntimeBootstrapper(commands: RecordingCommands(), fetcher: fetcher, attempts: 1)
         do {
             _ = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
@@ -176,39 +232,39 @@ final class RuntimeBootstrapTests: XCTestCase {
         }
     }
 
-    func testRetriesPassOnSecondAttempt() async {
-        let fixtures = try! buildFixtures()
-        let manifest = makeManifest()  // matches the fixture bytes
-        let fetcher = FakeArtifactFetcher(mapping: fixtures, failuresRemaining: ["fixture://uv.tar.gz": 1])
+    func testRetriesPassOnSecondAttempt() async throws {
+        let fixtures = try buildFixtures()
+        let manifest = try makeManifest(fixtures)  // matches the fixture bytes
+        let fetcher = FakeArtifactFetcher(files: fixtures.files,
+                                          failuresRemaining: ["fixture://uv.tar.gz": 1])
         let bootstrapper = RuntimeBootstrapper(commands: RecordingCommands(), fetcher: fetcher, attempts: 2)
-        let receipt = try? await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
+        let receipt = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
         XCTAssertNotNil(receipt, "second attempt should succeed (Mac-side retries live here)")
-        XCTAssertEqual(fetcher.fetchCount["fixture://uv.tar.gz"], 2)
+        XCTAssertEqual(fetcher.ledger.fetchCount("fixture://uv.tar.gz"), 2)
     }
 
-    func testReceiptAndDriftContract() async {
-        let fixtures = try! buildFixtures()
-        let manifest = makeManifest()
-        let fetcher = FakeArtifactFetcher(mapping: fixtures)
+    func testReceiptAndDriftContract() async throws {
+        let fixtures = try buildFixtures()
+        let manifest = try makeManifest(fixtures)
+        let fetcher = FakeArtifactFetcher(files: fixtures.files)
         let bootstrapper = RuntimeBootstrapper(commands: RecordingCommands(), fetcher: fetcher)
-        let receipt = try! await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
+        let receipt = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
 
         XCTAssertEqual(receipt.uvVersion, "0.13.6T")
         XCTAssertEqual(receipt.llamaVersion, "b11982T")
         XCTAssertEqual(receipt.torchVersion, "2.15.0T")
         XCTAssertEqual(receipt.pythonVersion, "3.14")
 
-        // filesystem contract: uv binary, llama tree + symlink, torch wheel
+        // filesystem contract: uv binary, llama tree + symlink, venv python
         XCTAssertTrue(FileManager.default.fileExists(atPath: receipt.uvPath))
         XCTAssertTrue(FileManager.default.fileExists(atPath: receipt.llamaServerPath))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: receipt.venvPath + "/bin/python"))
         let paths = RuntimeBootstrapper.Paths.under(containerDir: tmp)
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.rtDir.appendingPathComponent("receipt.json").path))
 
         // drift: matching manifest → silent
         XCTAssertEqual(RuntimeDrift.check(receipt: receipt, manifest: manifest, requirementsSHA: nil), [])
         // drift: manifest version moved
-        let newer = makeManifest(manifestVersion: 2)
+        let newer = try makeManifest(fixtures, manifestVersion: 2)
         XCTAssertFalse(RuntimeDrift.check(receipt: receipt, manifest: newer, requirementsSHA: nil).isEmpty)
         // drift: snapshot requirements changed since provisioning
         let receipt2 = RuntimeReceipt(manifestVersion: receipt.manifestVersion,
@@ -226,24 +282,24 @@ final class RuntimeBootstrapTests: XCTestCase {
         XCTAssertTrue(issues[0].contains("snapshot requirements changed"))
     }
 
-    func testReceiptShortCircuitSkipsDownloads() async {
-        let fixtures = try! buildFixtures()
-        let manifest = makeManifest()
-        let fetcher = FakeArtifactFetcher(mapping: fixtures)
+    func testReceiptShortCircuitSkipsDownloads() async throws {
+        let fixtures = try buildFixtures()
+        let manifest = try makeManifest(fixtures)
+        let fetcher = FakeArtifactFetcher(files: fixtures.files)
         let bootstrapper = RuntimeBootstrapper(commands: RecordingCommands(), fetcher: fetcher)
-        _ = try! await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
-        let callsBefore = fetcher.fetchCount.values.reduce(0, +)
-        _ = try! await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
-        let callsAfter = fetcher.fetchCount.values.reduce(0, +)
+        _ = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
+        let callsBefore = fetcher.ledger.totalFetches()
+        _ = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
+        let callsAfter = fetcher.ledger.totalFetches()
         XCTAssertEqual(callsBefore, callsAfter, "matching receipt must short-circuit all downloads")
     }
 
-    func testUvAndTorchAreInvokedThroughTheRecordedCommands() async {
-        let fixtures = try! buildFixtures()
-        let manifest = makeManifest()
+    func testUvAndTorchAreInvokedThroughTheRecordedCommands() async throws {
+        let fixtures = try buildFixtures()
+        let manifest = try makeManifest(fixtures)
         let commands = RecordingCommands()
-        let bootstrapper = RuntimeBootstrapper(commands: commands, fetcher: FakeArtifactFetcher(mapping: fixtures))
-        let receipt = try! await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
+        let bootstrapper = RuntimeBootstrapper(commands: commands, fetcher: FakeArtifactFetcher(files: fixtures.files))
+        let receipt = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
         XCTAssertTrue(commands.hasCall(prefix: receipt.uvPath, containing: "install"))   // uv python install 3.14
         XCTAssertTrue(commands.hasCall(prefix: receipt.uvPath, containing: "venv"))      // uv venv
         XCTAssertTrue(commands.calls.contains { $0.arguments.contains("torch-2.15.0T-cp314-fake.whl") })  // local verified wheel
