@@ -160,7 +160,8 @@ public final class PipelineLauncher {
             workspaceDir: containerDir.appendingPathComponent("workspace"),
             runsDir: containerDir.appendingPathComponent("runs"),
             pythonBin: URL(fileURLWithPath: receipt.venvPath).appendingPathComponent("bin/python"),
-            llamaServerBin: URL(fileURLWithPath: receipt.llamaServerPath)
+            llamaServerBin: URL(fileURLWithPath: receipt.llamaServerPath),
+            uvBin: URL(fileURLWithPath: receipt.uvPath)
         )
 
         let result: PipelineRunResult

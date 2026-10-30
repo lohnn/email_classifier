@@ -168,6 +168,7 @@ final class PipelineLauncherTests: XCTestCase {
         XCTAssertEqual(config.pythonBin.path,
                        receipt.venvPath + "/bin/python")
         XCTAssertEqual(config.llamaServerBin.path, receipt.llamaServerPath)
+        XCTAssertEqual(config.uvBin.path, receipt.uvPath)
         XCTAssertEqual(config.workspaceDir, tmp.appendingPathComponent("workspace"))
         XCTAssertEqual(config.runsDir, tmp.appendingPathComponent("runs"))
         // production shape carries the isDirectory trailing component

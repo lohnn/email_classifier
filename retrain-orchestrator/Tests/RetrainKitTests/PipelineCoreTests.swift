@@ -301,6 +301,37 @@ final class FakeLlama: LlamaServing {
 }
 
 final class PipelineRunnerTests: XCTestCase {
+    /// Materializes the trainer-provision fixture: a snapshot-shape brain dir
+    /// with the pinned requirements file + a runtime receipt whose recorded
+    /// sha MATCHES the file (the satisfied state — the happy-path default, so
+    /// no test silently installs). `requirements` + `receiptSHA` let tests
+    /// manufacture the pin-change / stale cases.
+    @discardableResult
+    private func materializeSnapshotSkeleton(tmp: URL,
+                                             requirements: String = Self.DEFAULT_REQS,
+                                             receiptSHA: String? = nil) throws -> URL {
+        let brain = tmp.appendingPathComponent("workspace/email_classifier_brain", isDirectory: true)
+        try FileManager.default.createDirectory(at: brain, withIntermediateDirectories: true)
+        let reqFile = brain.appendingPathComponent("train_lora_requirements.txt")
+        try Data(requirements.utf8).write(to: reqFile)
+        var sha = receiptSHA
+        if receiptSHA == nil { sha = try PipelineRunner.fileSHA256(reqFile) }
+        let bootstrapper = RuntimeBootstrapper(commands: FakeCommands(),
+                                               fetcher: URLArtifactFetcher())
+        let paths = RuntimeBootstrapper.Paths.under(containerDir: tmp)
+        let receipt = RuntimeReceipt(
+            manifestVersion: 1, uvVersion: "0.13.6T",
+            pythonVersion: "3.14", llamaVersion: "b11982T", torchVersion: "2.15.0T",
+            uvPath: paths.binDir.appendingPathComponent("uv").path,
+            llamaServerPath: paths.binDir.appendingPathComponent("llama-server").path,
+            venvPath: paths.rtDir.appendingPathComponent("venv").path,
+            installedAt: Date(), snapshotRequirementsSHA: sha)
+        try RuntimeBootstrapper.writeReceipt(receipt, rtDir: paths.rtDir)
+        return reqFile
+    }
+
+    private static let DEFAULT_REQS = "peft==0.21.2\nsentence-transformers==6.1.0\ntransformers==5.19.0\n"
+
     private func makeConfig(tmp: URL, events: MirrorEventSink,
                             classifier: ClassifierServing,
                             commands: CommandRunning,
@@ -312,7 +343,8 @@ final class PipelineRunnerTests: XCTestCase {
             workspaceDir: tmp.appendingPathComponent("workspace"),
             runsDir: tmp.appendingPathComponent("runs"),
             pythonBin: URL(fileURLWithPath: "/usr/bin/python-fake"),
-            llamaServerBin: URL(fileURLWithPath: "/usr/bin/llama-server-fake")
+            llamaServerBin: URL(fileURLWithPath: "/usr/bin/llama-server-fake"),
+            uvBin: tmp.appendingPathComponent("rt/bin/uv")
         )
     }
 
@@ -363,6 +395,7 @@ final class PipelineRunnerTests: XCTestCase {
         let classifier = FakeClassifier(events: sink, snapshotArchive: tmp)
         let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
                                 commands: FakeCommands(), llama: FakeLlama())
+        try? materializeSnapshotSkeleton(tmp: tmp)
         let outcome = awaitSyncValue { await PipelineRunner().runTraining(config) }
         guard case .waitingForManualMerge(let state) = outcome else {
             return XCTFail("expected waitingForManualMerge, got \(outcome)")
@@ -387,6 +420,7 @@ final class PipelineRunnerTests: XCTestCase {
         let classifier = FakeClassifier(events: sink, snapshotArchive: tmp)
         let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
                                 commands: FakeCommands(), llama: FakeLlama())
+        try? materializeSnapshotSkeleton(tmp: tmp)
         _ = awaitSyncValue { await PipelineRunner().runTraining(config) }
         let outcome = awaitSyncValue { await PipelineRunner().resumeAfterMerge(config) }
         guard case .failed(let stage, let message) = outcome else {
@@ -405,6 +439,7 @@ final class PipelineRunnerTests: XCTestCase {
         let commands = FakeCommands()
         let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
                                 commands: commands, llama: llama)
+        try? materializeSnapshotSkeleton(tmp: tmp)
         _ = awaitSyncValue { await PipelineRunner().runTraining(config) }
 
         // The operator's merge lands the GGUF at the checkpoint path; the
@@ -432,5 +467,110 @@ final class PipelineRunnerTests: XCTestCase {
         let events = sink.snapshot()
         XCTAssertEqual(events.last?.event, .prOpened)
         XCTAssertTrue(events.last?.error?.contains("staged") == true)
+    }
+
+    // MARK: trainer-requirements stage (snapshot-driven provisioning, 2026-10-30)
+
+    func testTrainerRequirementsSatisfiedSkipsInstall() async {
+        let tmp = freshTmp()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let sink = MirrorEventSink()
+        let classifier = FakeClassifier(events: sink, snapshotArchive: tmp)
+        let commands = FakeCommands()
+        let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
+                                commands: commands, llama: FakeLlama())
+        try? materializeSnapshotSkeleton(tmp: tmp)  // receipt sha == file sha
+        var sawInstall = false
+        commands.onRun = { stage, _, _ in
+            if stage == "trainer-requirements" { sawInstall = true }
+        }
+        let outcome = awaitSyncValue { await PipelineRunner().runTraining(config) }
+        guard case .waitingForManualMerge = outcome else {
+            return XCTFail("expected waitingForManualMerge, got \(outcome)")
+        }
+        XCTAssertFalse(sawInstall, "satisfied pins must short-circuit the install")
+        // the bootstrapper receipt still records the ORIGINAL sha
+        let bootstrapper = RuntimeBootstrapper(commands: commands,
+                                               fetcher: URLArtifactFetcher())
+        let receipt = bootstrapper.readReceipt(
+            paths: RuntimeBootstrapper.Paths.under(containerDir: tmp))
+        XCTAssertEqual(receipt?.snapshotRequirementsSHA,
+                       try PipelineRunner.fileSHA256(config.brainDir
+                           .appendingPathComponent("train_lora_requirements.txt")))
+    }
+
+    func testTrainerRequirementsPinChangeReinstallsAndRecordsSHA() async throws {
+        let tmp = freshTmp()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let sink = MirrorEventSink()
+        let classifier = FakeClassifier(events: sink, snapshotArchive: tmp)
+        let commands = FakeCommands()
+        let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
+                                commands: commands, llama: FakeLlama())
+        let reqFile = try? materializeSnapshotSkeleton(tmp: tmp)
+        // the snapshot lands CHANGED pins: rewrite the file after the receipt
+        try? Data(DEFAULT_REQS.appending("peft==0.22.0\n").utf8)
+            .write(to: reqFile ?? config.brainDir
+                .appendingPathComponent("train_lora_requirements.txt"))
+        let uvBinURL = tmp.appendingPathComponent("rt/bin/uv")
+        try? FileManager.default.createDirectory(at: uvBinURL.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? Data("uv".utf8).write(to: uvBinURL)
+
+        var invoked: (stage: String, launchPath: String, args: [String])?
+        commands.onRun = { stage, launchPath, args in
+            if stage == "trainer-requirements" { invoked = (stage, launchPath, args) }
+        }
+        let outcome = awaitSyncValue { await PipelineRunner().runTraining(config) }
+        guard case .waitingForManualMerge = outcome else {
+            return XCTFail("expected waitingForManualMerge, got \(outcome)")
+        }
+        let call = try XCTUnwrap(invoked, "changed pins must reinstall")
+        XCTAssertEqual(call.launchPath, config.uvBin.path)
+        XCTAssertEqual(call.args,
+                       ["pip", "install", "--python", config.pythonBin.path, "-r",
+                        config.brainDir.appendingPathComponent("train_lora_requirements.txt").path])
+        // the receipt recorded the INSTALLED file's sha (auto-heal anchor)
+        let bootstrapper = RuntimeBootstrapper(commands: commands,
+                                               fetcher: URLArtifactFetcher())
+        let receipt = bootstrapper.readReceipt(
+            paths: RuntimeBootstrapper.Paths.under(containerDir: tmp))
+        XCTAssertEqual(receipt?.snapshotRequirementsSHA,
+                       try PipelineRunner.fileSHA256(reqFile ?? URL(fileURLWithPath: "/dev/null")))
+    }
+
+    func testTrainerRequirementsMissingFileAbortsActionably() async {
+        let tmp = freshTmp()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let sink = MirrorEventSink()
+        let classifier = FakeClassifier(events: sink, snapshotArchive: tmp)
+        let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
+                                commands: FakeCommands(), llama: FakeLlama())
+        // NO skeleton: the snapshot unpacked without the requirements file
+        let outcome = awaitSyncValue { await PipelineRunner().runTraining(config) }
+        guard case .failed(let stage, let message) = outcome else {
+            return XCTFail("expected failed, got \(outcome)")
+        }
+        XCTAssertEqual(stage, "trainer-requirements")
+        XCTAssertTrue(message.contains("snapshot is incomplete"), message)
+        XCTAssertTrue(sink.snapshot().contains { $0.event == .runFailed })
+    }
+
+    func testTrainerRequirementsMissingUvIsPinnedError() async {
+        let tmp = freshTmp()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let sink = MirrorEventSink()
+        let classifier = FakeClassifier(events: sink, snapshotArchive: tmp)
+        let config = makeConfig(tmp: tmp, events: sink, classifier: classifier,
+                                commands: FakeCommands(), llama: FakeLlama())
+        try? materializeSnapshotSkeleton(tmp: tmp, receiptSHA: "stale-sha")
+        // stale receipt sha ≠ file sha ⇒ install path ⇒ uv must exist; it does not
+        let outcome = awaitSyncValue { await PipelineRunner().runTraining(config) }
+        guard case .failed(let stage, let message) = outcome else {
+            return XCTFail("expected failed, got \(outcome)")
+        }
+        XCTAssertEqual(stage, "trainer-requirements")
+        XCTAssertTrue(message.contains("uv binary missing"), message)
+        XCTAssertTrue(sink.snapshot().contains { $0.event == .runFailed })
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// The P2 pipeline core (design §5, Mode A): pre-flight → snapshot → MPS
 /// LoRA train → [HUMAN MERGE CHECKPOINT] → Metal centroids on the merged
@@ -99,6 +100,9 @@ public struct PipelineConfiguration {
     public var pythonBin: URL
     /// Metal llama-server binary from the embedded runtime bootstrap (M5).
     public var llamaServerBin: URL
+    /// Pinned uv binary (bootstrap layer 1) — drives the idempotent
+    /// `uv pip install -r` of the snapshot's trainer-requirements pins.
+    public var uvBin: URL
 
     /// Non-conflicting local port for the lab llama-server (the Pi serves
     /// :8090; the historical lab default was :4503 — 4599 avoids both).
@@ -106,6 +110,9 @@ public struct PipelineConfiguration {
     public var trainTimeout: TimeInterval = 3 * 3600
     public var centroidsTimeout: TimeInterval = 2 * 3600
     public var llamaStartTimeout: TimeInterval = 900
+    /// Snapshot-driven trainer-stack install (transformers/peft + transitive —
+    /// hundreds-of-MB download class, consented like the bootstrap).
+    public var trainerProvisionTimeout: TimeInterval = 1800
 
     /// Merged-GGUF filename shipped to the classifier (their LLAMA_MODEL_FILE
     /// default name; the Pi path alignment rule is a P4 ship concern).
@@ -113,7 +120,8 @@ public struct PipelineConfiguration {
 
     public init(runID: String, classifier: ClassifierServing, commands: CommandRunning,
                 llama: LlamaServing, log: RunLog, containerDir: URL,
-                workspaceDir: URL, runsDir: URL, pythonBin: URL, llamaServerBin: URL) {
+                workspaceDir: URL, runsDir: URL, pythonBin: URL, llamaServerBin: URL,
+                uvBin: URL) {
         self.runID = runID
         self.classifier = classifier
         self.commands = commands
@@ -124,6 +132,7 @@ public struct PipelineConfiguration {
         self.runsDir = runsDir
         self.pythonBin = pythonBin
         self.llamaServerBin = llamaServerBin
+        self.uvBin = uvBin
     }
 
     public var runDir: URL { runsDir.appendingPathComponent(runID, isDirectory: true) }
@@ -219,6 +228,18 @@ public final class PipelineRunner {
             return await finishFailed("preflight/snapshot", error, config)
         }
 
+        // --- trainer requirements: snapshot-driven provisioning (2026-10-30) ---
+        // Idempotent install of the snapshot's train_lora_requirements.txt into
+        // the app venv (trainer + pins move as ONE snapshot unit; pin changes
+        // auto-heal here — never a halt). Runs BEFORE training, AFTER unpack.
+        do {
+            let stageStart = Date()
+            try Self.provisionTrainerRequirements(config)
+            durations["trainer-requirements"] = Date().timeIntervalSince(stageStart)
+        } catch {
+            return await finishFailed("trainer-requirements", error, config)
+        }
+
         // --- train: MPS LoRA pass (trainer contract: M7's train_lora.py) ---
         do {
             let stageStart = Date()
@@ -254,6 +275,70 @@ public final class PipelineRunner {
             config
         )
         return .waitingForManualMerge(state)
+    }
+
+    // MARK: trainer requirements (snapshot-driven, decision 2026-10-30)
+
+    /// Chunked file sha256 (stream-safe; same hashing discipline as the
+    /// bootstrap layers — update() is MUTATING, `var` hasher).
+    static func fileSHA256(_ url: URL) throws -> String {
+        var hasher = SHA256()
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Idempotent trainer-stack provision (coordinator decision 2026-10-30):
+    /// the requirements file RIDES THE SNAPSHOT (trainer + pins move as one
+    /// unit — no receipt-short-circuit skew); the receipt records the sha of
+    /// the INSTALLED file (`snapshotRequirementsSHA`); a later snapshot with
+    /// changed pins REINSTALLS here (auto-heal, never a halt). Install
+    /// failure = the run's pinned failure with the honest retry story (next
+    /// Run now) — never a silent half-state.
+    static func provisionTrainerRequirements(_ config: PipelineConfiguration) throws {
+        let reqFile = config.brainDir.appendingPathComponent("train_lora_requirements.txt")
+        guard FileManager.default.fileExists(atPath: reqFile.path) else {
+            throw StageError.failed(
+                stage: "trainer-requirements",
+                message: "train_lora_requirements.txt missing from the snapshot brain dir (\(config.brainDir.path)) — the snapshot is incomplete; re-run, and a persistent miss means the classifier-side snapshot file set changed (report it)")
+        }
+        let sha = try fileSHA256(reqFile)
+
+        let bootstrapper = RuntimeBootstrapper(commands: config.commands,
+                                               fetcher: URLArtifactFetcher())
+        let paths = RuntimeBootstrapper.Paths.under(containerDir: config.containerDir)
+        guard let receipt = bootstrapper.readReceipt(paths: paths) else {
+            throw StageError.failed(
+                stage: "trainer-requirements",
+                message: "no runtime receipt at \(paths.rtDir.appendingPathComponent("receipt.json").path) — the embedded runtime is not bootstrapped (Settings › Refresh runtime)")
+        }
+        if receipt.snapshotRequirementsSHA == sha {
+            config.log.info("trainer requirements satisfied (sha \(sha.prefix(12))) — skipping install")
+            return
+        }
+
+        guard FileManager.default.fileExists(atPath: config.uvBin.path) else {
+            throw StageError.failed(
+                stage: "trainer-requirements",
+                message: "uv binary missing at \(config.uvBin.path) — runtime bootstrap incomplete (Settings › Refresh runtime)")
+        }
+        let previous = receipt.snapshotRequirementsSHA
+        config.log.info(
+            "trainer package pins \(previous.map { String($0.prefix(12)) } ?? "never installed") → \(sha.prefix(12)): installing the pinned trainer stack into the venv (transformers/peft + transitive; hundreds-of-MB download class, same consented embedded-runtime bucket)")
+        _ = try config.commands.run(
+            stage: "trainer-requirements",
+            launchPath: config.uvBin.path,
+            arguments: ["pip", "install", "--python", config.pythonBin.path, "-r", reqFile.path],
+            workingDirectory: config.brainDir,
+            environment: [:],
+            log: config.log,
+            timeout: config.trainerProvisionTimeout
+        )
+        try bootstrapper.recordRequirementsSHA(sha, containerDir: config.containerDir)
+        config.log.info("trainer stack installed against snapshot pins (sha \(sha.prefix(12))) — recorded in the runtime receipt")
     }
 
     // MARK: ship pass (after the human merge)

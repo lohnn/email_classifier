@@ -494,11 +494,7 @@ public final class RuntimeBootstrapper {
             installedAt: Date(),
             snapshotRequirementsSHA: nil
         )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(receipt)
-        try data.write(to: paths.rtDir.appendingPathComponent("receipt.json"), options: .atomic)
+        try Self.writeReceipt(receipt, rtDir: paths.rtDir)
         log.warning("Runtime bootstrap COMPLETE: uv \(uv.version), python \(manifest.pythonVersion), llama \(llama.version), torch \(torch.version). Erase all data removes all of it.")
         return receipt
     }
@@ -510,11 +506,42 @@ public final class RuntimeBootstrapper {
         decoder.dateDecodingStrategy = .iso8601
         return try? decoder.decode(RuntimeReceipt.self, from: data)
     }
+
+    /// Persists an updated receipt (the pipeline records the installed
+    /// trainer-requirements SHA here after a successful install). Same codec
+    /// + atomic write as the bootstrap; throws if there is no receipt to
+    /// update (no bootstrap record = structural anomaly, never silently
+    /// fabricated).
+    public func recordRequirementsSHA(_ sha: String,
+                                      containerDir: URL) throws {
+        let paths = Paths.under(containerDir: containerDir)
+        guard var receipt = readReceipt(paths: paths) else {
+            throw BootstrapError.commandFailed(
+                layer: "trainer-requirements",
+                message: "runtime receipt missing at \(paths.rtDir.appendingPathComponent("receipt.json").path) — refresh the runtime")
+        }
+        receipt.snapshotRequirementsSHA = sha
+        try Self.writeReceipt(receipt, rtDir: paths.rtDir)
+    }
+
+    static func writeReceipt(_ receipt: RuntimeReceipt, rtDir: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(receipt)
+        try data.write(to: rtDir.appendingPathComponent("receipt.json"), options: .atomic)
+    }
 }
 
-/// Drift hook for later runs: runtime receipt vs pinned manifest + the
-/// snapshot's requirements (recorded by the pipeline). Mismatches are
-/// mirrored events (M6 wires the emit) — never silent upgrades.
+/// Drift hook for later runs: runtime receipt vs pinned manifest. Mismatches
+/// are mirrored events (M6 wires the emit) — never silent upgrades.
+/// NOTE (2026-10-30, coordinator decision): the SNAPSHOT trainer-requirements
+/// file is deliberately NOT a drift issue — the pipeline's
+/// trainer-requirements stage auto-heals pin changes (idempotent reinstall);
+/// it never halts the run. Only manifest-layer drift halts here.
+/// (`requirementsSHA` stays in the signature for call-site continuity; the
+/// mismatch is healed, and the sha recorded, by the runner's
+/// trainer-requirements stage — a halt here would defeat the auto-heal.)
 public enum RuntimeDrift {
     public static func check(receipt: RuntimeReceipt,
                              manifest: RuntimeManifest,
@@ -532,11 +559,7 @@ public enum RuntimeDrift {
         if let torch = manifest.torchLayer, receipt.torchVersion != torch.version {
             issues.append("torch \(receipt.torchVersion) ≠ pinned \(torch.version)")
         }
-        if let recorded = receipt.snapshotRequirementsSHA,
-           let wanted = requirementsSHA,
-           recorded != wanted {
-            issues.append("snapshot requirements changed since the venv was provisioned (\(recorded.prefix(12)) → \(wanted.prefix(12))) — refresh runtime")
-        }
+        _ = requirementsSHA
         return issues
     }
 }

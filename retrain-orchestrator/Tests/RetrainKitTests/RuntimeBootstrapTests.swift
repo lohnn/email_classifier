@@ -363,7 +363,9 @@ final class RuntimeBootstrapTests: XCTestCase {
         // drift: manifest version moved
         let newer = try makeManifest(fixtures, manifestVersion: 2)
         XCTAssertFalse(RuntimeDrift.check(receipt: receipt, manifest: newer, requirementsSHA: nil).isEmpty)
-        // drift: snapshot requirements changed since provisioning
+        // requirements drift is NOT a halt (2026-10-30 decision): the runner's
+        // trainer-requirements stage auto-heals changed pins by reinstalling —
+        // even a recorded old sha against a new sha yields NO drift issues.
         let receipt2 = RuntimeReceipt(manifestVersion: receipt.manifestVersion,
                                       uvVersion: receipt.uvVersion,
                                       pythonVersion: receipt.pythonVersion,
@@ -374,9 +376,32 @@ final class RuntimeBootstrapTests: XCTestCase {
                                       venvPath: receipt.venvPath,
                                       installedAt: receipt.installedAt,
                                       snapshotRequirementsSHA: "old-sha")
-        let issues = RuntimeDrift.check(receipt: receipt2, manifest: manifest, requirementsSHA: "new-sha")
-        XCTAssertEqual(issues.count, 1)
-        XCTAssertTrue(issues[0].contains("snapshot requirements changed"))
+        XCTAssertEqual(RuntimeDrift.check(receipt: receipt2, manifest: manifest,
+                                          requirementsSHA: "new-sha"), [])
+    }
+
+    func testRecordRequirementsSHARoundTripsThroughReceipt() async throws {
+        let fixtures = try buildFixtures()
+        let manifest = try makeManifest(fixtures)
+        let bootstrapper = RuntimeBootstrapper(commands: HybridCommands(),
+                                               fetcher: FakeArtifactFetcher(files: fixtures.files))
+        _ = try await bootstrapper.ensureRuntime(manifest: manifest, containerDir: tmp, log: log)
+        let paths = RuntimeBootstrapper.Paths.under(containerDir: tmp)
+
+        let sha = String(repeating: "f", count: 64)
+        try bootstrapper.recordRequirementsSHA(sha, containerDir: tmp)
+        let reread = bootstrapper.readReceipt(paths: paths)
+        XCTAssertEqual(reread?.snapshotRequirementsSHA, sha)
+        XCTAssertEqual(reread?.uvVersion, "0.13.6T", "unrelated receipt fields must survive")
+
+        // no receipt = structural anomaly, a pinned actionable error (never
+        // silently fabricated)
+        try? FileManager.default.removeItem(at: paths.rtDir.appendingPathComponent("receipt.json"))
+        XCTAssertThrowsError(try bootstrapper.recordRequirementsSHA(sha, containerDir: tmp)) { error in
+            XCTAssertEqual(error as? BootstrapError,
+                           .commandFailed(layer: "trainer-requirements",
+                                          message: "runtime receipt missing at \(paths.rtDir.appendingPathComponent("receipt.json").path) — refresh the runtime"))
+        }
     }
 
     func testReceiptShortCircuitSkipsDownloads() async throws {
