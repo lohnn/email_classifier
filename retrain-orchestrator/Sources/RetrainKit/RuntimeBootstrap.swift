@@ -72,6 +72,13 @@ public struct RuntimeReceipt: Codable, Equatable {
     public var snapshotRequirementsSHA: String?
 }
 
+/// Download-layer errors owned by the fetcher (URLError codes are NOT
+/// extended — .dataLengthExceeded doesn't exist on current SDKs, and
+/// squatting Apple's enum for our own meanings was the round-17 smell).
+public enum FetchError: Error, Equatable {
+    case sizeMismatch(expected: Int, actual: Int)
+}
+
 public enum BootstrapError: Error, Equatable {
     case invalidManifest(String)
     case insufficientDisk(neededGB: Double, availableGB: Double)
@@ -114,7 +121,7 @@ public final class URLArtifactFetcher: ArtifactFetching {
                    let attrs = try? FileManager.default.attributesOfItem(atPath: temp.path),
                    let size = attrs[.size] as? Int, size != expected {
                     log.warning("Layer download size mismatch (got \(size), manifest says \(expected)) — re-fetching")
-                    throw URLError(.dataLengthExceeded)
+                    throw FetchError.sizeMismatch(expected: expected, actual: size)
                 }
                 return temp
             } catch {
@@ -191,7 +198,7 @@ public final class RuntimeBootstrapper {
         defer { try? FileManager.default.removeItem(at: archive) }
 
         // Chunked hashing (stream-safe for a 132 MB wheel).
-        let hasher = SHA256()
+        var hasher = SHA256()
         let handle = try FileHandle(forReadingFrom: archive)
         defer { try? handle.close() }
         while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
