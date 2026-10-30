@@ -334,7 +334,7 @@ final class PipelineRunnerTests: XCTestCase {
         // fixture self-check: a fixture that silently fails LIES (never
         // again — this assert fires in-harness if the write didn't land)
         XCTAssert(FileManager.default.fileExists(
-            paths.rtDir.appendingPathComponent("receipt.json").path),
+            atPath: paths.rtDir.appendingPathComponent("receipt.json").path),
             "materializeSnapshotSkeleton: receipt write did not land")
         return reqFile
     }
