@@ -516,6 +516,11 @@ public final class ProcessLlamaServer: LlamaServing {
             "--host", "127.0.0.1",
             "--embedding",
             "--pooling", "mean",
+            // W-132 #3 / FINDINGS §16 serve flags: --embedding mode rejects any
+            // single input over the default ubatch (512 tokens) with HTTP 500 —
+            // the §16-validated serve block carries --ubatch-size 2048 for
+            // email-length inputs; the centroids build embeds exactly those.
+            "--ubatch-size", "2048",
         ]
         let pipe = Pipe()
         started.standardOutput = pipe
