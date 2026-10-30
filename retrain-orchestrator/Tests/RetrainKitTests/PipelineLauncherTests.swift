@@ -121,8 +121,10 @@ final class PipelineLauncherTests: XCTestCase {
             runID: "r", vocabBranch: "vocab/r", vocabPushed: true,
             stagedGGUFBytes: 1, dataSHA: "d", durations: [:])))
         // v1 stub vs v99 receipt: drift BY DESIGN in the stub, not ambient.
+        // Explicit self. in the escaping closure (round 35); stubManifest is
+        // non-throwing — no try! marker (UnnecessaryEffectMarker).
         let launcher = PipelineLauncher(ensure: ensure, pipeline: pipeline,
-                                        manifestProvider: { try! stubManifest(manifestVersion: 1) })
+                                        manifestProvider: { self.stubManifest(manifestVersion: 1) })
         let outcome = await launcher.execute(phase: .train, ledger: ledger,
                                              containerDir: tmp, runID: "run-1", log: log)
         XCTAssertEqual(outcome.headline, "Runtime drift — run halted")
@@ -156,7 +158,7 @@ final class PipelineLauncherTests: XCTestCase {
 
         let outcome = await launcher.execute(phase: .train, ledger: ledger,
                                              containerDir: tmp, runID: "run-1", log: log,
-                                             manifestProvider: { stubManifest() })
+                                             manifestProvider: { self.stubManifest() })
         XCTAssertEqual(outcome.headline, "Retrain run completed")
         XCTAssertFalse(outcome.pinnedFailure)
         XCTAssertEqual(outcome.dotReachable, true)
@@ -186,7 +188,7 @@ final class PipelineLauncherTests: XCTestCase {
         let launcher = PipelineLauncher(ensure: ensure, pipeline: pipeline)
         let outcome = await launcher.execute(phase: .resume, ledger: ledger,
                                              containerDir: tmp, runID: "run-1", log: log,
-                                             manifestProvider: { stubManifest() })
+                                             manifestProvider: { self.stubManifest() })
         XCTAssertEqual(outcome.headline, "Retrain run completed")
         XCTAssertEqual(pipeline.configs.first?.runID, "run-1")
     }
