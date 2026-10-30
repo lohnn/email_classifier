@@ -52,7 +52,11 @@ public final class PipelineLauncher {
     private let pipeline: PipelineEvolving
     private let provideClassifier: ClassifierProvider
     /// Seam for tests: production defaults to the defensive locator.
-    private let provideManifest: () throws -> RuntimeManifest
+    /// (Round-32 consolidation: ONE name — the init param and this property
+    /// must be the same identifier; `bundled` is invoked inside a closure,
+    /// never referenced as a value — its injectable-roots default-arg shape
+    /// cannot coerce to the zero-arg seam type.)
+    private let manifestProvider: () throws -> RuntimeManifest
     private let commands: CommandRunning
     /// Optional: nil → the launcher builds a ProcessLlamaServer from the
     /// receipt's llama-server path at execution time.
@@ -65,14 +69,14 @@ public final class PipelineLauncher {
                 provideClassifier: @escaping ClassifierProvider = { url in
                     try ClassifierClient(baseURL: url)
                 },
-                manifestProvider: @escaping () throws -> RuntimeManifest = RuntimeManifest.bundled,
+                manifestProvider: @escaping () throws -> RuntimeManifest = { try RuntimeManifest.bundled() },
                 attempts: Int = 2) {
         self.ensure = ensure ?? RuntimeBootstrapper(commands: commands,
                                                     fetcher: URLArtifactFetcher(),
                                                     attempts: attempts)
         self.pipeline = pipeline ?? PipelineRunner()
         self.provideClassifier = provideClassifier
-        self.provideManifest = provideManifest
+        self.manifestProvider = manifestProvider
         self.commands = commands
         self.llama = llama
         self.attempts = attempts
@@ -103,7 +107,7 @@ public final class PipelineLauncher {
         let manifest: RuntimeManifest
         let receipt: RuntimeReceipt
         do {
-            manifest = try provideManifest()
+            manifest = try manifestProvider()
             receipt = try await ensure.ensureRuntime(manifest: manifest,
                                                      containerDir: containerDir,
                                                      log: log)
