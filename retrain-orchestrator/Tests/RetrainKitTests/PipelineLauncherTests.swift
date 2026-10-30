@@ -61,9 +61,12 @@ final class PipelineLauncherTests: XCTestCase {
     }
 
     private func makeReceipt(manifestVersion: Int = 1) -> RuntimeReceipt {
+        // Versions match the COMMITTED manifest — RuntimeDrift.check tests
+        // with these must pass; drift tests manufacture mismatches via
+        // manifestVersion instead.
         RuntimeReceipt(manifestVersion: manifestVersion,
-                       uvVersion: "0.13.6T", pythonVersion: "3.14",
-                       llamaVersion: "b11982T", torchVersion: "2.15.0T",
+                       uvVersion: "0.13.6", pythonVersion: "3.14",
+                       llamaVersion: "b11982", torchVersion: "2.15.0",
                        uvPath: tmp.appendingPathComponent("uv").path,
                        llamaServerPath: tmp.appendingPathComponent("llama-server").path,
                        venvPath: tmp.appendingPathComponent("venv").path,
